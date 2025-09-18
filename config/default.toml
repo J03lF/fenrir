@@ -1,0 +1,42 @@
+app = { name = "fenrir", version = "0.1.0" }
+
+[server]
+enable_http = false
+enable_grpc = false
+
+[server.ssh]
+host = "127.0.0.1"
+port = 2222
+user = "test"
+server_name = "fenrir_1_0_0"
+idle_close_seconds = 30
+
+[server.http]
+host = "127.0.0.1"
+port = 8080
+
+[security]
+allowed_ciphers = ["AES-GCM", "XChaCha20-Poly1305"]
+
+[security.kdf]
+algorithm = "argon2id"
+
+[security.jwt]
+issuer = "fenrir"
+audience = "fenrir-clients"
+exp_seconds = 3600
+
+[db]
+default_engine = "postgres"
+
+[telemetry]
+tracing_level = "info"
+metrics_enabled = false
+health_enabled = true
+
+[audit]
+enabled = true
+
+[cli]
+prompt_theme = "default"
+

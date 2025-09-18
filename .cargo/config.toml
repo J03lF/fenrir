@@ -1,0 +1,4 @@
+[alias]
+dev = "run"
+check-config = "run -- --check-config"
+lint = "clippy -- -D warnings"

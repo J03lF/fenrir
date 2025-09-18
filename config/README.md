@@ -1,0 +1,40 @@
+Configuration quickstart
+
+1) Username/Host/Port
+   - Set in `config/default.toml` under `[server.ssh]`:
+     - `user` (e.g., `test`)
+     - `host` (e.g., `127.0.0.1`)
+     - `port` (e.g., `2222`)
+
+2) Password (ENV only)
+   - Set `FENRIR_SSH_PASSWORD` in your shell before starting the server:
+```
+export FENRIR_SSH_PASSWORD='your-secret-password'
+```
+
+3) Validate config
+```
+cargo check-config
+```
+
+4) Start server
+```
+cargo run
+```
+
+5) SSH login
+```
+ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+    ${USER_FROM_CONFIG}@${HOST_FROM_CONFIG} -p ${PORT_FROM_CONFIG}
+
+z.B: ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no test@127.0.0.1 -p 2222
+```
+
+Troubleshooting
+- Host key changed warning: remove old key and re-scan
+```
+ssh-keygen -R "[127.0.0.1]:2222"
+ssh-keyscan -p 2222 127.0.0.1 >> ~/.ssh/known_hosts
+```
+- Permission denied: ensure `FENRIR_SSH_PASSWORD` matches the password you type.
+

@@ -1,0 +1,63 @@
+---
+description: "To-Do Roadmap für Cursor AI – Tickets-Backend (Monolith)"
+alwaysApply: true
+---
+
+# To-Do Roadmap für Backend
+
+Dieses Projekt ist ein Rust-Monolith für ein Ticketsystem mit eigenem CLI, SSH-Server, Multi-DB und dynamischen Commands.
+
+## Wichtigste Schritte für Cursor
+1. **Config zuerst**
+   - Lade config/*.toml + ENV
+   - Validiere früh, keine Secrets hardcoden
+   - Expose Settings als typisierte Structs
+
+2. **Security früh aufsetzen**
+   - Crypto-Layer (AEAD, RNG, KDF)
+   - Auth mit User/Pass, Sessions, RBAC
+   - Audit-Events überall
+
+3. **DB-Adapter bauen**
+   - Start mit Postgres
+   - Einheitliches Trait für Query/Tx
+   - Später MySQL, SQLite, Mongo
+
+4. **CLI bauen**
+   - Login-Flow mit Session
+   - Prompt mit dynamischer Registry
+   - Builtin-Commands: help, services, db-shell, exit
+   - db-shell: eigener Prompt `db:` mit Query-Dispatch
+
+5. **SSH-Transport**
+   - SSH-Server starten, PTY öffnen
+   - CLI-Shell als Session einhängen
+
+6. **Services implementieren**
+   - Ticket-Service (CRUD, Search)
+   - User-Service (Roles, Auth, CRUD)
+
+7. **Observability**
+   - Logging + Tracing
+   - Metrics + Health
+
+8. **Tests**
+   - Unit-Tests Domain/Services
+   - Integration: CLI + DB + SSH
+   - E2E: kompletter Flow
+
+9. **Deployment**
+   - Docker-Image
+   - Systemd/K8s Manifeste
+   - Versioning
+
+## Style & Struktur
+- Alles im `src/` sauber in Ordnern (`config`, `domain`, `infra`, `cli`, `security`, `services`)
+- Jeder CLI-Command als eigener Ordner unter `src/cli/commands/builtins/*`
+- Keine Secrets im Code, nur ENV/Secret Store
+
+## Erwartung an Cursor
+- Vorschläge für modularen, sauberen Code
+- Strikte Trennung von Domain, Infra, CLI
+- Sicherheits-Praktiken immer beachten (kein Plain-Pass, keine Secrets in Logs)
+- CLI dynamisch: neue Commands einfach per Ordner hinzufügbar

@@ -10,7 +10,9 @@ impl PostgresAdapter {
 }
 
 impl Default for PostgresAdapter {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Database for PostgresAdapter {

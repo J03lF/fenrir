@@ -31,6 +31,7 @@ pub struct SshConfig {
     pub port: u16,
     pub user: String,
     pub server_name: String,
+    pub host_key_path: String,
     pub idle_close_seconds: Option<u64>,
 }
 
@@ -120,7 +121,18 @@ pub fn validate(cfg: &AppConfig) -> Result<(), ConfigError> {
     if cfg.security.jwt.exp_seconds == 0 {
         return Err(ConfigError::Invalid("security.jwt.exp_seconds must be > 0"));
     }
-    if let Some(s) = cfg.server.ssh.idle_close_seconds { if s == 0 { return Err(ConfigError::Invalid("server.ssh.idle_close_seconds must be > 0 if set")); } }
+    if let Some(s) = cfg.server.ssh.idle_close_seconds {
+        if s == 0 {
+            return Err(ConfigError::Invalid(
+                "server.ssh.idle_close_seconds must be > 0 if set",
+            ));
+        }
+    }
+    if cfg.server.ssh.host_key_path.trim().is_empty() {
+        return Err(ConfigError::Invalid(
+            "server.ssh.host_key_path must not be empty",
+        ));
+    }
     Ok(())
 }
 

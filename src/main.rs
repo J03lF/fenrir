@@ -38,13 +38,16 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    println!("{} v{} started", ctx.config.app.name, ctx.config.app.version);
+    println!(
+        "{} v{} started",
+        ctx.config.app.name, ctx.config.app.version
+    );
     if let Err(e) = fenrir::boot::start_transports(&ctx).await {
         eprintln!("transport init failed: {e}");
     }
 
     if args.cli {
-        if let Err(e) = fenrir::cli::shell::run_shell() {
+        if let Err(e) = fenrir::cli::shell::run_shell(&ctx.config) {
             eprintln!("cli error: {e}");
         }
     } else {

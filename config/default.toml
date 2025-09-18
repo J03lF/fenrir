@@ -1,4 +1,4 @@
-app = { name = "fenrir", version = "0.1.0" }
+app = { name = "fenrir", version = "0.1.2" }
 
 [server]
 enable_http = false
@@ -8,7 +8,8 @@ enable_grpc = false
 host = "127.0.0.1"
 port = 2222
 user = "test"
-server_name = "fenrir_1_0_0"
+server_name = "fenrir-Test"
+host_key_path = "keys/server/ssh/host_ed25519"
 idle_close_seconds = 30
 
 [server.http]
@@ -39,4 +40,3 @@ enabled = true
 
 [cli]
 prompt_theme = "default"
-

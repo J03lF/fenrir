@@ -1,5 +1,5 @@
 use crate::config::{self, AppConfig};
-use crate::infra::{logging, telemetry, ssh};
+use crate::infra::{logging, ssh, telemetry};
 use anyhow::Result;
 
 pub struct BootContext {
@@ -18,7 +18,9 @@ pub async fn start_transports(ctx: &BootContext) -> Result<()> {
     // Start SSH server (blocking future) on its own task
     let cfg = ctx.config.clone();
     tokio::spawn(async move {
-        if let Err(e) = ssh::start(&cfg).await { tracing::error!(error=%e, "ssh server exited with error"); }
+        if let Err(e) = ssh::start(&cfg).await {
+            tracing::error!(error=%e, "ssh server exited with error");
+        }
     });
     Ok(())
 }

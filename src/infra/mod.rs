@@ -1,4 +1,4 @@
 pub mod db;
 pub mod logging;
-pub mod telemetry;
 pub mod ssh;
+pub mod telemetry;

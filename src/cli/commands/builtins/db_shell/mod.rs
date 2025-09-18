@@ -1,7 +1,34 @@
+use crate::cli::commands::registry::{
+    CommandEntry, CommandOutcome, CommandRegistry, ShellEnvironment,
+};
+use crate::config::AppConfig;
 use rustyline::{error::ReadlineError, DefaultEditor};
 use std::io::{self, Write};
 
-pub fn run_db_shell() -> io::Result<()> {
+pub fn command() -> CommandEntry {
+    CommandEntry::new("db-shell", "Öffnet die Datenbank-Subshell", handle)
+}
+
+fn handle(
+    _config: &AppConfig,
+    _args: &[&str],
+    _registry: &CommandRegistry,
+    out: &mut dyn Write,
+    env: ShellEnvironment,
+) -> io::Result<CommandOutcome> {
+    match env {
+        ShellEnvironment::Cli => {
+            writeln!(out, "Starte DB-Shell ...")?;
+            Ok(CommandOutcome::EnterDbShell)
+        }
+        ShellEnvironment::Ssh => {
+            writeln!(out, "Wechsle in DB-Shell (Stub)")?;
+            Ok(CommandOutcome::EnterDbShell)
+        }
+    }
+}
+
+pub fn run_local_db_shell() -> io::Result<()> {
     let mut stdout = io::stdout();
     writeln!(
         &mut stdout,
@@ -18,11 +45,15 @@ pub fn run_db_shell() -> io::Result<()> {
                     continue;
                 }
 
-                editor.add_history_entry(cmd);
+                let _ = editor.add_history_entry(cmd);
                 match cmd {
                     "exit" => break,
                     "help" => writeln!(&mut stdout, "db-shell: stub. commands: help, exit")?,
-                    _ => writeln!(&mut stdout, "stub: received '{}', no DB connected yet", cmd)?,
+                    _ => writeln!(
+                        &mut stdout,
+                        "stub: received '{}' - keine Datenbank verbunden",
+                        cmd
+                    )?,
                 }
             }
             Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => break,

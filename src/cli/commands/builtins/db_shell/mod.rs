@@ -1,23 +1,44 @@
+use rustyline::{error::ReadlineError, DefaultEditor};
 use std::io::{self, Write};
 
 pub fn run_db_shell() -> io::Result<()> {
-    let stdin = io::stdin();
     let mut stdout = io::stdout();
-    let mut line = String::new();
+    writeln!(
+        &mut stdout,
+        "DB-Shell (Stub) gestartet. Tippe 'help' für Befehle oder 'exit' zum Beenden."
+    )?;
+
+    let mut editor = DefaultEditor::new().map_err(map_readline_error)?;
+
     loop {
-        line.clear();
-        write!(stdout, "db: ")?;
-        stdout.flush()?;
-        if stdin.read_line(&mut line)? == 0 {
-            break;
-        }
-        let cmd = line.trim();
-        match cmd {
-            "exit" => break,
-            "help" => writeln!(stdout, "db-shell: stub. commands: help, exit")?,
-            _ if cmd.is_empty() => {}
-            _ => writeln!(stdout, "stub: received '{}', no DB connected yet", cmd)?,
+        match editor.readline("db: ") {
+            Ok(line) => {
+                let cmd = line.trim();
+                if cmd.is_empty() {
+                    continue;
+                }
+
+                editor.add_history_entry(cmd);
+                match cmd {
+                    "exit" => break,
+                    "help" => writeln!(&mut stdout, "db-shell: stub. commands: help, exit")?,
+                    _ => writeln!(&mut stdout, "stub: received '{}', no DB connected yet", cmd)?,
+                }
+            }
+            Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => break,
+            Err(ReadlineError::Io(err)) => return Err(err),
+            Err(err) => {
+                writeln!(&mut stdout, "Eingabefehler: {err}")?;
+                break;
+            }
         }
     }
     Ok(())
+}
+
+fn map_readline_error(err: ReadlineError) -> io::Error {
+    match err {
+        ReadlineError::Io(err) => err,
+        other => io::Error::new(io::ErrorKind::Other, other.to_string()),
+    }
 }

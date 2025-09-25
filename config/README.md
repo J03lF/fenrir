@@ -40,3 +40,4 @@ ssh-keyscan -p 2222 127.0.0.1 >> ~/.ssh/known_hosts
 
 postgresql://<USER>:<PASSWORD>@<HOST>:<PORT>/<DBNAME>
 export FENRIR_DB_POSTGRES_URI=postgresql://root:1234@localhost:5432/postgres
+export FENRIR_SSH_PASSWORD=test

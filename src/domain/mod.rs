@@ -1,1 +1,1 @@
-// Domain entities, value objects, ports (traits). No IO.
+pub mod db;

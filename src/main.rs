@@ -1,4 +1,5 @@
 use clap::Parser;
+use std::sync::Arc;
 
 #[derive(Parser, Debug)]
 #[command(name = "fenrir")]
@@ -47,7 +48,9 @@ async fn main() {
     }
 
     if args.cli {
-        if let Err(e) = fenrir::cli::shell::run_shell(&ctx.config) {
+        if let Err(e) =
+            fenrir::cli::shell::run_shell(Arc::clone(&ctx.config), Arc::clone(&ctx.services))
+        {
             eprintln!("cli error: {e}");
         }
     } else {

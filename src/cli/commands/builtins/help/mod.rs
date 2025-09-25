@@ -1,7 +1,6 @@
 use crate::cli::commands::registry::{
-    CommandEntry, CommandOutcome, CommandRegistry, ShellEnvironment,
+    CliDependencies, CommandEntry, CommandOutcome, CommandRegistry, ShellEnvironment,
 };
-use crate::config::AppConfig;
 use std::io::{self, Write};
 
 pub fn command() -> CommandEntry {
@@ -13,7 +12,7 @@ pub fn command() -> CommandEntry {
 }
 
 fn handle(
-    _config: &AppConfig,
+    _deps: &CliDependencies,
     args: &[&str],
     registry: &CommandRegistry,
     out: &mut dyn Write,

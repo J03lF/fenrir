@@ -3,10 +3,12 @@ use super::registry::CommandRegistry;
 pub mod db_shell;
 pub mod exit;
 pub mod help;
+pub mod services;
 
 pub fn register_builtins(registry: &mut CommandRegistry) {
     registry.register(help::command());
     registry.register(db_shell::command());
+    registry.register(services::command());
     registry.register(exit::command());
 }
 

@@ -38,3 +38,5 @@ ssh-keyscan -p 2222 127.0.0.1 >> ~/.ssh/known_hosts
 ```
 - Permission denied: ensure `FENRIR_SSH_PASSWORD` matches the password you type.
 
+postgresql://<USER>:<PASSWORD>@<HOST>:<PORT>/<DBNAME>
+export FENRIR_DB_POSTGRES_URI=postgresql://root:1234@localhost:5432/postgres

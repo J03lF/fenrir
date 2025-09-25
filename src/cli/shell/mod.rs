@@ -1,24 +1,39 @@
 use crate::cli::commands::builtins;
-use crate::cli::commands::registry::{CommandOutcome, CommandStatus, ShellEnvironment};
+use crate::cli::commands::registry::{
+    CliDependencies, CommandOutcome, CommandStatus, ShellEnvironment,
+};
+use crate::cli::completion::SimpleCompleter;
 use crate::config::AppConfig;
 use crate::prompts;
-use rustyline::{error::ReadlineError, DefaultEditor};
+use crate::services::{AppServices, ServiceStatus};
+use rustyline::history::{DefaultHistory, History};
+use rustyline::{error::ReadlineError, Editor};
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 
-pub fn run_shell(config: &AppConfig) -> io::Result<()> {
+pub fn run_shell(config: Arc<AppConfig>, services: Arc<AppServices>) -> io::Result<()> {
     let mut stdout = io::stdout();
     // Clear screen and position cursor in the top left before showing the banner.
     write!(&mut stdout, "{}", prompts::clear_screen_sequence())?;
     writeln!(&mut stdout, "{}", prompts::banner())?;
-    writeln!(&mut stdout, "{}", prompts::welcome_line(config))?;
+    writeln!(&mut stdout, "{}", prompts::welcome_line(config.as_ref()))?;
 
     let registry = builtins::build_registry();
+    let dependencies = CliDependencies::new(Arc::clone(&config), Arc::clone(&services));
 
-    let mut editor = DefaultEditor::new().map_err(map_readline_error)?;
+    services.registry().set_status(
+        "cli-shell",
+        ServiceStatus::Active,
+        Some(format!("lokale Sitzung pid={}", std::process::id())),
+    );
+
+    let mut editor =
+        Editor::<SimpleCompleter, DefaultHistory>::new().map_err(map_readline_error)?;
+    editor.set_helper(Some(SimpleCompleter::new(registry.command_names())));
     let history_path = init_history(&mut editor);
-    let prompt_set = prompts::prompt_set(config);
+    let prompt_set = prompts::prompt_set(config.as_ref());
 
     loop {
         match editor.readline(&prompt_set.main_cli) {
@@ -36,17 +51,32 @@ pub fn run_shell(config: &AppConfig) -> io::Result<()> {
                     match registry.execute(
                         name,
                         &args,
-                        config,
+                        &dependencies,
                         &mut stdout,
                         ShellEnvironment::Cli,
                     )? {
                         CommandStatus::Executed(CommandOutcome::Continue) => {}
                         CommandStatus::Executed(CommandOutcome::ExitShell) => break,
                         CommandStatus::Executed(CommandOutcome::EnterDbShell) => {
+                            let session = services.db_shell.create_session();
                             if let Err(err) =
-                                crate::cli::commands::builtins::db_shell::run_local_db_shell()
+                                crate::cli::commands::builtins::db_shell::run_local_db_shell(
+                                    session,
+                                    prompt_set.db_cli.clone(),
+                                )
                             {
                                 writeln!(&mut stdout, "db-shell Fehler: {err}")?;
+                                services.registry().set_status(
+                                    "db-shell",
+                                    ServiceStatus::Degraded,
+                                    Some(format!("Fehler: {err}")),
+                                );
+                            } else {
+                                services.registry().set_status(
+                                    "db-shell",
+                                    ServiceStatus::Active,
+                                    Some("Bereit für neue Sessions".to_string()),
+                                );
                             }
                         }
                         CommandStatus::NotFound => {
@@ -66,10 +96,19 @@ pub fn run_shell(config: &AppConfig) -> io::Result<()> {
     if let Some(path) = history_path {
         let _ = editor.save_history(&path);
     }
+    services.registry().set_status(
+        "cli-shell",
+        ServiceStatus::Standby,
+        Some("Wartet auf nächste Sitzung".to_string()),
+    );
     Ok(())
 }
 
-fn init_history(editor: &mut DefaultEditor) -> Option<PathBuf> {
+fn init_history<H, I>(editor: &mut Editor<H, I>) -> Option<PathBuf>
+where
+    H: rustyline::Helper,
+    I: History,
+{
     history_path().map(|path| {
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);

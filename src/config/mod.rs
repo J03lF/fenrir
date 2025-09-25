@@ -63,6 +63,29 @@ pub struct JwtConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct DbSection {
     pub default_engine: String,
+    #[serde(default)]
+    pub connections: DbConnections,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct DbConnections {
+    pub postgres: Option<DbConnectionSettings>,
+    pub mysql: Option<DbConnectionSettings>,
+    pub sqlite: Option<DbConnectionSettings>,
+    pub mongodb: Option<DbConnectionSettings>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct DbConnectionSettings {
+    pub uri: String,
+    #[serde(default)]
+    pub pool: DbPoolSettings,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct DbPoolSettings {
+    pub max: Option<u32>,
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -88,6 +111,40 @@ pub enum ConfigError {
     Anyhow(#[from] anyhow::Error),
     #[error("invalid configuration: {0}")]
     Invalid(&'static str),
+    #[error("missing environment variable {var} for {key}")]
+    MissingEnv { key: &'static str, var: String },
+}
+
+impl DbConnectionSettings {
+    pub fn resolve_uri(&self, key: &'static str) -> Result<String, ConfigError> {
+        let raw = self.uri.trim();
+        if raw.is_empty() {
+            return Err(ConfigError::Invalid("database uri must not be empty"));
+        }
+        if let Some(env) = raw.strip_prefix("env:") {
+            let var = env.trim();
+            match std::env::var(var) {
+                Ok(value) if !value.trim().is_empty() => Ok(value),
+                Ok(_) => Err(ConfigError::Invalid(
+                    "database uri environment variable must not be empty",
+                )),
+                Err(_) => Err(ConfigError::MissingEnv {
+                    key,
+                    var: var.to_string(),
+                }),
+            }
+        } else {
+            Ok(raw.to_string())
+        }
+    }
+
+    pub fn pool_max(&self) -> Option<u32> {
+        self.pool.max
+    }
+
+    pub fn pool_timeout(&self) -> Option<u64> {
+        self.pool.timeout_ms
+    }
 }
 
 pub fn load() -> Result<AppConfig, ConfigError> {
@@ -115,6 +172,51 @@ pub fn validate(cfg: &AppConfig) -> Result<(), ConfigError> {
             "db.default_engine must be one of postgres|mysql|sqlite|mongodb",
         ));
     }
+
+    let connections = &cfg.db.connections;
+    let default_key = match cfg.db.default_engine.as_str() {
+        "postgres" => {
+            let settings = connections.postgres.as_ref().ok_or(ConfigError::Invalid(
+                "db.connections.postgres.uri must be set when postgres is default",
+            ))?;
+            settings.resolve_uri("db.connections.postgres.uri")?;
+            settings
+        }
+        "mysql" => {
+            let settings = connections.mysql.as_ref().ok_or(ConfigError::Invalid(
+                "db.connections.mysql.uri must be set when mysql is default",
+            ))?;
+            settings.resolve_uri("db.connections.mysql.uri")?;
+            settings
+        }
+        "sqlite" => {
+            let settings = connections.sqlite.as_ref().ok_or(ConfigError::Invalid(
+                "db.connections.sqlite.uri must be set when sqlite is default",
+            ))?;
+            settings.resolve_uri("db.connections.sqlite.uri")?;
+            settings
+        }
+        "mongodb" => {
+            let settings = connections.mongodb.as_ref().ok_or(ConfigError::Invalid(
+                "db.connections.mongodb.uri must be set when mongodb is default",
+            ))?;
+            settings.resolve_uri("db.connections.mongodb.uri")?;
+            settings
+        }
+        _ => unreachable!(),
+    };
+
+    if matches!(default_key.pool.max, Some(0)) {
+        return Err(ConfigError::Invalid(
+            "db pool max must be greater than zero",
+        ));
+    }
+    if matches!(default_key.pool.timeout_ms, Some(0)) {
+        return Err(ConfigError::Invalid(
+            "db pool timeout must be greater than zero",
+        ));
+    }
+
     if cfg.server.http.port == 0 || cfg.server.ssh.port == 0 {
         return Err(ConfigError::Invalid("server ports must be > 0"));
     }
@@ -142,6 +244,10 @@ mod tests {
 
     #[test]
     fn default_config_loads_and_validates() {
+        std::env::set_var(
+            "FENRIR_DB_POSTGRES_URI",
+            "postgresql://localhost:5432/fenrir",
+        );
         let cfg = load().expect("config should load");
         assert!(!cfg.app.name.is_empty());
     }

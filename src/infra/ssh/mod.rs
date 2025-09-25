@@ -7,11 +7,15 @@ use thrussh::server::{Auth, Server, Session};
 use thrussh::{server, ChannelId, CryptoVec};
 
 use crate::cli::commands::builtins;
+use crate::cli::commands::builtins::db_shell::{self, RuntimeExecutor};
 use crate::cli::commands::registry::{
-    CommandOutcome, CommandRegistry, CommandStatus, ShellEnvironment,
+    CliDependencies, CommandOutcome, CommandRegistry, CommandStatus, ShellEnvironment,
 };
+use crate::cli::completion;
 use crate::config::AppConfig;
 use crate::prompts;
+use crate::services::db_shell::DbShellSession;
+use crate::services::{AppServices, ServiceStatus};
 
 const HISTORY_MAX: usize = 200;
 
@@ -25,10 +29,15 @@ struct Handler {
     skip_next_lf: bool,
     escape_state: EscapeState,
     config: Arc<AppConfig>,
+    services: Arc<AppServices>,
+    dependencies: CliDependencies,
     registry: CommandRegistry,
     history: Vec<String>,
     history_index: Option<usize>,
     mode: ShellMode,
+    db_session: Option<DbShellSession>,
+    db_executor: Option<Arc<RuntimeExecutor>>,
+    cursor: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -110,6 +119,10 @@ impl server::Handler for Handler {
                         self.history_prev(&mut session, channel);
                     } else if ch == 'B' {
                         self.history_next(&mut session, channel);
+                    } else if ch == 'C' {
+                        self.move_cursor_right(&mut session, channel);
+                    } else if ch == 'D' {
+                        self.move_cursor_left(&mut session, channel);
                     }
                     if ('@'..='~').contains(&ch) {
                         self.escape_state = EscapeState::None;
@@ -137,13 +150,22 @@ impl server::Handler for Handler {
                         return self.finished(session);
                     }
                 }
+                '\t' => {
+                    self.handle_tab(channel, &mut session);
+                }
                 '\u{8}' | '\u{7f}' => {
-                    if self.buffer.pop().is_some() {
-                        session.data(channel, CryptoVec::from_slice(b"\x08 \x08"));
+                    if let Some(prev) = self.buffer[..self.cursor].chars().next_back() {
+                        let start = self.cursor - prev.len_utf8();
+                        self.buffer.drain(start..self.cursor);
+                        self.cursor = start;
+                        self.render_buffer(&mut session, channel);
+                    } else {
+                        session.data(channel, CryptoVec::from_slice(b"\x07"));
                     }
                 }
                 '\u{3}' => {
                     self.buffer.clear();
+                    self.cursor = 0;
                     session.data(channel, CryptoVec::from_slice(b"^C\r\n"));
                     self.history_index = None;
                     Handler::send_prompt(&mut session, channel, self.current_prompt());
@@ -154,9 +176,11 @@ impl server::Handler for Handler {
                     }
                     let mut buf = [0u8; 4];
                     let encoded = ch.encode_utf8(&mut buf);
-                    self.buffer.push_str(encoded);
+                    let insert_at = self.cursor;
+                    self.buffer.insert_str(insert_at, encoded);
+                    self.cursor += encoded.len();
                     self.history_index = None;
-                    session.data(channel, CryptoVec::from_slice(encoded.as_bytes()));
+                    self.render_buffer(&mut session, channel);
                 }
             }
         }
@@ -168,6 +192,7 @@ impl Handler {
     fn process_buffer(&mut self, channel: ChannelId, session: &mut Session) -> bool {
         let cmd = self.buffer.trim().to_string();
         self.buffer.clear();
+        self.cursor = 0;
         self.history_index = None;
 
         if cmd.is_empty() {
@@ -186,7 +211,7 @@ impl Handler {
             match self.registry.execute(
                 name,
                 &args,
-                self.config.as_ref(),
+                &self.dependencies,
                 &mut writer,
                 ShellEnvironment::Ssh,
             ) {
@@ -202,9 +227,47 @@ impl Handler {
                     self.mode = ShellMode::DbShell;
                     self.buffer.clear();
                     self.history_index = None;
-                    let _ = writeln!(&mut writer, "DB-Shell (Stub) aktiv. 'exit' kehrt zurück.");
-                    Handler::send_prompt(session, channel, self.current_prompt());
-                    true
+                    self.cursor = 0;
+                    let db_session = self.services.db_shell.create_session();
+                    let current_engine = db_session.current_engine();
+                    let engines = db_session
+                        .available_engines()
+                        .iter()
+                        .map(|engine| engine.to_string())
+                        .collect::<Vec<_>>();
+                    match RuntimeExecutor::new() {
+                        Ok(executor) => {
+                            self.db_executor = Some(Arc::new(executor));
+                            self.db_session = Some(db_session);
+                            let _ = writeln!(
+                                &mut writer,
+                                "DB-Shell aktiv. Aktueller Engine: {current_engine}"
+                            );
+                            if !engines.is_empty() {
+                                let _ = writeln!(
+                                    &mut writer,
+                                    "Verfügbare Engines: {}",
+                                    engines.join(", ")
+                                );
+                            }
+                            let _ = writeln!(
+                                &mut writer,
+                                "Hinweis: Destruktive Befehle benötigen '--force'."
+                            );
+                            Handler::send_prompt(session, channel, self.current_prompt());
+                            true
+                        }
+                        Err(err) => {
+                            tracing::error!(error = %err, "failed to create runtime for db-shell over ssh");
+                            self.mode = ShellMode::Main;
+                            let _ = writeln!(
+                                &mut writer,
+                                "DB-Shell konnte nicht gestartet werden ({err})"
+                            );
+                            Handler::send_prompt(session, channel, self.current_prompt());
+                            true
+                        }
+                    }
                 }
                 Ok(CommandStatus::NotFound) => {
                     let _ = writeln!(&mut writer, "unbekannter Befehl: {}", name);
@@ -235,29 +298,126 @@ impl Handler {
         session: &mut Session,
     ) -> bool {
         let mut writer = SessionWriter::new(session, channel);
-        match command.as_str() {
-            "exit" => {
-                self.mode = ShellMode::Main;
-                self.history_index = None;
-                let _ = writeln!(&mut writer, "DB-Shell beendet");
-                Handler::send_prompt(session, channel, self.current_prompt());
-                true
+        let trimmed = command.trim();
+        if trimmed.is_empty() {
+            Handler::send_prompt(session, channel, self.current_prompt());
+            return true;
+        }
+
+        if self.db_session.is_none() {
+            self.db_session = Some(self.services.db_shell.create_session());
+        }
+
+        let executor = match self.db_executor.as_ref() {
+            Some(exec) => Arc::clone(exec),
+            None => match RuntimeExecutor::new() {
+                Ok(exec) => {
+                    let arc = Arc::new(exec);
+                    self.db_executor = Some(Arc::clone(&arc));
+                    arc
+                }
+                Err(err) => {
+                    tracing::error!(error = %err, "failed to initialize runtime for db-shell command");
+                    let _ = writeln!(&mut writer, "DB-Shell Fehler: {err}");
+                    self.services.registry().set_status(
+                        "db-shell",
+                        ServiceStatus::Degraded,
+                        Some(format!("Runtime Fehler: {err}")),
+                    );
+                    Handler::send_prompt(session, channel, self.current_prompt());
+                    return true;
+                }
+            },
+        };
+
+        if let Some(db_session) = self.db_session.as_mut() {
+            match db_shell::apply_command(db_session, trimmed, executor.as_ref(), &mut writer) {
+                Ok(true) => {
+                    Handler::send_prompt(session, channel, self.current_prompt());
+                    true
+                }
+                Ok(false) => {
+                    self.mode = ShellMode::Main;
+                    self.history_index = None;
+                    self.db_session = None;
+                    self.db_executor = None;
+                    self.services.registry().set_status(
+                        "db-shell",
+                        ServiceStatus::Active,
+                        Some("Bereit für neue Sessions".to_string()),
+                    );
+                    Handler::send_prompt(session, channel, self.current_prompt());
+                    true
+                }
+                Err(err) => {
+                    tracing::error!(error = %err, "db-shell command failed over ssh");
+                    let _ = writeln!(&mut writer, "DB-Shell Fehler: {err}");
+                    self.services.registry().set_status(
+                        "db-shell",
+                        ServiceStatus::Degraded,
+                        Some(format!("Fehler: {err}")),
+                    );
+                    Handler::send_prompt(session, channel, self.current_prompt());
+                    true
+                }
             }
-            "help" => {
-                let _ = writeln!(&mut writer, "db-shell: stub. commands: help, exit");
-                Handler::send_prompt(session, channel, self.current_prompt());
-                true
+        } else {
+            let _ = writeln!(&mut writer, "DB-Shell nicht initialisiert");
+            Handler::send_prompt(session, channel, self.current_prompt());
+            true
+        }
+    }
+
+    fn handle_tab(&mut self, channel: ChannelId, session: &mut Session) {
+        let commands = match self.mode {
+            ShellMode::Main => self.registry.command_names(),
+            ShellMode::DbShell => db_shell::completion_words(self.db_session.as_ref()),
+        };
+        if commands.is_empty() {
+            session.data(channel, CryptoVec::from_slice(b"\x07"));
+            return;
+        }
+        let pos = self.cursor;
+        let (start, matches) = completion::completion_matches(&commands, &self.buffer, pos);
+        if matches.is_empty() {
+            session.data(channel, CryptoVec::from_slice(b"\x07"));
+            return;
+        }
+        let before = self.buffer[..start].to_string();
+        let remainder = self.buffer[self.cursor..].to_string();
+        if matches.len() == 1 {
+            let completion = &matches[0];
+            self.buffer = before.clone();
+            self.buffer.push_str(completion);
+            self.cursor = self.buffer.len();
+            if remainder.is_empty() {
+                self.buffer.push(' ');
+                self.cursor += 1;
             }
-            other => {
-                let _ = writeln!(
-                    &mut writer,
-                    "stub: received '{}' - keine Datenbank verbunden",
-                    other
-                );
-                Handler::send_prompt(session, channel, self.current_prompt());
-                true
+            self.buffer.push_str(&remainder);
+            self.render_buffer(session, channel);
+            return;
+        }
+
+        if let Some(common) = completion::longest_common_prefix(&matches) {
+            let prefix_len = self.cursor - start;
+            if common.len() > prefix_len {
+                self.buffer = before.clone();
+                self.buffer.push_str(&common);
+                self.cursor = self.buffer.len();
+                self.buffer.push_str(&remainder);
+                self.render_buffer(session, channel);
             }
         }
+
+        session.data(channel, CryptoVec::from_slice(b"\r\n"));
+        {
+            let mut writer = SessionWriter::new(session, channel);
+            for entry in &matches {
+                let _ = writeln!(&mut writer, "{entry}");
+            }
+        }
+        self.render_buffer(session, channel);
     }
 
     fn current_prompt(&self) -> &str {
@@ -279,6 +439,7 @@ impl Handler {
         self.history_index = Some(next_index);
         self.buffer.clear();
         self.buffer.push_str(&self.history[next_index]);
+        self.cursor = self.buffer.len();
         self.render_buffer(session, channel);
     }
 
@@ -299,15 +460,38 @@ impl Handler {
             }
             None => return,
         }
+        self.cursor = self.buffer.len();
         self.render_buffer(session, channel);
     }
 
-    fn render_buffer(&self, session: &mut Session, channel: ChannelId) {
+    fn render_buffer(&mut self, session: &mut Session, channel: ChannelId) {
+        if self.cursor > self.buffer.len() {
+            self.cursor = self.buffer.len();
+        }
         session.data(channel, CryptoVec::from_slice(b"\r"));
         Handler::send_prompt(session, channel, self.current_prompt());
         session.data(channel, CryptoVec::from_slice(b"\x1b[K"));
         if !self.buffer.is_empty() {
             session.data(channel, CryptoVec::from_slice(self.buffer.as_bytes()));
+        }
+        let tail_len = self.buffer[self.cursor..].chars().count();
+        if tail_len > 0 {
+            let seq = format!("\x1b[{}D", tail_len);
+            session.data(channel, CryptoVec::from_slice(seq.as_bytes()));
+        }
+    }
+
+    fn move_cursor_left(&mut self, session: &mut Session, channel: ChannelId) {
+        if let Some(prev) = self.buffer[..self.cursor].chars().next_back() {
+            self.cursor = self.cursor.saturating_sub(prev.len_utf8());
+            session.data(channel, CryptoVec::from_slice(b"\x1b[D"));
+        }
+    }
+
+    fn move_cursor_right(&mut self, session: &mut Session, channel: ChannelId) {
+        if let Some(next) = self.buffer[self.cursor..].chars().next() {
+            self.cursor = (self.cursor + next.len_utf8()).min(self.buffer.len());
+            session.data(channel, CryptoVec::from_slice(b"\x1b[C"));
         }
     }
 
@@ -325,7 +509,7 @@ impl Handler {
     }
 }
 
-pub async fn start(cfg: &AppConfig) -> Result<()> {
+pub async fn start(cfg: &Arc<AppConfig>, services: &Arc<AppServices>) -> Result<()> {
     let config = server::Config {
         auth_rejection_time: std::time::Duration::from_secs(1),
         ..Default::default()
@@ -340,11 +524,16 @@ pub async fn start(cfg: &AppConfig) -> Result<()> {
         username: String,
         password_env: String,
         config: Arc<AppConfig>,
+        services: Arc<AppServices>,
     }
     impl Server for Factory {
         type Handler = Handler;
         fn new(&mut self, _peer_addr: Option<std::net::SocketAddr>) -> Self::Handler {
             let prompts = prompts::prompt_set(self.config.as_ref());
+            let services = Arc::clone(&self.services);
+            let config = Arc::clone(&self.config);
+            let dependencies =
+                CliDependencies::new(Arc::clone(&self.config), Arc::clone(&self.services));
             Handler {
                 username: self.username.clone(),
                 password_env: self.password_env.clone(),
@@ -353,24 +542,51 @@ pub async fn start(cfg: &AppConfig) -> Result<()> {
                 db_prompt: prompts.db_transport,
                 skip_next_lf: false,
                 escape_state: EscapeState::None,
-                config: Arc::clone(&self.config),
+                config,
+                services,
+                dependencies,
                 registry: builtins::build_registry(),
                 history: Vec::new(),
                 history_index: None,
                 mode: ShellMode::Main,
+                db_session: None,
+                db_executor: None,
+                cursor: 0,
             }
         }
     }
 
     tracing::info!(host = %cfg.server.ssh.host, port = cfg.server.ssh.port, "starting SSH server");
     let bind_addr = format!("{}:{}", cfg.server.ssh.host, cfg.server.ssh.port);
+    services.registry().set_status(
+        "ssh-server",
+        ServiceStatus::Active,
+        Some(format!("Lauscht auf {bind_addr}")),
+    );
     let server = Factory {
         username: cfg.server.ssh.user.clone(),
         password_env: "FENRIR_SSH_PASSWORD".to_string(),
-        config: Arc::new(cfg.clone()),
+        config: Arc::clone(cfg),
+        services: Arc::clone(services),
     };
-    thrussh::server::run(config, &bind_addr, server).await?;
-    Ok(())
+    match thrussh::server::run(config, &bind_addr, server).await {
+        Ok(()) => {
+            services.registry().set_status(
+                "ssh-server",
+                ServiceStatus::Stopped,
+                Some("Listener beendet".to_string()),
+            );
+            Ok(())
+        }
+        Err(err) => {
+            services.registry().set_status(
+                "ssh-server",
+                ServiceStatus::Failed,
+                Some(format!("Fehler: {err}")),
+            );
+            Err(err.into())
+        }
+    }
 }
 
 fn load_or_create_host_key(path: &str) -> Result<thrussh_keys::key::KeyPair> {

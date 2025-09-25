@@ -1,4 +1,4 @@
-app = { name = "fenrir", version = "0.1.2" }
+app = { name = "fenrir", version = "0.1.3" }
 
 [server]
 enable_http = false
@@ -29,6 +29,13 @@ exp_seconds = 3600
 
 [db]
 default_engine = "postgres"
+
+[db.connections.postgres]
+uri = "env:FENRIR_DB_POSTGRES_URI"
+
+[db.connections.postgres.pool]
+max = 16
+timeout_ms = 5000
 
 [telemetry]
 tracing_level = "info"

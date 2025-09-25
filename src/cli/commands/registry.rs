@@ -1,9 +1,11 @@
 use crate::config::AppConfig;
+use crate::services::AppServices;
 use std::collections::BTreeMap;
 use std::io::{self, Write};
+use std::sync::Arc;
 
 pub type CommandHandler = fn(
-    &AppConfig,
+    &CliDependencies,
     &[&str],
     &CommandRegistry,
     &mut dyn Write,
@@ -69,18 +71,34 @@ impl CommandRegistry {
         self.commands.values()
     }
 
+    pub fn command_names(&self) -> Vec<String> {
+        self.commands.keys().cloned().collect()
+    }
+
     pub fn execute(
         &self,
         name: &str,
         args: &[&str],
-        config: &AppConfig,
+        deps: &CliDependencies,
         out: &mut dyn Write,
         env: ShellEnvironment,
     ) -> io::Result<CommandStatus> {
         if let Some(entry) = self.get(name) {
-            (entry.handler)(config, args, self, out, env).map(CommandStatus::Executed)
+            (entry.handler)(deps, args, self, out, env).map(CommandStatus::Executed)
         } else {
             Ok(CommandStatus::NotFound)
         }
+    }
+}
+
+#[derive(Clone)]
+pub struct CliDependencies {
+    pub config: Arc<AppConfig>,
+    pub services: Arc<AppServices>,
+}
+
+impl CliDependencies {
+    pub fn new(config: Arc<AppConfig>, services: Arc<AppServices>) -> Self {
+        Self { config, services }
     }
 }

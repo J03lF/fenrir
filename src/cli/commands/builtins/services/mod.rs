@@ -48,7 +48,6 @@ fn list_services(deps: &CliDependencies, out: &mut dyn Write) -> io::Result<()> 
         kind_width = kind_width.max(svc.descriptor.kind.as_str().len());
     }
 
-    writeln!(out, "Services:")?;
     let header = format!(
         "  {:<width_id$}  {:<width_name$}  {:<width_kind$}  {:<10}  {:<10}  {}",
         "ID",
@@ -86,9 +85,11 @@ fn list_services(deps: &CliDependencies, out: &mut dyn Write) -> io::Result<()> 
             width_kind = kind_width,
         );
         writeln!(out, "{line}")?;
-        if let Some(note) = svc.note.as_deref() {
-            writeln!(out, "    ↳ {note}")?;
-        }
+
+        // not important infos and fuck up the table design
+        //if let Some(note) = svc.note.as_deref() {
+        //    writeln!(out, "    ↳ {note}")?;
+        //}
     }
     Ok(())
 }

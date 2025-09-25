@@ -1,9 +1,10 @@
 # Default ignored files
 /shelf/
 target/
-/target/
+/../target/
 /test/
 /benches/
+../target/
 /workspace.xml
 # Editor-based HTTP Client requests
 /httpRequests/

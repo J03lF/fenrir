@@ -2,10 +2,11 @@ use std::sync::Arc;
 
 use crate::config::{self, AppConfig};
 use crate::domain::db::DbEngine;
+use crate::infra::storage::memory::{InMemoryTicketRepository, InMemoryUserRepository};
 use crate::infra::{db, logging, ssh, telemetry};
 use crate::services::{
-    db_shell::DbShellService, AppServices, SchedulerService, ServiceDescriptor, ServiceKind,
-    ServiceRegistry, ServiceStatus,
+    AppServices, DbShellService, SchedulerService, ServiceDescriptor, ServiceKind, ServiceRegistry,
+    ServiceStatus, TicketService, UserService,
 };
 use anyhow::{anyhow, Result};
 
@@ -38,6 +39,26 @@ pub fn boot() -> Result<BootContext> {
     );
     registry.register(
         ServiceDescriptor::new(
+            "user-service",
+            "User Service",
+            "Verwaltet Benutzer und Rollen",
+            ServiceKind::Security,
+        ),
+        ServiceStatus::Starting,
+        Some("Initialisierung".to_string()),
+    );
+    registry.register(
+        ServiceDescriptor::new(
+            "ticket-service",
+            "Ticket Service",
+            "Kern-Use-Cases für das Ticketsystem",
+            ServiceKind::Infrastructure,
+        ),
+        ServiceStatus::Starting,
+        Some("Initialisierung".to_string()),
+    );
+    registry.register(
+        ServiceDescriptor::new(
             "ssh-server",
             "SSH Transport",
             "Secure Shell Zugang und interaktive Sitzungen",
@@ -67,15 +88,46 @@ pub fn boot() -> Result<BootContext> {
         Some("Initialisierung".to_string()),
     );
 
+    crate::infra::telemetry::register_readiness_probe("services", {
+        let registry = Arc::clone(&registry);
+        move || {
+            registry
+                .snapshot()
+                .into_iter()
+                .all(|svc| !matches!(svc.status, ServiceStatus::Failed))
+        }
+    })?;
+
     let db_shell_service = Arc::new(DbShellService::new(default_engine, adapters)?);
     let scheduler_service = Arc::new(SchedulerService::new(Arc::clone(&registry)));
+    let user_repository: Arc<dyn crate::domain::user::UserRepository> =
+        Arc::new(InMemoryUserRepository::new());
+    let user_service = Arc::new(UserService::new(Arc::clone(&user_repository)));
+    let ticket_repository: Arc<dyn crate::domain::ticket::TicketRepository> =
+        Arc::new(InMemoryTicketRepository::new());
+    let ticket_service = Arc::new(TicketService::new(Arc::clone(&ticket_repository)));
     scheduler_service.start();
 
     let services = Arc::new(AppServices::new(
         Arc::clone(&db_shell_service),
         Arc::clone(&scheduler_service),
+        Arc::clone(&ticket_service),
+        Arc::clone(&user_service),
         Arc::clone(&registry),
     ));
+
+    registry.set_status(
+        "user-service",
+        ServiceStatus::Active,
+        Some("In-Memory Repository initialisiert".to_string()),
+    );
+    registry.set_status(
+        "ticket-service",
+        ServiceStatus::Active,
+        Some("In-Memory Repository initialisiert".to_string()),
+    );
+
+    crate::infra::telemetry::mark_ready();
 
     tracing::info!(app = %cfg.app.name, version = %cfg.app.version, "boot complete");
     Ok(BootContext {

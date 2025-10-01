@@ -21,6 +21,7 @@ thrussh-keys = "=0.20.6"
 futures = "0.3"
 async-trait = "0.1"
 rustyline = "12"
+uuid = { version = "1.8", features = ["v4"] }
 
 [dev-dependencies]
 assert_cmd = "2.0"

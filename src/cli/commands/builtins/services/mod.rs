@@ -1,10 +1,9 @@
 use crate::cli::commands::registry::{
     CliDependencies, CommandEntry, CommandOutcome, CommandRegistry, ShellEnvironment,
 };
-use crate::services::ServiceStatus;
-use std::fmt;
+use crate::cli::commands::table::Table;
+use crate::utils;
 use std::io::{self, Write};
-use std::time::{Duration, SystemTime};
 
 pub fn command() -> CommandEntry {
     CommandEntry::new(
@@ -33,97 +32,45 @@ fn handle(
 }
 
 fn list_services(deps: &CliDependencies, out: &mut dyn Write) -> io::Result<()> {
-    let entries = deps.services.registry().snapshot();
+    let mut entries = deps.services.registry().snapshot();
     if entries.is_empty() {
         writeln!(out, "Keine Services registriert.")?;
         return Ok(());
     }
 
-    let mut id_width = 2usize;
-    let mut name_width = 4usize;
-    let mut kind_width = 4usize;
-    for svc in &entries {
-        id_width = id_width.max(svc.descriptor.id.len());
-        name_width = name_width.max(svc.descriptor.name.len());
-        kind_width = kind_width.max(svc.descriptor.kind.as_str().len());
-    }
+    entries.sort_by(|a, b| a.descriptor.id.cmp(b.descriptor.id));
 
-    let header = format!(
-        "  {:<width_id$}  {:<width_name$}  {:<width_kind$}  {:<10}  {:<10}  {}",
-        "ID",
-        "Name",
-        "Typ",
-        "Status",
-        "Seit",
-        "Beschreibung",
-        width_id = id_width,
-        width_name = name_width,
-        width_kind = kind_width,
-    );
-    let separator = format!(
-        "  {id}  {name}  {kind}  {status:-<10}  {since:-<10}  -",
-        id = "-".repeat(id_width),
-        name = "-".repeat(name_width),
-        kind = "-".repeat(kind_width),
-        status = "",
-        since = "",
-    );
-    writeln!(out, "{header}")?;
-    writeln!(out, "{separator}")?;
+    let mut table = Table::new(vec![
+        "ID".to_string(),
+        "Name".to_string(),
+        "Typ".to_string(),
+        "Status".to_string(),
+        "Seit".to_string(),
+        "Beschreibung".to_string(),
+        "Hinweis".to_string(),
+    ]);
 
     for svc in entries {
-        let line = format!(
-            "  {:<width_id$}  {:<width_name$}  {:<width_kind$}  {:<10}  {:<10}  {}",
-            svc.descriptor.id,
-            svc.descriptor.name,
-            svc.descriptor.kind.as_str(),
-            ServiceStatusDisplay(svc.status),
-            SinceDisplay::new(svc.since),
-            svc.descriptor.description,
-            width_id = id_width,
-            width_name = name_width,
-            width_kind = kind_width,
-        );
-        writeln!(out, "{line}")?;
-
-        // not important infos and fuck up the table design
-        //if let Some(note) = svc.note.as_deref() {
-        //    writeln!(out, "    ↳ {note}")?;
-        //}
+        let since = svc
+            .since
+            .elapsed()
+            .ok()
+            .map(|duration| utils::format_brief_duration(duration))
+            .unwrap_or_else(|| "-".to_string());
+        let note = svc
+            .note
+            .filter(|note| !note.is_empty())
+            .unwrap_or_else(|| "-".to_string());
+        table.add_row(vec![
+            svc.descriptor.id.to_string(),
+            svc.descriptor.name.to_string(),
+            svc.descriptor.kind.as_str().to_string(),
+            svc.status.label().to_string(),
+            since,
+            svc.descriptor.description.to_string(),
+            note,
+        ]);
     }
-    Ok(())
-}
 
-struct ServiceStatusDisplay(ServiceStatus);
-
-impl fmt::Display for ServiceStatusDisplay {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.0.label())
-    }
-}
-
-struct SinceDisplay(Option<Duration>);
-
-impl SinceDisplay {
-    fn new(since: SystemTime) -> Self {
-        Self(since.elapsed().ok())
-    }
-}
-
-impl fmt::Display for SinceDisplay {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.0 {
-            Some(duration) => {
-                let secs = duration.as_secs();
-                if secs >= 3600 {
-                    write!(f, "{}h", secs / 3600)
-                } else if secs >= 60 {
-                    write!(f, "{}m", secs / 60)
-                } else {
-                    write!(f, "{}s", secs)
-                }
-            }
-            None => f.write_str("-"),
-        }
-    }
+    table.render(out, "  ")
 }

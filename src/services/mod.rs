@@ -9,6 +9,8 @@ use std::time::SystemTime;
 
 pub use db_shell::DbShellService;
 pub use scheduler::SchedulerService;
+pub use ticket::TicketService;
+pub use user::UserService;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ServiceKind {
@@ -174,6 +176,8 @@ impl ServiceRegistry {
 pub struct AppServices {
     pub db_shell: Arc<DbShellService>,
     pub scheduler: Arc<SchedulerService>,
+    pub ticket: Arc<TicketService>,
+    pub user: Arc<UserService>,
     registry: Arc<ServiceRegistry>,
 }
 
@@ -181,11 +185,15 @@ impl AppServices {
     pub fn new(
         db_shell: Arc<DbShellService>,
         scheduler: Arc<SchedulerService>,
+        ticket: Arc<TicketService>,
+        user: Arc<UserService>,
         registry: Arc<ServiceRegistry>,
     ) -> Self {
         Self {
             db_shell,
             scheduler,
+            ticket,
+            user,
             registry,
         }
     }

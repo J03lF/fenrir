@@ -9,6 +9,7 @@ use crate::services::{
     ServiceStatus, TicketService, UserService,
 };
 use anyhow::{anyhow, Result};
+use tracing::info;
 
 pub struct BootContext {
     pub config: Arc<AppConfig>,
@@ -37,6 +38,7 @@ pub fn boot() -> Result<BootContext> {
         ServiceStatus::Active,
         Some("bereit".to_string()),
     );
+    info!("core services registered in registry");
     registry.register(
         ServiceDescriptor::new(
             "user-service",
@@ -107,6 +109,7 @@ pub fn boot() -> Result<BootContext> {
         Arc::new(InMemoryTicketRepository::new());
     let ticket_service = Arc::new(TicketService::new(Arc::clone(&ticket_repository)));
     scheduler_service.start();
+    info!("scheduler service started");
 
     let services = Arc::new(AppServices::new(
         Arc::clone(&db_shell_service),
@@ -126,6 +129,7 @@ pub fn boot() -> Result<BootContext> {
         ServiceStatus::Active,
         Some("In-Memory Repository initialisiert".to_string()),
     );
+    info!("user and ticket services initialised");
 
     crate::infra::telemetry::mark_ready();
 
@@ -146,6 +150,7 @@ pub async fn start_transports(ctx: &BootContext) -> Result<()> {
             ServiceStatus::Starting,
             Some("Starte Listener".to_string()),
         );
+        info!("ssh server task spawned");
         if let Err(e) = ssh::start(&cfg, &services).await {
             tracing::error!(error=%e, "ssh server exited with error");
             services.registry().set_status(
@@ -155,5 +160,6 @@ pub async fn start_transports(ctx: &BootContext) -> Result<()> {
             );
         }
     });
+    info!("transport initialisation triggered");
     Ok(())
 }

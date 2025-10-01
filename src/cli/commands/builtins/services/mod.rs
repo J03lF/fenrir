@@ -5,10 +5,14 @@ use crate::cli::commands::table::Table;
 use crate::utils;
 use std::io::{self, Write};
 
+const DETAILS: &[&str] = &["list – zeigt alle registrierten Services mit Status und Hinweis"];
+
 pub fn command() -> CommandEntry {
     CommandEntry::new(
         "services",
         "Zeigt den Status registrierter Applikationsservices",
+        "services [list]",
+        DETAILS,
         handle,
     )
 }

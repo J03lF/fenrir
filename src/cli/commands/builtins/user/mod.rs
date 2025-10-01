@@ -9,11 +9,22 @@ use crate::domain::user::{UserFilter, UserRole};
 use crate::services::user::RegisterUserCommand;
 use crate::services::UserService;
 use crate::utils;
+use tracing::{info, warn};
+
+const DETAILS: &[&str] = &[
+    "list [--role <rolle>] [--search <term>] [--include-locked]",
+    "show <username>",
+    "create --username <name> --email <adresse> [--display-name <text>] [--role <rolle> ...]",
+    "lock <username>",
+    "unlock <username>",
+];
 
 pub fn command() -> CommandEntry {
     CommandEntry::new(
         "user",
         "Verwaltet Benutzer (listen, anlegen, sperren)",
+        "user <aktion> [optionen]",
+        DETAILS,
         handle,
     )
 }
@@ -26,6 +37,7 @@ fn handle(
     _env: ShellEnvironment,
 ) -> io::Result<CommandOutcome> {
     let action = args.first().copied().unwrap_or("list");
+    info!(command = "user", action, "user command invoked");
     match action {
         "list" => list_users(&deps.services.user, args.get(1..).unwrap_or_default(), out)?,
         "show" => show_user(&deps.services.user, args.get(1..).unwrap_or_default(), out)?,
@@ -44,7 +56,11 @@ fn handle(
         )?,
         other => {
             writeln!(out, "unbekannte Aktion: {other}")?;
-            writeln!(out, "verfügbar: user [list|show|create|lock|unlock]")?;
+            writeln!(out, "verfügbar: user <aktion> ...")?;
+            for detail in DETAILS {
+                writeln!(out, "  - {detail}")?;
+            }
+            warn!(command = "user", action = other, "unknown user subcommand");
         }
     }
     Ok(CommandOutcome::Continue)

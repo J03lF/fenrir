@@ -16,14 +16,24 @@ pub type CommandHandler = fn(
 pub struct CommandEntry {
     pub name: String,
     pub description: String,
+    pub usage: &'static str,
+    pub details: &'static [&'static str],
     pub handler: CommandHandler,
 }
 
 impl CommandEntry {
-    pub fn new(name: &'static str, description: &'static str, handler: CommandHandler) -> Self {
+    pub fn new(
+        name: &'static str,
+        description: &'static str,
+        usage: &'static str,
+        details: &'static [&'static str],
+        handler: CommandHandler,
+    ) -> Self {
         Self {
             name: name.to_string(),
             description: description.to_string(),
+            usage,
+            details,
             handler,
         }
     }

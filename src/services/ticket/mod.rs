@@ -5,6 +5,8 @@ use crate::domain::ticket::{
     TicketStatus,
 };
 use crate::domain::user::UserId;
+use crate::infra::logging;
+use tracing::info;
 
 #[derive(Clone)]
 pub struct TicketService {
@@ -26,7 +28,17 @@ impl TicketService {
             cmd.assignee_id,
             cmd.tags,
         )?;
-        self.repo.insert(ticket)
+        let inserted = self.repo.insert(ticket)?;
+        info!(ticket_id = %inserted.id, status = %inserted.status, priority = %inserted.priority, "ticket created");
+        logging::append_db_log(&format!(
+            "INSERT tickets id={} status={} priority={} reporter={} assignee={:?}",
+            inserted.id,
+            inserted.status,
+            inserted.priority,
+            inserted.reporter_id,
+            inserted.assignee_id
+        ));
+        Ok(inserted)
     }
 
     pub fn assign(&self, ticket_id: &TicketId, assignee: Option<UserId>) -> TicketResult<Ticket> {
@@ -38,7 +50,13 @@ impl TicketService {
             return Ok(ticket);
         }
         ticket.set_assignee(assignee);
-        self.repo.update(ticket)
+        let updated = self.repo.update(ticket)?;
+        info!(ticket_id = %updated.id, assignee = ?updated.assignee_id.map(|id| id.to_string()), "ticket assignee updated");
+        logging::append_db_log(&format!(
+            "UPDATE tickets id={} set assignee={:?}",
+            updated.id, updated.assignee_id
+        ));
+        Ok(updated)
     }
 
     pub fn transition_status(
@@ -51,7 +69,13 @@ impl TicketService {
             .find_by_id(ticket_id)?
             .ok_or(TicketError::NotFound)?;
         ticket.set_status(status);
-        self.repo.update(ticket)
+        let updated = self.repo.update(ticket)?;
+        info!(ticket_id = %updated.id, status = %updated.status, "ticket status updated");
+        logging::append_db_log(&format!(
+            "UPDATE tickets id={} set status={}",
+            updated.id, updated.status
+        ));
+        Ok(updated)
     }
 
     pub fn update_priority(
@@ -64,7 +88,13 @@ impl TicketService {
             .find_by_id(ticket_id)?
             .ok_or(TicketError::NotFound)?;
         ticket.set_priority(priority);
-        self.repo.update(ticket)
+        let updated = self.repo.update(ticket)?;
+        info!(ticket_id = %updated.id, priority = %updated.priority, "ticket priority updated");
+        logging::append_db_log(&format!(
+            "UPDATE tickets id={} set priority={}",
+            updated.id, updated.priority
+        ));
+        Ok(updated)
     }
 
     pub fn update_details(
@@ -87,14 +117,29 @@ impl TicketService {
         if let Some(tags) = tags {
             ticket.set_tags(tags);
         }
-        self.repo.update(ticket)
+        let updated = self.repo.update(ticket)?;
+        info!(ticket_id = %updated.id, "ticket details updated");
+        logging::append_db_log(&format!(
+            "UPDATE tickets id={} set title=\"{}\" description_len={} tags={:?}",
+            updated.id,
+            updated.title,
+            updated.description.len(),
+            updated.tags
+        ));
+        Ok(updated)
     }
 
     pub fn list(&self, filter: TicketFilter) -> TicketResult<Vec<Ticket>> {
-        self.repo.list(&filter)
+        logging::append_db_log(&format!("SELECT tickets filter={:?}", filter));
+        let result = self.repo.list(&filter);
+        if let Ok(ref tickets) = result {
+            info!(count = tickets.len(), "ticket list returned");
+        }
+        result
     }
 
     pub fn find_by_id(&self, ticket_id: &TicketId) -> TicketResult<Option<Ticket>> {
+        logging::append_db_log(&format!("SELECT ticket by id={}", ticket_id));
         self.repo.find_by_id(ticket_id)
     }
 }

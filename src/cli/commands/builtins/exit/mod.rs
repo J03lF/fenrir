@@ -3,8 +3,19 @@ use crate::cli::commands::registry::{
 };
 use std::io::{self, Write};
 
+const DETAILS: &[&str] = &[
+    "exit – beendet die aktuelle CLI/SSH-Sitzung",
+    "In Subshells (z. B. db-shell) kehrt 'exit' zur Hauptshell zurück",
+];
+
 pub fn command() -> CommandEntry {
-    CommandEntry::new("exit", "Beendet die aktuelle Sitzung", handle)
+    CommandEntry::new(
+        "exit",
+        "Beendet die aktuelle Sitzung",
+        "exit",
+        DETAILS,
+        handle,
+    )
 }
 
 fn handle(

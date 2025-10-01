@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::task::JoinHandle;
+use tracing::info;
 
 use crate::services::{ServiceRegistry, ServiceStatus};
 
@@ -22,6 +23,7 @@ impl SchedulerService {
         {
             let guard = self.handle.lock().expect("scheduler handle lock");
             if guard.is_some() {
+                info!("scheduler already running, skipping start request");
                 return;
             }
         }
@@ -37,6 +39,7 @@ impl SchedulerService {
                 ServiceStatus::Active,
                 Some("Heartbeat aktiv".to_string()),
             );
+            info!("scheduler event loop started");
             loop {
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 registry.update_note("scheduler", Some("Heartbeat OK".to_string()));
@@ -58,6 +61,7 @@ impl Drop for SchedulerService {
                     ServiceStatus::Stopped,
                     Some("gestoppt".to_string()),
                 );
+                info!("scheduler service dropped and task aborted");
             }
         }
     }

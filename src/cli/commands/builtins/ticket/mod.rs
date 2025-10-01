@@ -10,11 +10,22 @@ use crate::domain::user::{UserFilter, UserId};
 use crate::services::ticket::CreateTicketCommand;
 use crate::services::{TicketService, UserService};
 use crate::utils;
+use tracing::{info, warn};
+
+const DETAILS: &[&str] = &[
+    "list [--status <s1,s2>] [--reporter <user>] [--assignee <user>] [--tag <tag>] [--search <text>]",
+    "show <ticket-id>",
+    "create --title <titel> --description <text> --priority <prio> --reporter <user> [--assignee <user>] [--tag <tag> ...]",
+    "assign <ticket-id> <username|none>",
+    "status <ticket-id> <status>",
+];
 
 pub fn command() -> CommandEntry {
     CommandEntry::new(
         "ticket",
         "Arbeitet mit Tickets (listen, anlegen, aktualisieren)",
+        "ticket <aktion> [optionen]",
+        DETAILS,
         handle,
     )
 }
@@ -27,6 +38,7 @@ fn handle(
     _env: ShellEnvironment,
 ) -> io::Result<CommandOutcome> {
     let action = args.first().copied().unwrap_or("list");
+    info!(command = "ticket", action, "ticket command invoked");
     match action {
         "list" => list_tickets(
             &deps.services.ticket,
@@ -59,7 +71,15 @@ fn handle(
         )?,
         other => {
             writeln!(out, "unbekannte Aktion: {other}")?;
-            writeln!(out, "verfügbar: ticket [list|show|create|assign|status]")?;
+            writeln!(out, "verfügbar: ticket <aktion> ...")?;
+            for detail in DETAILS {
+                writeln!(out, "  - {detail}")?;
+            }
+            warn!(
+                command = "ticket",
+                action = other,
+                "unknown ticket subcommand"
+            );
         }
     }
     Ok(CommandOutcome::Continue)

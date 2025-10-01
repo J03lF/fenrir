@@ -15,6 +15,8 @@ tokio = { version = "1.39", features = ["rt-multi-thread", "macros", "signal"] }
 tokio-postgres = "0.7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+tracing-appender = "0.2"
+time = { version = "0.3", features = ["formatting", "macros"] }
 whoami = "1.5"
 thrussh = "=0.32.10"
 thrussh-keys = "=0.20.6"

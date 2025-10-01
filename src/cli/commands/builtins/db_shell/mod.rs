@@ -13,8 +13,22 @@ use std::io::{self, Write};
 use tokio::runtime::{Handle, Runtime};
 use tokio::task;
 
+const DETAILS: &[&str] = &[
+    r"\c <engine> – Engine wechseln",
+    r"\d [table] – Tabellen auflisten oder Schema anzeigen",
+    r"\ping – Verbindung testen",
+    "exit / \\q – Subshell verlassen",
+    "Destruktive SQLs benötigen '--force' am Zeilenende",
+];
+
 pub fn command() -> CommandEntry {
-    CommandEntry::new("db-shell", "Öffnet die Datenbank-Subshell", handle)
+    CommandEntry::new(
+        "db-shell",
+        "Öffnet die Datenbank-Subshell",
+        "db-shell",
+        DETAILS,
+        handle,
+    )
 }
 
 fn handle(

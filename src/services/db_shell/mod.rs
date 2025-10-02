@@ -5,8 +5,6 @@ use std::sync::Arc;
 use crate::domain::db::{
     DbAdminPort, DbEngine, DbError, DbExecutionResult, DbResult, DbTable, DbTableSchema,
 };
-use crate::services::{ManagedService, ServiceRegistry, ServiceStatus};
-use async_trait::async_trait;
 
 pub struct DbShellService {
     default_engine: DbEngine,
@@ -129,50 +127,5 @@ impl DbShellSession {
         self.guard_enabled()?;
         let adapter = self.service.adapter(self.current_engine)?;
         adapter.describe_table(table).await
-    }
-}
-
-#[derive(Clone)]
-pub struct DbShellControl {
-    service: Arc<DbShellService>,
-    registry: Arc<ServiceRegistry>,
-}
-
-impl DbShellControl {
-    pub fn new(service: Arc<DbShellService>, registry: Arc<ServiceRegistry>) -> Self {
-        Self { service, registry }
-    }
-}
-
-#[async_trait]
-impl ManagedService for DbShellControl {
-    fn id(&self) -> &'static str {
-        "db-shell"
-    }
-
-    async fn start(self: Arc<Self>) -> anyhow::Result<bool> {
-        if self.service.is_enabled() {
-            return Ok(false);
-        }
-        self.service.set_enabled(true);
-        self.registry.set_status(
-            "db-shell",
-            ServiceStatus::Active,
-            Some("DB-Shell aktiviert".to_string()),
-        );
-        Ok(true)
-    }
-
-    async fn stop(self: Arc<Self>, _force: bool) -> anyhow::Result<bool> {
-        if !self.service.is_enabled() {
-            return Ok(false);
-        }
-        self.service.set_enabled(false);
-        self.registry.set_status(
-            "db-shell",
-            ServiceStatus::Standby,
-            Some("DB-Shell deaktiviert".to_string()),
-        );
-        Ok(true)
     }
 }

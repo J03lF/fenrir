@@ -2,11 +2,10 @@ use std::sync::Arc;
 
 use crate::config::{self, AppConfig};
 use crate::domain::db::DbEngine;
-use crate::infra::http::{HttpServer, HttpServerControl, HTTP_SERVICE_ID};
+use crate::infra::http::{HttpServer, HTTP_SERVICE_ID};
 use crate::infra::storage::memory::{InMemoryTicketRepository, InMemoryUserRepository};
 use crate::infra::{db, logging, ssh, telemetry};
-use crate::services::db_shell::DbShellControl;
-use crate::services::scheduler::{install_default_jobs, SchedulerControl};
+use crate::services::scheduler::install_default_jobs;
 use crate::services::{
     AppServices, DbShellService, SchedulerService, ServiceDescriptor, ServiceKind, ServiceRegistry,
     ServiceStatus, ServiceTag, TicketService, UserService,
@@ -169,19 +168,91 @@ pub fn boot() -> Result<BootContext> {
         Arc::clone(&registry),
         Arc::downgrade(&services),
     )?);
-    let http_control = Arc::new(HttpServerControl::new(Arc::clone(&http_server)));
-    services.register_runtime_service(http_control);
-    let db_shell_control = Arc::new(DbShellControl::new(
-        Arc::clone(&db_shell_service),
-        Arc::clone(&registry),
-    ));
-    services.register_runtime_service(db_shell_control);
-    let scheduler_control = Arc::new(SchedulerControl::new(
-        Arc::clone(&scheduler_service),
-        Arc::clone(&registry),
-        Arc::clone(&db_shell_service),
-    ));
-    services.register_runtime_service(scheduler_control);
+    {
+        let http_start = Arc::clone(&http_server);
+        let http_stop = Arc::clone(&http_server);
+        services.register_dynamic_service(
+            HTTP_SERVICE_ID,
+            move || {
+                let server = Arc::clone(&http_start);
+                Box::pin(async move { HttpServer::start(&server).await })
+            },
+            move |force| {
+                let server = Arc::clone(&http_stop);
+                Box::pin(async move { HttpServer::stop(&server, force).await })
+            },
+        );
+    }
+    {
+        let scheduler_for_start = Arc::clone(&scheduler_service);
+        let scheduler_for_stop = Arc::clone(&scheduler_service);
+        let registry_for_jobs = Arc::clone(&registry);
+        let db_shell_for_jobs = Arc::clone(&db_shell_service);
+        services.register_dynamic_service(
+            "scheduler",
+            move || {
+                let scheduler = Arc::clone(&scheduler_for_start);
+                let registry = Arc::clone(&registry_for_jobs);
+                let db_shell = Arc::clone(&db_shell_for_jobs);
+                Box::pin(async move {
+                    if scheduler.start() {
+                        install_default_jobs(&scheduler, registry, db_shell)
+                            .map_err(|err| anyhow!(err))?;
+                        Ok(true)
+                    } else {
+                        Ok(false)
+                    }
+                })
+            },
+            move |_force| {
+                let scheduler = Arc::clone(&scheduler_for_stop);
+                Box::pin(async move { Ok(scheduler.stop()) })
+            },
+        );
+    }
+    {
+        let db_shell_start = Arc::clone(&db_shell_service);
+        let db_shell_stop = Arc::clone(&db_shell_service);
+        let registry_for_db_shell = Arc::clone(&registry);
+        let registry_for_db_shell_stop = Arc::clone(&registry);
+        services.register_dynamic_service(
+            "db-shell",
+            move || {
+                let service = Arc::clone(&db_shell_start);
+                let registry = Arc::clone(&registry_for_db_shell);
+                Box::pin(async move {
+                    if service.is_enabled() {
+                        Ok(false)
+                    } else {
+                        service.set_enabled(true);
+                        registry.set_status(
+                            "db-shell",
+                            ServiceStatus::Active,
+                            Some("DB-Shell aktiviert".to_string()),
+                        );
+                        Ok(true)
+                    }
+                })
+            },
+            move |_force| {
+                let service = Arc::clone(&db_shell_stop);
+                let registry = Arc::clone(&registry_for_db_shell_stop);
+                Box::pin(async move {
+                    if !service.is_enabled() {
+                        Ok(false)
+                    } else {
+                        service.set_enabled(false);
+                        registry.set_status(
+                            "db-shell",
+                            ServiceStatus::Standby,
+                            Some("DB-Shell deaktiviert".to_string()),
+                        );
+                        Ok(true)
+                    }
+                })
+            },
+        );
+    }
 
     registry.set_status(
         "user-service",

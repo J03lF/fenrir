@@ -3,13 +3,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
-use async_trait::async_trait;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
-use super::{DbShellService, ManagedService, ServiceRegistry, ServiceStatus};
+use super::{DbShellService, ServiceRegistry, ServiceStatus};
 use crate::infra::telemetry;
 
 #[derive(thiserror::Error, Debug)]
@@ -144,7 +142,7 @@ impl SchedulerService {
     ) -> Result<(), SchedulerError>
     where
         F: FnMut() -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = Result<()>> + Send + 'static,
+        Fut: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
     {
         if spec.interval.is_zero() {
             return Err(SchedulerError::InvalidInterval);
@@ -243,56 +241,6 @@ impl SchedulerService {
                 active,
             })
             .collect()
-    }
-}
-
-#[derive(Clone)]
-pub struct SchedulerControl {
-    scheduler: Arc<SchedulerService>,
-    registry: Arc<ServiceRegistry>,
-    db_shell: Arc<DbShellService>,
-}
-
-impl SchedulerControl {
-    pub fn new(
-        scheduler: Arc<SchedulerService>,
-        registry: Arc<ServiceRegistry>,
-        db_shell: Arc<DbShellService>,
-    ) -> Self {
-        Self {
-            scheduler,
-            registry,
-            db_shell,
-        }
-    }
-
-    fn reinstall_jobs(&self) -> anyhow::Result<()> {
-        install_default_jobs(
-            &self.scheduler,
-            Arc::clone(&self.registry),
-            Arc::clone(&self.db_shell),
-        )
-        .map_err(|err| anyhow!(err))
-    }
-}
-
-#[async_trait]
-impl ManagedService for SchedulerControl {
-    fn id(&self) -> &'static str {
-        "scheduler"
-    }
-
-    async fn start(self: Arc<Self>) -> anyhow::Result<bool> {
-        if self.scheduler.start() {
-            self.reinstall_jobs()?;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    async fn stop(self: Arc<Self>, _force: bool) -> anyhow::Result<bool> {
-        Ok(self.scheduler.stop())
     }
 }
 

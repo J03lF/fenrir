@@ -10,6 +10,7 @@ use std::time::SystemTime;
 
 use anyhow::Error as AnyError;
 use async_trait::async_trait;
+use futures::future::BoxFuture;
 use thiserror::Error;
 use tokio::runtime::{Handle, Runtime};
 use tokio::task;
@@ -336,6 +337,19 @@ impl AppServices {
         }
     }
 
+    pub fn register_dynamic_service<FStart, FStop>(
+        &self,
+        id: &'static str,
+        start: FStart,
+        stop: FStop,
+    ) where
+        FStart: Fn() -> BoxFuture<'static, anyhow::Result<bool>> + Send + Sync + 'static,
+        FStop: Fn(bool) -> BoxFuture<'static, anyhow::Result<bool>> + Send + Sync + 'static,
+    {
+        let service = ClosureManagedService::new(id, start, stop);
+        self.register_runtime_service(service);
+    }
+
     fn managed_service(&self, id: &str) -> Option<Arc<dyn ManagedService>> {
         self.managed
             .read()
@@ -413,6 +427,41 @@ impl AppServices {
             }
             other => Ok(other),
         }
+    }
+}
+
+struct ClosureManagedService {
+    id: &'static str,
+    start: Arc<dyn Fn() -> BoxFuture<'static, anyhow::Result<bool>> + Send + Sync>,
+    stop: Arc<dyn Fn(bool) -> BoxFuture<'static, anyhow::Result<bool>> + Send + Sync>,
+}
+
+impl ClosureManagedService {
+    fn new<FStart, FStop>(id: &'static str, start: FStart, stop: FStop) -> Arc<Self>
+    where
+        FStart: Fn() -> BoxFuture<'static, anyhow::Result<bool>> + Send + Sync + 'static,
+        FStop: Fn(bool) -> BoxFuture<'static, anyhow::Result<bool>> + Send + Sync + 'static,
+    {
+        Arc::new(Self {
+            id,
+            start: Arc::new(start),
+            stop: Arc::new(stop),
+        })
+    }
+}
+
+#[async_trait]
+impl ManagedService for ClosureManagedService {
+    fn id(&self) -> &'static str {
+        self.id
+    }
+
+    async fn start(self: Arc<Self>) -> anyhow::Result<bool> {
+        (self.start)().await
+    }
+
+    async fn stop(self: Arc<Self>, force: bool) -> anyhow::Result<bool> {
+        (self.stop)(force).await
     }
 }
 

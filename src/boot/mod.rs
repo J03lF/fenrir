@@ -1,9 +1,12 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::config::{self, AppConfig};
 use crate::domain::db::DbEngine;
+use crate::infra::http::{HttpServer, HttpServerControl, HTTP_SERVICE_ID};
 use crate::infra::storage::memory::{InMemoryTicketRepository, InMemoryUserRepository};
 use crate::infra::{db, logging, ssh, telemetry};
+use crate::services::scheduler::ScheduledJobSpec;
 use crate::services::{
     AppServices, DbShellService, SchedulerService, ServiceDescriptor, ServiceKind, ServiceRegistry,
     ServiceStatus, TicketService, UserService,
@@ -14,11 +17,13 @@ use tracing::info;
 pub struct BootContext {
     pub config: Arc<AppConfig>,
     pub services: Arc<AppServices>,
+    pub http_server: Arc<HttpServer>,
+    pub logging: crate::infra::logging::ReloadHandle,
 }
 
 pub fn boot() -> Result<BootContext> {
     let cfg = config::load()?;
-    logging::init_tracing(&cfg)?;
+    let logging_handle = logging::init_tracing(&cfg)?;
     telemetry::init(&cfg)?;
 
     let adapters = db::manager::build_adapters(&cfg)?;
@@ -34,7 +39,8 @@ pub fn boot() -> Result<BootContext> {
             "DB Shell Service",
             "Interaktive Datenbank-Subshell für Admin-Kommandos",
             ServiceKind::Infrastructure,
-        ),
+        )
+        .critical(),
         ServiceStatus::Active,
         Some("bereit".to_string()),
     );
@@ -45,7 +51,8 @@ pub fn boot() -> Result<BootContext> {
             "User Service",
             "Verwaltet Benutzer und Rollen",
             ServiceKind::Security,
-        ),
+        )
+        .critical(),
         ServiceStatus::Starting,
         Some("Initialisierung".to_string()),
     );
@@ -55,7 +62,8 @@ pub fn boot() -> Result<BootContext> {
             "Ticket Service",
             "Kern-Use-Cases für das Ticketsystem",
             ServiceKind::Infrastructure,
-        ),
+        )
+        .critical(),
         ServiceStatus::Starting,
         Some("Initialisierung".to_string()),
     );
@@ -65,7 +73,8 @@ pub fn boot() -> Result<BootContext> {
             "SSH Transport",
             "Secure Shell Zugang und interaktive Sitzungen",
             ServiceKind::Transport,
-        ),
+        )
+        .critical(),
         ServiceStatus::Starting,
         Some("Initialisierung".to_string()),
     );
@@ -75,7 +84,8 @@ pub fn boot() -> Result<BootContext> {
             "Lokale CLI",
             "Interaktive CLI-Shell (lokal)",
             ServiceKind::Cli,
-        ),
+        )
+        .critical(),
         ServiceStatus::Standby,
         Some("Wartend auf Aufruf".to_string()),
     );
@@ -85,9 +95,29 @@ pub fn boot() -> Result<BootContext> {
             "Background Scheduler",
             "Verwaltet periodische Jobs und Tasks",
             ServiceKind::BackgroundJob,
-        ),
+        )
+        .critical(),
         ServiceStatus::Starting,
         Some("Initialisierung".to_string()),
+    );
+
+    registry.register(
+        ServiceDescriptor::new(
+            HTTP_SERVICE_ID,
+            "HTTP Transport",
+            "REST-API, Health und Telemetrie",
+            ServiceKind::Transport,
+        ),
+        if cfg.server.enable_http {
+            ServiceStatus::Standby
+        } else {
+            ServiceStatus::Stopped
+        },
+        Some(if cfg.server.enable_http {
+            "wartet auf Start".to_string()
+        } else {
+            "deaktiviert (enable_http=false)".to_string()
+        }),
     );
 
     crate::infra::telemetry::register_readiness_probe("services", {
@@ -118,6 +148,72 @@ pub fn boot() -> Result<BootContext> {
         Arc::clone(&user_service),
         Arc::clone(&registry),
     ));
+    services.set_logging_handle(logging_handle.clone());
+
+    scheduler_service
+        .schedule_fixed_rate(
+            ScheduledJobSpec {
+                id: "telemetry-health-refresh".to_string(),
+                interval: Duration::from_secs(60),
+                initial_delay: Some(Duration::from_secs(10)),
+                description: "Aktualisiert Telemetrie-Uptime und Scheduler-Note".to_string(),
+            },
+            {
+                let registry = Arc::clone(&registry);
+                move || {
+                    let registry = Arc::clone(&registry);
+                    async move {
+                        if let Some(snapshot) = crate::infra::telemetry::snapshot() {
+                            registry.update_note(
+                                "scheduler",
+                                Some(format!("Uptime {}s", snapshot.uptime.as_secs())),
+                            );
+                        }
+                        Ok::<(), anyhow::Error>(())
+                    }
+                }
+            },
+        )
+        .map_err(|err| anyhow!(err))?;
+
+    let services_for_health = Arc::clone(&services);
+    scheduler_service
+        .schedule_fixed_rate(
+            ScheduledJobSpec {
+                id: "service-health-scan".to_string(),
+                interval: Duration::from_secs(30),
+                initial_delay: Some(Duration::from_secs(5)),
+                description: "Scannt Service-Registry auf Fehlzustände".to_string(),
+            },
+            move || {
+                let services = Arc::clone(&services_for_health);
+                async move {
+                    let snapshot = services.registry().snapshot();
+                    let failed = snapshot
+                        .iter()
+                        .filter(|svc| matches!(svc.status, ServiceStatus::Failed))
+                        .count();
+                    let degraded = snapshot
+                        .iter()
+                        .filter(|svc| matches!(svc.status, ServiceStatus::Degraded))
+                        .count();
+                    services.registry().update_note(
+                        "scheduler",
+                        Some(format!("Jobs aktiv – failed={failed}, degraded={degraded}")),
+                    );
+                    Ok::<(), anyhow::Error>(())
+                }
+            },
+        )
+        .map_err(|err| anyhow!(err))?;
+
+    let http_server = Arc::new(HttpServer::new(
+        &cfg,
+        Arc::clone(&registry),
+        Arc::downgrade(&services),
+    )?);
+    let http_control = Arc::new(HttpServerControl::new(Arc::clone(&http_server)));
+    services.register_runtime_service(http_control);
 
     registry.set_status(
         "user-service",
@@ -137,6 +233,8 @@ pub fn boot() -> Result<BootContext> {
     Ok(BootContext {
         config: Arc::new(cfg),
         services,
+        http_server,
+        logging: logging_handle,
     })
 }
 
@@ -160,6 +258,75 @@ pub async fn start_transports(ctx: &BootContext) -> Result<()> {
             );
         }
     });
+
+    if ctx.config.server.enable_http {
+        let registry = ctx.services.registry();
+        registry.set_status(
+            HTTP_SERVICE_ID,
+            ServiceStatus::Starting,
+            Some("initialisiere".to_string()),
+        );
+        let http_server = Arc::clone(&ctx.http_server);
+        tokio::spawn(async move {
+            if let Err(err) = http_server.start().await {
+                tracing::error!(error = %err, "http server start failed");
+                registry.set_status(
+                    HTTP_SERVICE_ID,
+                    ServiceStatus::Failed,
+                    Some(format!("Start-Fehler: {err}")),
+                );
+            }
+        });
+    }
+    spawn_config_reloader(ctx)?;
     info!("transport initialisation triggered");
+    Ok(())
+}
+
+fn spawn_config_reloader(ctx: &BootContext) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+
+        let logging = ctx.logging.clone();
+        let http_server = Arc::clone(&ctx.http_server);
+        tokio::spawn(async move {
+            let mut hup = match signal(SignalKind::hangup()) {
+                Ok(signal) => signal,
+                Err(err) => {
+                    tracing::warn!(error = %err, "konnte SIGHUP-Signal-Handler nicht initialisieren");
+                    return;
+                }
+            };
+
+            while hup.recv().await.is_some() {
+                match crate::config::load() {
+                    Ok(new_cfg) => {
+                        if let Err(err) =
+                            logging::reload(&logging, &new_cfg.telemetry.tracing_level)
+                        {
+                            tracing::warn!(error = %err, "konnte Logging-Level nicht aktualisieren");
+                        }
+                        telemetry::reload(&new_cfg);
+                        if let Err(err) = http_server.reload_tls(&new_cfg.server.http.tls).await {
+                            tracing::warn!(error = %err, "TLS-Reload fehlgeschlagen");
+                        }
+                        tracing::info!("Konfiguration (Logging/Telemetry/TLS) neu geladen");
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, "Konfigurations-Reload fehlgeschlagen")
+                    }
+                }
+            }
+        });
+    }
+
+    #[cfg(not(unix))]
+    {
+        tracing::info!(
+            "Config-Hot-Reload wird auf dieser Plattform nicht unterstützt; SIGHUP-Replay übersprungen"
+        );
+    }
+
     Ok(())
 }

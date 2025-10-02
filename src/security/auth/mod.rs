@@ -1,8 +1,31 @@
+pub mod http;
+
+pub use http::ControlPlaneAuthorizer;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Role {
     Admin,
     Operator,
     Viewer,
+}
+
+impl Role {
+    pub fn satisfies(&self, required: Role) -> bool {
+        matches!(
+            (self, required),
+            (Role::Admin, _)
+                | (Role::Operator, Role::Operator | Role::Viewer)
+                | (Role::Viewer, Role::Viewer)
+        )
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Role::Admin => "admin",
+            Role::Operator => "operator",
+            Role::Viewer => "viewer",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -1,0 +1,67 @@
+app = { name = "fenrir", version = "0.1.3" }
+
+[server]
+enable_http = false
+enable_grpc = false
+
+[server.ssh]
+host = "127.0.0.1"
+port = 2222
+user = "test"
+server_name = "fenrir-Test"
+host_key_path = "keys/server/ssh/host_ed25519"
+idle_close_seconds = 30
+
+[server.ssh.tls]
+allowed_ciphers = []
+host_key_reload_seconds = 600
+
+[server.http]
+host = "127.0.0.1"
+port = 8080
+
+[server.http.tls]
+enabled = false
+cert_path = "config/certs/server.crt"
+key_path = "config/certs/server.key"
+cipher_suites = ["TLS_AES_256_GCM_SHA384", "TLS_AES_128_GCM_SHA256"]
+reload_interval_seconds = 300
+
+[security]
+allowed_ciphers = ["AES-GCM", "XChaCha20-Poly1305"]
+
+[security.kdf]
+algorithm = "argon2id"
+
+[security.jwt]
+issuer = "fenrir"
+audience = "fenrir-clients"
+exp_seconds = 3600
+
+[security.http]
+control_tokens = [
+  "admin:env:FENRIR_HTTP_TOKEN_ADMIN",
+  "operator:env:FENRIR_HTTP_TOKEN_OPERATOR",
+  "viewer:env:FENRIR_HTTP_TOKEN_VIEWER",
+]
+
+[db]
+default_engine = "postgres"
+
+[db.connections.postgres]
+uri = "env:FENRIR_DB_POSTGRES_URI"
+
+[db.connections.postgres.pool]
+max = 16
+timeout_ms = 5000
+
+[telemetry]
+tracing_level = "error"
+metrics_enabled = false
+health_enabled = true
+
+[audit]
+enabled = true
+
+[cli]
+prompt_theme = "default"

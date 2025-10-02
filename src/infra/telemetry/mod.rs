@@ -13,7 +13,8 @@ struct TelemetryState {
     ready: AtomicBool,
     live: AtomicBool,
     start_time: Instant,
-    config: TelemetryConfig,
+    metrics_enabled: AtomicBool,
+    health_enabled: AtomicBool,
     metrics: Mutex<HashMap<String, u64>>,
     readiness_probes: Mutex<Vec<Probe>>, // lazily evaluated health probes
 }
@@ -24,7 +25,8 @@ impl TelemetryState {
             ready: AtomicBool::new(false),
             live: AtomicBool::new(true),
             start_time: Instant::now(),
-            config,
+            metrics_enabled: AtomicBool::new(config.metrics_enabled),
+            health_enabled: AtomicBool::new(config.health_enabled),
             metrics: Mutex::new(HashMap::new()),
             readiness_probes: Mutex::new(Vec::new()),
         }
@@ -56,6 +58,23 @@ pub fn init(cfg: &AppConfig) -> Result<()> {
     TELEMETRY
         .set(state)
         .map_err(|_| anyhow!("telemetry bereits initialisiert"))
+}
+
+pub fn reload(cfg: &AppConfig) {
+    if let Some(state) = TELEMETRY.get() {
+        let new_cfg = TelemetryConfig::from(cfg);
+        state
+            .metrics_enabled
+            .store(new_cfg.metrics_enabled, Ordering::Release);
+        state
+            .health_enabled
+            .store(new_cfg.health_enabled, Ordering::Release);
+        tracing::info!(
+            metrics_enabled = new_cfg.metrics_enabled,
+            health_enabled = new_cfg.health_enabled,
+            "telemetry-konfiguration aktualisiert"
+        );
+    }
 }
 
 pub fn mark_ready() {
@@ -96,7 +115,7 @@ where
 
 pub fn record_counter(name: &str, delta: u64) {
     if let Some(state) = TELEMETRY.get() {
-        if !state.config.metrics_enabled {
+        if !state.metrics_enabled.load(Ordering::Acquire) {
             return;
         }
         if let Ok(mut metrics) = state.metrics.lock() {
@@ -108,7 +127,7 @@ pub fn record_counter(name: &str, delta: u64) {
 
 pub fn set_counter(name: &str, value: u64) {
     if let Some(state) = TELEMETRY.get() {
-        if !state.config.metrics_enabled {
+        if !state.metrics_enabled.load(Ordering::Acquire) {
             return;
         }
         if let Ok(mut metrics) = state.metrics.lock() {
@@ -122,7 +141,7 @@ pub fn is_ready() -> bool {
         if !state.ready.load(Ordering::Acquire) {
             return false;
         }
-        if !state.config.health_enabled {
+        if !state.health_enabled.load(Ordering::Acquire) {
             return true;
         }
         if let Ok(probes) = state.readiness_probes.lock() {

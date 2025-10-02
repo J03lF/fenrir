@@ -1,23 +1,13 @@
-2025-10-01T09:20:02.962152Z  INFO main ThreadId(01) fenrir::infra::logging: dateilogging initialisiert log_path=logs/app.log
-2025-10-01T09:20:02.962297Z  INFO main ThreadId(01) fenrir::infra::logging: db-logdatei vorbereitet log_path=logs/db.log
-2025-10-01T09:20:02.962346Z  INFO main ThreadId(01) fenrir::boot: core services registered in registry
-2025-10-01T09:20:02.962430Z  INFO main ThreadId(01) fenrir::boot: scheduler service started
-2025-10-01T09:20:02.962440Z  INFO main ThreadId(01) fenrir::boot: user and ticket services initialised
-2025-10-01T09:20:02.962446Z  INFO main ThreadId(01) fenrir::boot: boot complete app=fenrir version=0.1.3
-2025-10-01T09:20:02.962502Z  INFO main ThreadId(01) fenrir::boot: transport initialisation triggered
-2025-10-01T09:20:02.962526Z  INFO tokio-runtime-worker ThreadId(14) fenrir::boot: ssh server task spawned
-2025-10-01T09:20:02.962554Z  INFO tokio-runtime-worker ThreadId(15) fenrir::services::scheduler: scheduler event loop started
-2025-10-01T09:20:02.962682Z  INFO tokio-runtime-worker ThreadId(14) fenrir::infra::ssh: starting SSH server host=127.0.0.1 port=2222
-2025-10-01T09:20:07.200909Z  INFO tokio-runtime-worker ThreadId(03) thrussh::server::encrypted: pty-req: unknown pty code 42
-2025-10-01T09:20:43.667561Z  INFO tokio-runtime-worker ThreadId(03) fenrir::cli::commands::builtins::user: user command invoked command="user" action="list"
-2025-10-01T09:20:43.669112Z  INFO tokio-runtime-worker ThreadId(03) fenrir::services::user: user list returned count=0
-2025-10-01T09:21:02.026506Z  INFO tokio-runtime-worker ThreadId(03) fenrir::cli::commands::builtins::user: user command invoked command="user" action="create"
-2025-10-01T09:21:02.026816Z  INFO tokio-runtime-worker ThreadId(03) fenrir::services::user: user registered user_id=5a5ba64f-27d8-45c7-9c82-811d1ca815a5 username=mama
-2025-10-01T09:21:03.958776Z  INFO tokio-runtime-worker ThreadId(03) fenrir::cli::commands::builtins::user: user command invoked command="user" action="list"
-2025-10-01T09:21:03.959838Z  INFO tokio-runtime-worker ThreadId(03) fenrir::services::user: user list returned count=1
-2025-10-01T09:21:12.479292Z  INFO tokio-runtime-worker ThreadId(03) fenrir::cli::commands::builtins::log: log command invoked command="log" target="app"
-2025-10-01T09:21:26.910306Z  INFO tokio-runtime-worker ThreadId(03) fenrir::cli::commands::builtins::user: user command invoked command="user" action="lock"
-2025-10-01T09:21:26.911460Z  INFO tokio-runtime-worker ThreadId(03) fenrir::services::user: user lock state updated user_id=5a5ba64f-27d8-45c7-9c82-811d1ca815a5 locked=true
-2025-10-01T09:21:31.320354Z  INFO tokio-runtime-worker ThreadId(03) fenrir::cli::commands::builtins::user: user command invoked command="user" action="unlock"
-2025-10-01T09:21:31.321729Z  INFO tokio-runtime-worker ThreadId(03) fenrir::services::user: user lock state updated user_id=5a5ba64f-27d8-45c7-9c82-811d1ca815a5 locked=false
-2025-10-01T09:21:48.393339Z  INFO tokio-runtime-worker ThreadId(03) fenrir::cli::commands::builtins::user: user command invoked command="user" action="show"
+2025-10-02T13:31:12.676630Z  INFO main ThreadId(01) fenrir::infra::logging: dateilogging initialisiert log_path=logs/app.log
+2025-10-02T13:31:12.676884Z  INFO main ThreadId(01) fenrir::infra::logging: db-logdatei vorbereitet log_path=logs/db.log
+2025-10-02T13:31:12.677030Z  INFO main ThreadId(01) fenrir::boot: core services registered in registry
+2025-10-02T13:31:12.677275Z  INFO main ThreadId(01) fenrir::boot: scheduler service started
+2025-10-02T13:31:12.677666Z  INFO tokio-runtime-worker ThreadId(06) fenrir::services::scheduler: scheduler heartbeat loop started
+2025-10-02T13:31:12.677704Z  INFO                 main ThreadId(01) fenrir::boot: user and ticket services initialised
+2025-10-02T13:31:12.677721Z  INFO                 main ThreadId(01) fenrir::boot: boot complete app=fenrir version=0.1.3
+2025-10-02T13:31:12.677798Z  INFO                 main ThreadId(01) fenrir::boot: transport initialisation triggered
+2025-10-02T13:31:12.677841Z  INFO tokio-runtime-worker ThreadId(06) fenrir::boot: ssh server task spawned
+2025-10-02T13:31:12.678426Z  INFO tokio-runtime-worker ThreadId(06) fenrir::infra::ssh: starting SSH server host=127.0.0.1 port=2222
+2025-10-02T13:31:15.376875Z  INFO tokio-runtime-worker ThreadId(08) fenrir::services::scheduler: scheduler job aborted during shutdown job=service-health-scan
+2025-10-02T13:31:15.377093Z  INFO tokio-runtime-worker ThreadId(08) fenrir::services::scheduler: scheduler job aborted during shutdown job=telemetry-health-refresh
+2025-10-02T13:31:15.377166Z  INFO tokio-runtime-worker ThreadId(08) fenrir::services::scheduler: scheduler service dropped and resources cleaned up

@@ -12,9 +12,18 @@ server_name = "fenrir-Test"
 host_key_path = "keys/server/ssh/host_ed25519"
 idle_close_seconds = 30
 
+[server.ssh.tls]
+allowed_ciphers = []
+
 [server.http]
 host = "127.0.0.1"
 port = 8080
+
+[server.http.tls]
+enabled = false
+cert_path = "config/certs/server.crt"
+key_path = "config/certs/server.key"
+cipher_suites = ["TLS_AES_256_GCM_SHA384", "TLS_AES_128_GCM_SHA256"]
 
 [security]
 allowed_ciphers = ["AES-GCM", "XChaCha20-Poly1305"]
@@ -26,6 +35,13 @@ algorithm = "argon2id"
 issuer = "fenrir"
 audience = "fenrir-clients"
 exp_seconds = 3600
+
+[security.http]
+control_tokens = [
+  "admin:env:FENRIR_HTTP_TOKEN_ADMIN",
+  "operator:env:FENRIR_HTTP_TOKEN_OPERATOR",
+  "viewer:env:FENRIR_HTTP_TOKEN_VIEWER",
+]
 
 [db]
 default_engine = "postgres"

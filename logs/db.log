@@ -1,8 +1,0 @@
-2025-10-01T09:20:43Z SELECT users filter=UserFilter { role: None, search: None, include_locked: false }
-2025-10-01T09:21:02Z INSERT users id=5a5ba64f-27d8-45c7-9c82-811d1ca815a5 username=mama roles=[Viewer]
-2025-10-01T09:21:03Z SELECT users filter=UserFilter { role: None, search: None, include_locked: false }
-2025-10-01T09:21:26Z SELECT user by username=mama
-2025-10-01T09:21:26Z UPDATE users id=5a5ba64f-27d8-45c7-9c82-811d1ca815a5 set locked=true
-2025-10-01T09:21:31Z SELECT user by username=mama
-2025-10-01T09:21:31Z UPDATE users id=5a5ba64f-27d8-45c7-9c82-811d1ca815a5 set locked=false
-2025-10-01T09:21:48Z SELECT user by username=mama

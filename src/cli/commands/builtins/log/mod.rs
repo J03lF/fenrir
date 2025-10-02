@@ -14,20 +14,21 @@ const DETAILS: &[&str] = &[
     "log db           – streamt die DB-Logdatei",
     "log all          – öffnet App- und DB-Logs parallel",
     "log archive <ziel> – zeigt die letzte Archivdatei (ziel: app|db)",
+    "log level <stufe> – setzt das Runtime-Loglevel (z. B. trace|debug|info|warn|error)",
 ];
 
 pub fn command() -> CommandEntry {
     CommandEntry::new(
         "log",
         "Öffnet einen Log-Stream in einem neuen Terminal",
-        "log [app|db|all|archive <ziel>]",
+        "log [app|db|all|archive <ziel>|level <stufe>]",
         DETAILS,
         handle,
     )
 }
 
 fn handle(
-    _deps: &CliDependencies,
+    deps: &CliDependencies,
     args: &[&str],
     _registry: &CommandRegistry,
     out: &mut dyn Write,
@@ -60,6 +61,37 @@ fn handle(
             display_log_result(out, "App", logging::log_file_path())?;
             display_log_result(out, "DB", logging::db_log_file_path())?;
         }
+        "level" => {
+            let Some(level) = iter.next() else {
+                writeln!(
+                    out,
+                    "fehlender Wert. Nutzung: log level <trace|debug|info|warn|error>"
+                )?;
+                return Ok(CommandOutcome::Continue);
+            };
+            if let Some(handle) = deps.services.logging_handle() {
+                match logging::reload(&handle, level) {
+                    Ok(()) => {
+                        writeln!(out, "Loglevel aktualisiert auf '{level}'.")?;
+                        info!(
+                            command = "log",
+                            mode = "level",
+                            value = level,
+                            "log level updated"
+                        );
+                    }
+                    Err(err) => {
+                        writeln!(out, "Konnte Loglevel nicht setzen: {err}")?;
+                        tracing::warn!(error = %err, "failed to reload log level");
+                    }
+                }
+            } else {
+                writeln!(
+                    out,
+                    "Kein Logging-Reload-Handle vorhanden. SIGHUP oder CLI-Reload wird nicht unterstützt."
+                )?;
+            }
+        }
         "archive" => {
             let target = iter.next().unwrap_or("app");
             if let Some(kind) = parse_target(target) {
@@ -83,7 +115,7 @@ fn handle(
             warn!(command = "log", target = other, "unknown log subcommand");
             writeln!(
                 out,
-                "unbekanntes Ziel: {other}. Nutze 'log [app|db|all]' oder 'log archive [app|db]'."
+                "unbekanntes Ziel: {other}. Nutze 'log [app|db|all]', 'log archive [app|db]' oder 'log level <stufe>'."
             )?;
         }
     }
@@ -132,7 +164,8 @@ fn launch_macos(path: &std::path::Path) -> std::io::Result<()> {
     let cmd = escape_applescript(&command);
 
     // Erzwingt neuen Tab via Cmd+T und schreibt den Befehl genau in den ausgewählten Tab
-    let script = format!(r#"
+    let script = format!(
+        r#"
 tell application "Terminal"
     activate
     if (count of windows) = 0 then
@@ -150,7 +183,9 @@ tell application "Terminal"
         do script "{cmd}" in selected tab of front window
     end if
 end tell
-"#, cmd = cmd);
+"#,
+        cmd = cmd
+    );
 
     std::process::Command::new("osascript")
         .arg("-e")
@@ -158,7 +193,6 @@ end tell
         .spawn()
         .map(|_| ())
 }
-
 
 fn launch_linux(path: &Path) -> io::Result<()> {
     let tail_command = format!(

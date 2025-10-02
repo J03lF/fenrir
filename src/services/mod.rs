@@ -4,8 +4,17 @@ pub mod ticket;
 pub mod user;
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
+
+use anyhow::Error as AnyError;
+use async_trait::async_trait;
+use thiserror::Error;
+use tokio::runtime::{Handle, Runtime};
+use tokio::task;
+
+use crate::infra::logging::ReloadHandle;
 
 pub use db_shell::DbShellService;
 pub use scheduler::SchedulerService;
@@ -66,6 +75,7 @@ pub struct ServiceDescriptor {
     pub name: &'static str,
     pub description: &'static str,
     pub kind: ServiceKind,
+    pub critical: bool,
 }
 
 impl ServiceDescriptor {
@@ -80,6 +90,14 @@ impl ServiceDescriptor {
             name,
             description,
             kind,
+            critical: false,
+        }
+    }
+
+    pub const fn critical(self) -> Self {
+        Self {
+            critical: true,
+            ..self
         }
     }
 }
@@ -90,6 +108,50 @@ pub struct ServiceSnapshot {
     pub status: ServiceStatus,
     pub since: SystemTime,
     pub note: Option<String>,
+}
+
+#[async_trait]
+pub trait ManagedService: Send + Sync + 'static {
+    fn id(&self) -> &'static str;
+    async fn start(self: Arc<Self>) -> anyhow::Result<bool>;
+    async fn stop(self: Arc<Self>, force: bool) -> anyhow::Result<bool>;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServiceControlOutcome {
+    Started,
+    AlreadyRunning,
+    Stopped,
+    AlreadyStopped,
+    Restarted,
+}
+
+impl ServiceControlOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ServiceControlOutcome::Started => "started",
+            ServiceControlOutcome::AlreadyRunning => "already_running",
+            ServiceControlOutcome::Stopped => "stopped",
+            ServiceControlOutcome::AlreadyStopped => "already_stopped",
+            ServiceControlOutcome::Restarted => "restarted",
+        }
+    }
+}
+
+#[derive(Error, Debug)]
+pub enum ServiceControlError {
+    #[error("service `{0}` ist unbekannt")]
+    UnknownService(String),
+    #[error("service `{0}` unterstützt keine Laufzeitsteuerung")]
+    NotControllable(String),
+    #[error("service `{0}` ist als kritisch markiert – --force erforderlich")]
+    ForceRequired(String),
+    #[error("operation für service `{id}` fehlgeschlagen: {source}")]
+    OperationFailed {
+        id: String,
+        #[source]
+        source: AnyError,
+    },
 }
 
 struct ServiceRecord {
@@ -170,15 +232,28 @@ impl ServiceRegistry {
             Err(_) => Vec::new(),
         }
     }
+
+    pub fn get(&self, id: &str) -> Option<ServiceSnapshot> {
+        match self.inner.read() {
+            Ok(guard) => guard.get(id).map(|record| ServiceSnapshot {
+                descriptor: record.descriptor,
+                status: record.status,
+                since: record.since,
+                note: record.note.clone(),
+            }),
+            Err(_) => None,
+        }
+    }
 }
 
-#[derive(Clone)]
 pub struct AppServices {
     pub db_shell: Arc<DbShellService>,
     pub scheduler: Arc<SchedulerService>,
     pub ticket: Arc<TicketService>,
     pub user: Arc<UserService>,
     registry: Arc<ServiceRegistry>,
+    managed: RwLock<BTreeMap<&'static str, Arc<dyn ManagedService>>>,
+    logging: RwLock<Option<ReloadHandle>>,
 }
 
 impl AppServices {
@@ -195,10 +270,127 @@ impl AppServices {
             ticket,
             user,
             registry,
+            managed: RwLock::new(BTreeMap::new()),
+            logging: RwLock::new(None),
         }
     }
 
     pub fn registry(&self) -> Arc<ServiceRegistry> {
         Arc::clone(&self.registry)
+    }
+
+    pub fn set_logging_handle(&self, handle: ReloadHandle) {
+        if let Ok(mut guard) = self.logging.write() {
+            *guard = Some(handle);
+        } else {
+            tracing::error!("logging handle lock poisoned");
+        }
+    }
+
+    pub fn logging_handle(&self) -> Option<ReloadHandle> {
+        self.logging.read().ok().and_then(|guard| guard.clone())
+    }
+
+    pub fn scheduler_service(&self) -> Arc<SchedulerService> {
+        Arc::clone(&self.scheduler)
+    }
+
+    pub fn register_runtime_service<T>(&self, service: Arc<T>)
+    where
+        T: ManagedService,
+    {
+        let service: Arc<dyn ManagedService> = service;
+        if let Ok(mut guard) = self.managed.write() {
+            guard.insert(service.id(), service);
+        } else {
+            tracing::error!("managed service registry lock poisoned");
+        }
+    }
+
+    fn managed_service(&self, id: &str) -> Option<Arc<dyn ManagedService>> {
+        self.managed
+            .read()
+            .ok()
+            .and_then(|guard| guard.get(id).cloned())
+    }
+
+    pub fn start_service(&self, id: &str) -> Result<ServiceControlOutcome, ServiceControlError> {
+        let descriptor = self
+            .registry
+            .get(id)
+            .ok_or_else(|| ServiceControlError::UnknownService(id.to_string()))?;
+        let handle = self
+            .managed_service(id)
+            .ok_or_else(|| ServiceControlError::NotControllable(id.to_string()))?;
+        let fut = Arc::clone(&handle).start();
+        match block_on_managed(fut) {
+            Ok(true) => Ok(ServiceControlOutcome::Started),
+            Ok(false) => Ok(ServiceControlOutcome::AlreadyRunning),
+            Err(err) => Err(ServiceControlError::OperationFailed {
+                id: descriptor.descriptor.id.to_string(),
+                source: err,
+            }),
+        }
+    }
+
+    pub fn stop_service(
+        &self,
+        id: &str,
+        force: bool,
+    ) -> Result<ServiceControlOutcome, ServiceControlError> {
+        let snapshot = self
+            .registry
+            .get(id)
+            .ok_or_else(|| ServiceControlError::UnknownService(id.to_string()))?;
+        if snapshot.descriptor.critical && !force {
+            return Err(ServiceControlError::ForceRequired(id.to_string()));
+        }
+        let handle = self
+            .managed_service(id)
+            .ok_or_else(|| ServiceControlError::NotControllable(id.to_string()))?;
+        let fut = Arc::clone(&handle).stop(force);
+        match block_on_managed(fut) {
+            Ok(true) => Ok(ServiceControlOutcome::Stopped),
+            Ok(false) => Ok(ServiceControlOutcome::AlreadyStopped),
+            Err(err) => Err(ServiceControlError::OperationFailed {
+                id: id.to_string(),
+                source: err,
+            }),
+        }
+    }
+
+    pub fn restart_service(
+        &self,
+        id: &str,
+        force: bool,
+    ) -> Result<ServiceControlOutcome, ServiceControlError> {
+        let snapshot = self
+            .registry
+            .get(id)
+            .ok_or_else(|| ServiceControlError::UnknownService(id.to_string()))?;
+        if snapshot.descriptor.critical && !force {
+            return Err(ServiceControlError::ForceRequired(id.to_string()));
+        }
+        let _ = self.stop_service(id, force)?;
+        match self.start_service(id)? {
+            ServiceControlOutcome::Started | ServiceControlOutcome::AlreadyRunning => {
+                Ok(ServiceControlOutcome::Restarted)
+            }
+            other => Ok(other),
+        }
+    }
+}
+
+fn block_on_managed<F, T>(future: F) -> T
+where
+    F: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    match Handle::try_current() {
+        Ok(handle) => task::block_in_place(|| handle.block_on(future)),
+        Err(_) => {
+            let runtime = Runtime::new().expect("tokio runtime for managed service");
+            runtime.block_on(future)
+        }
     }
 }

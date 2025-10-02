@@ -22,6 +22,9 @@ fn harness() -> &'static TestHarness {
             "FENRIR_DB_POSTGRES_URI",
             "postgresql://localhost:5432/fenrir_test",
         );
+        std::env::set_var("FENRIR_HTTP_TOKEN_ADMIN", "test-admin-token");
+        std::env::set_var("FENRIR_HTTP_TOKEN_OPERATOR", "test-operator-token");
+        std::env::set_var("FENRIR_HTTP_TOKEN_VIEWER", "test-viewer-token");
         let ctx = boot::boot().expect("boot context");
         TestHarness {
             config: Arc::clone(&ctx.config),

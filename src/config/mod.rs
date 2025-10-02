@@ -33,12 +33,33 @@ pub struct SshConfig {
     pub server_name: String,
     pub host_key_path: String,
     pub idle_close_seconds: Option<u64>,
+    #[serde(default)]
+    pub tls: SshTlsConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct HttpConfig {
     pub host: String,
     pub port: u16,
+    #[serde(default)]
+    pub tls: HttpTlsConfig,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct HttpTlsConfig {
+    pub enabled: bool,
+    pub cert_path: Option<String>,
+    pub key_path: Option<String>,
+    #[serde(default)]
+    pub cipher_suites: Vec<String>,
+    pub reload_interval_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct SshTlsConfig {
+    #[serde(default)]
+    pub allowed_ciphers: Vec<String>,
+    pub host_key_reload_seconds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -46,6 +67,8 @@ pub struct SecuritySection {
     pub kdf: KdfConfig,
     pub jwt: JwtConfig,
     pub allowed_ciphers: Vec<String>,
+    #[serde(default)]
+    pub http: HttpSecuritySection,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -58,6 +81,18 @@ pub struct JwtConfig {
     pub issuer: String,
     pub audience: String,
     pub exp_seconds: u64,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct HttpSecuritySection {
+    #[serde(default)]
+    pub control_tokens: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HttpControlToken {
+    pub role: String,
+    pub secret: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -115,6 +150,38 @@ pub enum ConfigError {
     MissingEnv { key: &'static str, var: String },
 }
 
+impl HttpSecuritySection {
+    pub fn resolve_control_tokens(&self) -> Result<Vec<HttpControlToken>, ConfigError> {
+        let mut resolved = Vec::with_capacity(self.control_tokens.len());
+        for entry in &self.control_tokens {
+            let (role, value) = parse_role_token(entry)?;
+            let secret = resolve_secret(value)?;
+            if secret.is_empty() {
+                return Err(ConfigError::Invalid(
+                    "security.http.control_tokens secrets must not be empty",
+                ));
+            }
+            resolved.push(HttpControlToken { role, secret });
+        }
+        Ok(resolved)
+    }
+
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        let tokens = self.resolve_control_tokens()?;
+        for token in tokens {
+            match token.role.as_str() {
+                "admin" | "operator" | "viewer" => {}
+                _ => {
+                    return Err(ConfigError::Invalid(
+                        "security.http.control_tokens must prefix role as admin|operator|viewer",
+                    ))
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 impl DbConnectionSettings {
     pub fn resolve_uri(&self, key: &'static str) -> Result<String, ConfigError> {
         let raw = self.uri.trim();
@@ -144,6 +211,43 @@ impl DbConnectionSettings {
 
     pub fn pool_timeout(&self) -> Option<u64> {
         self.pool.timeout_ms
+    }
+}
+
+fn parse_role_token(raw: &str) -> Result<(String, &str), ConfigError> {
+    let mut parts = raw.splitn(2, ':');
+    let role = parts
+        .next()
+        .map(str::trim)
+        .filter(|role| !role.is_empty())
+        .ok_or(ConfigError::Invalid(
+            "security.http.control_tokens entries must start with <role>:<secret>",
+        ))?;
+    let value = parts
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or(ConfigError::Invalid(
+            "security.http.control_tokens entries must contain a secret reference",
+        ))?;
+    Ok((role.to_ascii_lowercase(), value))
+}
+
+fn resolve_secret(value: &str) -> Result<String, ConfigError> {
+    if let Some(env) = value.strip_prefix("env:") {
+        let var = env.trim();
+        match std::env::var(var) {
+            Ok(secret) if !secret.trim().is_empty() => Ok(secret),
+            Ok(_) => Err(ConfigError::Invalid(
+                "environment variable for control token must not be empty",
+            )),
+            Err(_) => Err(ConfigError::MissingEnv {
+                key: "security.http.control_tokens",
+                var: var.to_string(),
+            }),
+        }
+    } else {
+        Ok(value.to_string())
     }
 }
 
@@ -235,6 +339,70 @@ pub fn validate(cfg: &AppConfig) -> Result<(), ConfigError> {
             "server.ssh.host_key_path must not be empty",
         ));
     }
+    validate_http_tls(&cfg.server.http)?;
+    validate_ssh_tls(&cfg.server.ssh)?;
+    cfg.security.http.validate()?;
+    Ok(())
+}
+
+fn validate_http_tls(http: &HttpConfig) -> Result<(), ConfigError> {
+    let tls = &http.tls;
+    if tls.enabled {
+        let cert = tls
+            .cert_path
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .ok_or(ConfigError::Invalid(
+                "server.http.tls.cert_path muss gesetzt sein, wenn TLS aktiviert ist",
+            ))?;
+        let key = tls
+            .key_path
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .ok_or(ConfigError::Invalid(
+                "server.http.tls.key_path muss gesetzt sein, wenn TLS aktiviert ist",
+            ))?;
+        if cert == key {
+            return Err(ConfigError::Invalid(
+                "server.http.tls.cert_path und key_path dürfen nicht identisch sein",
+            ));
+        }
+        if tls.cipher_suites.is_empty() {
+            return Err(ConfigError::Invalid(
+                "server.http.tls.cipher_suites darf bei aktiviertem TLS nicht leer sein",
+            ));
+        }
+        if let Some(interval) = tls.reload_interval_seconds {
+            if interval == 0 {
+                return Err(ConfigError::Invalid(
+                    "server.http.tls.reload_interval_seconds muss > 0 sein",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_ssh_tls(ssh: &SshConfig) -> Result<(), ConfigError> {
+    if let Some(interval) = ssh.tls.host_key_reload_seconds {
+        if interval == 0 {
+            return Err(ConfigError::Invalid(
+                "server.ssh.tls.host_key_reload_seconds muss > 0 sein",
+            ));
+        }
+    }
+    if ssh
+        .tls
+        .allowed_ciphers
+        .iter()
+        .any(|cipher| cipher.trim().is_empty())
+    {
+        return Err(ConfigError::Invalid(
+            "server.ssh.tls.allowed_ciphers darf keine leeren Einträge enthalten",
+        ));
+    }
     Ok(())
 }
 
@@ -248,6 +416,9 @@ mod tests {
             "FENRIR_DB_POSTGRES_URI",
             "postgresql://localhost:5432/fenrir",
         );
+        std::env::set_var("FENRIR_HTTP_TOKEN_ADMIN", "admin-token");
+        std::env::set_var("FENRIR_HTTP_TOKEN_OPERATOR", "operator-token");
+        std::env::set_var("FENRIR_HTTP_TOKEN_VIEWER", "viewer-token");
         let cfg = load().expect("config should load");
         assert!(!cfg.app.name.is_empty());
     }

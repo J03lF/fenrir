@@ -5,10 +5,13 @@ use std::sync::OnceLock;
 
 use anyhow::{anyhow, Context, Result};
 use time::{format_description, OffsetDateTime};
-use tracing::{info, warn};
+use tracing::info;
 use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
 use tracing_subscriber::fmt::writer::MakeWriterExt;
-use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::reload::{self, Handle};
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{fmt, EnvFilter, Registry};
 
 use crate::config::AppConfig;
 
@@ -21,37 +24,55 @@ static LOG_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
 static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
 static DB_LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
 
-pub fn init_tracing(cfg: &AppConfig) -> Result<()> {
+#[derive(Clone)]
+pub struct ReloadHandle {
+    inner: Handle<EnvFilter, Registry>,
+}
+
+impl ReloadHandle {
+    pub fn reload_level(&self, level: &str) -> Result<()> {
+        let filter = EnvFilter::try_new(level.to_string())
+            .map_err(|err| anyhow!("ungültiger tracing level '{}': {err}", level))?;
+        self.inner
+            .reload(filter)
+            .map_err(|err| anyhow!("konnte logging filter nicht aktualisieren: {err}"))
+    }
+}
+
+pub fn init_tracing(cfg: &AppConfig) -> Result<ReloadHandle> {
     prepare_db_log()?;
 
     let filter = EnvFilter::try_from_default_env()
         .or_else(|_| EnvFilter::try_new(cfg.telemetry.tracing_level.clone()))
         .unwrap_or_else(|_| EnvFilter::new("info"));
+    let (filter_layer, handle) = reload::Layer::new(filter);
+
+    let base = tracing_subscriber::registry().with(filter_layer);
 
     if let Some((file_writer, guard, path)) = build_app_writer()? {
         LOG_GUARD.set(guard).ok();
         LOG_PATH.set(path.clone()).ok();
         let stdout_writer = io::stdout as fn() -> io::Stdout;
         let combined = file_writer.and(stdout_writer);
-        fmt::fmt()
-            .with_env_filter(filter)
+        let fmt_layer = fmt::layer()
             .with_target(true)
             .with_thread_ids(true)
             .with_thread_names(true)
             .with_writer(combined)
-            .with_ansi(false)
+            .with_ansi(false);
+        base.with(fmt_layer)
             .try_init()
             .map_err(|err| anyhow!("konnte Tracing-Subscriber nicht initialisieren: {err}"))?;
         info!(log_path = %path.display(), "dateilogging initialisiert");
     } else {
         let ansi = io::stdout().is_terminal();
-        fmt::fmt()
-            .with_env_filter(filter)
+        let fmt_layer = fmt::layer()
             .with_target(true)
             .with_thread_ids(true)
             .with_thread_names(true)
             .with_writer(io::stdout as fn() -> io::Stdout)
-            .with_ansi(ansi)
+            .with_ansi(ansi);
+        base.with(fmt_layer)
             .try_init()
             .map_err(|err| anyhow!("konnte Tracing-Subscriber nicht initialisieren: {err}"))?;
         info!("logging auf stdout initialisiert");
@@ -61,7 +82,11 @@ pub fn init_tracing(cfg: &AppConfig) -> Result<()> {
         info!(log_path = %path.display(), "db-logdatei vorbereitet");
     }
 
-    Ok(())
+    Ok(ReloadHandle { inner: handle })
+}
+
+pub fn reload(handle: &ReloadHandle, level: &str) -> Result<()> {
+    handle.reload_level(level)
 }
 
 pub fn log_file_path() -> Option<PathBuf> {
@@ -204,11 +229,11 @@ fn prune_archives(dir: &Path, prefix: &str, keep: usize) -> Result<()> {
         })
         .collect();
     archives.sort();
-    let excess = archives.len().saturating_sub(keep);
-    for path in archives.into_iter().take(excess) {
-        if let Err(err) = fs::remove_file(&path) {
-            warn!(error = %err, file = %path.display(), "konnte Archivdatei nicht löschen");
+    while archives.len() > keep {
+        if let Some(oldest) = archives.first() {
+            fs::remove_file(oldest)?;
         }
+        archives.remove(0);
     }
     Ok(())
 }
@@ -216,13 +241,11 @@ fn prune_archives(dir: &Path, prefix: &str, keep: usize) -> Result<()> {
 fn archive_dir_for(current: &Path) -> PathBuf {
     current
         .parent()
-        .map(|parent| parent.join(ARCHIVE_DIR))
-        .unwrap_or_else(|| PathBuf::from(ARCHIVE_DIR))
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(ARCHIVE_DIR)
 }
 
-fn env_var(key: &str) -> Option<String> {
-    std::env::var(key)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|v| !v.is_empty())
+fn env_var(name: &str) -> Option<String> {
+    std::env::var(name).ok()
 }

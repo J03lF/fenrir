@@ -224,6 +224,14 @@ impl Handler {
                     false
                 }
                 Ok(CommandStatus::Executed(CommandOutcome::EnterDbShell)) => {
+                    if !self.services.db_shell.is_enabled() {
+                        let _ = writeln!(
+                            &mut writer,
+                            "DB-Shell ist deaktiviert. Nutze 'services start db-shell'."
+                        );
+                        Handler::send_prompt(session, channel, self.current_prompt());
+                        return true;
+                    }
                     self.mode = ShellMode::DbShell;
                     self.buffer.clear();
                     self.history_index = None;
@@ -305,6 +313,15 @@ impl Handler {
         }
 
         if self.db_session.is_none() {
+            if !self.services.db_shell.is_enabled() {
+                let _ = writeln!(
+                    &mut writer,
+                    "DB-Shell ist deaktiviert. Zurück zur Hauptshell."
+                );
+                self.mode = ShellMode::Main;
+                Handler::send_prompt(session, channel, self.current_prompt());
+                return true;
+            }
             self.db_session = Some(self.services.db_shell.create_session());
         }
 
@@ -331,6 +348,17 @@ impl Handler {
         };
 
         if let Some(db_session) = self.db_session.as_mut() {
+            if !self.services.db_shell.is_enabled() {
+                let _ = writeln!(
+                    &mut writer,
+                    "DB-Shell wurde deaktiviert. Rückkehr zur Hauptshell."
+                );
+                self.mode = ShellMode::Main;
+                self.db_session = None;
+                self.db_executor = None;
+                Handler::send_prompt(session, channel, self.current_prompt());
+                return true;
+            }
             match db_shell::apply_command(db_session, trimmed, executor.as_ref(), &mut writer) {
                 Ok(true) => {
                     Handler::send_prompt(session, channel, self.current_prompt());

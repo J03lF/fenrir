@@ -3,12 +3,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
+use async_trait::async_trait;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
-use crate::services::{ServiceRegistry, ServiceStatus};
+use super::{DbShellService, ManagedService, ServiceRegistry, ServiceStatus};
+use crate::infra::telemetry;
 
 #[derive(thiserror::Error, Debug)]
 pub enum SchedulerError {
@@ -67,12 +69,12 @@ impl SchedulerService {
         }
     }
 
-    pub fn start(&self) {
+    pub fn start(&self) -> bool {
         {
             let guard = self.heartbeat.lock().expect("scheduler heartbeat lock");
             if guard.is_some() {
                 info!("scheduler already running, skipping start request");
-                return;
+                return false;
             }
         }
         self.registry.set_status(
@@ -96,6 +98,43 @@ impl SchedulerService {
         });
         let mut guard = self.heartbeat.lock().expect("scheduler heartbeat lock");
         *guard = Some(handle);
+        true
+    }
+
+    pub fn stop(&self) -> bool {
+        let mut heartbeat = self.heartbeat.lock().expect("scheduler heartbeat lock");
+        let Some(handle) = heartbeat.take() else {
+            debug!("scheduler stop requested but heartbeat not running");
+            return false;
+        };
+        handle.abort();
+        drop(heartbeat);
+
+        self.clear_jobs();
+        self.registry.set_status(
+            "scheduler",
+            ServiceStatus::Standby,
+            Some("gestoppt".to_string()),
+        );
+        info!("scheduler heartbeat stopped");
+        true
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.heartbeat
+            .lock()
+            .expect("scheduler heartbeat lock")
+            .is_some()
+    }
+
+    pub fn clear_jobs(&self) {
+        let mut guard = self.jobs.lock().expect("scheduler jobs lock");
+        while let Some((id, handle)) = guard.pop_first() {
+            handle.stop();
+            debug!(job = %id, "scheduler job cleared");
+        }
+        self.registry
+            .update_note("scheduler", Some("Jobs inaktiv".to_string()));
     }
 
     pub fn schedule_fixed_rate<F, Fut>(
@@ -192,6 +231,7 @@ impl SchedulerService {
     }
 
     pub fn jobs(&self) -> Vec<ScheduledJobSnapshot> {
+        let active = self.is_running();
         self.jobs
             .lock()
             .expect("scheduler jobs lock")
@@ -200,25 +240,160 @@ impl SchedulerService {
                 id: id.clone(),
                 interval: handle.interval,
                 description: handle.description.clone(),
-                active: true,
+                active,
             })
             .collect()
     }
 }
 
+#[derive(Clone)]
+pub struct SchedulerControl {
+    scheduler: Arc<SchedulerService>,
+    registry: Arc<ServiceRegistry>,
+    db_shell: Arc<DbShellService>,
+}
+
+impl SchedulerControl {
+    pub fn new(
+        scheduler: Arc<SchedulerService>,
+        registry: Arc<ServiceRegistry>,
+        db_shell: Arc<DbShellService>,
+    ) -> Self {
+        Self {
+            scheduler,
+            registry,
+            db_shell,
+        }
+    }
+
+    fn reinstall_jobs(&self) -> anyhow::Result<()> {
+        install_default_jobs(
+            &self.scheduler,
+            Arc::clone(&self.registry),
+            Arc::clone(&self.db_shell),
+        )
+        .map_err(|err| anyhow!(err))
+    }
+}
+
+#[async_trait]
+impl ManagedService for SchedulerControl {
+    fn id(&self) -> &'static str {
+        "scheduler"
+    }
+
+    async fn start(self: Arc<Self>) -> anyhow::Result<bool> {
+        if self.scheduler.start() {
+            self.reinstall_jobs()?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    async fn stop(self: Arc<Self>, _force: bool) -> anyhow::Result<bool> {
+        Ok(self.scheduler.stop())
+    }
+}
+
+pub fn install_default_jobs(
+    scheduler: &SchedulerService,
+    registry: Arc<ServiceRegistry>,
+    db_shell: Arc<DbShellService>,
+) -> Result<(), SchedulerError> {
+    let registry_for_uptime = Arc::clone(&registry);
+    scheduler.schedule_fixed_rate(
+        ScheduledJobSpec {
+            id: "telemetry-health-refresh".to_string(),
+            interval: Duration::from_secs(60),
+            initial_delay: Some(Duration::from_secs(10)),
+            description: "Aktualisiert Telemetrie-Uptime und Scheduler-Note".to_string(),
+        },
+        move || {
+            let registry = Arc::clone(&registry_for_uptime);
+            async move {
+                if let Some(snapshot) = telemetry::snapshot() {
+                    registry.update_note(
+                        "scheduler",
+                        Some(format!("Uptime {}s", snapshot.uptime.as_secs())),
+                    );
+                }
+                Ok::<(), anyhow::Error>(())
+            }
+        },
+    )?;
+
+    let registry_for_health = Arc::clone(&registry);
+    scheduler.schedule_fixed_rate(
+        ScheduledJobSpec {
+            id: "service-health-scan".to_string(),
+            interval: Duration::from_secs(30),
+            initial_delay: Some(Duration::from_secs(5)),
+            description: "Scannt Service-Registry auf Fehlzustände".to_string(),
+        },
+        move || {
+            let registry = Arc::clone(&registry_for_health);
+            async move {
+                let snapshot = registry.snapshot();
+                let failed = snapshot
+                    .iter()
+                    .filter(|svc| matches!(svc.status, ServiceStatus::Failed))
+                    .count();
+                let degraded = snapshot
+                    .iter()
+                    .filter(|svc| matches!(svc.status, ServiceStatus::Degraded))
+                    .count();
+                registry.update_note(
+                    "scheduler",
+                    Some(format!("Jobs aktiv – failed={failed}, degraded={degraded}")),
+                );
+                Ok::<(), anyhow::Error>(())
+            }
+        },
+    )?;
+
+    let registry_for_db = Arc::clone(&registry);
+    scheduler.schedule_fixed_rate(
+        ScheduledJobSpec {
+            id: "db-default-ping".to_string(),
+            interval: Duration::from_secs(120),
+            initial_delay: Some(Duration::from_secs(15)),
+            description: "Überwacht die Standard-Datenbankverbindung".to_string(),
+        },
+        move || {
+            let registry = Arc::clone(&registry_for_db);
+            let db_shell = Arc::clone(&db_shell);
+            async move {
+                let session = db_shell.create_session();
+                match session.ping().await {
+                    Ok(_) => {
+                        registry.set_status(
+                            "db-shell",
+                            ServiceStatus::Active,
+                            Some("DB erreichbar".to_string()),
+                        );
+                    }
+                    Err(err) => {
+                        warn!(error = %err, "db ping failed");
+                        registry.set_status(
+                            "db-shell",
+                            ServiceStatus::Degraded,
+                            Some(format!("DB nicht erreichbar: {err}")),
+                        );
+                    }
+                }
+                Ok::<(), anyhow::Error>(())
+            }
+        },
+    )?;
+
+    registry.update_note("scheduler", Some("Standard-Jobs aktiv".to_string()));
+    Ok(())
+}
+
 impl Drop for SchedulerService {
     fn drop(&mut self) {
-        if let Ok(mut guard) = self.heartbeat.lock() {
-            if let Some(handle) = guard.take() {
-                handle.abort();
-            }
-        }
-        if let Ok(mut jobs) = self.jobs.lock() {
-            while let Some((id, handle)) = jobs.pop_first() {
-                handle.stop();
-                info!(job = %id, "scheduler job aborted during shutdown");
-            }
-        }
+        let _ = self.stop();
         self.registry.set_status(
             "scheduler",
             ServiceStatus::Stopped,
@@ -247,7 +422,7 @@ mod tests {
             None,
         );
         let scheduler = SchedulerService::new(Arc::clone(&registry));
-        scheduler.start();
+        assert!(scheduler.start());
 
         let spec = ScheduledJobSpec {
             id: "heartbeat".to_string(),
@@ -264,5 +439,6 @@ mod tests {
 
         assert_eq!(scheduler.jobs().len(), 1);
         assert!(scheduler.cancel_job("heartbeat"));
+        assert!(scheduler.stop());
     }
 }

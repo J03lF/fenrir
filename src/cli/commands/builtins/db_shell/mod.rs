@@ -39,6 +39,13 @@ fn handle(
     env: ShellEnvironment,
 ) -> io::Result<CommandOutcome> {
     let service = &deps.services.db_shell;
+    if !service.is_enabled() {
+        writeln!(
+            out,
+            "DB-Shell ist derzeit deaktiviert. Nutze 'services start db-shell', um sie wieder zu aktivieren."
+        )?;
+        return Ok(CommandOutcome::Continue);
+    }
     let default_engine = service.default_engine();
     let engines = service
         .available_engines()

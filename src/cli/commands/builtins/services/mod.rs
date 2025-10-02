@@ -3,7 +3,7 @@ use crate::cli::commands::registry::{
 };
 use crate::cli::commands::table::Table;
 use crate::services::scheduler::ScheduledJobSnapshot;
-use crate::services::{ServiceControlError, ServiceControlOutcome};
+use crate::services::{ServiceControlError, ServiceControlOutcome, ServiceTag};
 use crate::utils;
 use std::io::{self, Write};
 
@@ -65,6 +65,7 @@ fn list_services(deps: &CliDependencies, out: &mut dyn Write) -> io::Result<()> 
         "ID".to_string(),
         "Name".to_string(),
         "Typ".to_string(),
+        "Tags".to_string(),
         "Status".to_string(),
         "Seit".to_string(),
         "Beschreibung".to_string(),
@@ -86,6 +87,7 @@ fn list_services(deps: &CliDependencies, out: &mut dyn Write) -> io::Result<()> 
             svc.descriptor.id.to_string(),
             svc.descriptor.name.to_string(),
             svc.descriptor.kind.as_str().to_string(),
+            render_tags(&svc.descriptor.tags),
             svc.status.label().to_string(),
             since,
             svc.descriptor.description.to_string(),
@@ -94,6 +96,14 @@ fn list_services(deps: &CliDependencies, out: &mut dyn Write) -> io::Result<()> 
     }
 
     table.render(out, "  ")
+}
+
+fn render_tags(tags: &[ServiceTag]) -> String {
+    if tags.is_empty() {
+        return "-".to_string();
+    }
+    let labels: Vec<&'static str> = tags.iter().map(ServiceTag::as_str).collect();
+    labels.join(", ")
 }
 
 fn list_jobs(deps: &CliDependencies, out: &mut dyn Write) -> io::Result<()> {
@@ -199,6 +209,10 @@ fn render_control_error(
         ServiceControlError::ForceRequired(_) => writeln!(
             out,
             "Service {requested_id} ist als kritisch markiert. --force erforderlich."
+        )?,
+        ServiceControlError::CoreLocked(_) => writeln!(
+            out,
+            "Service {requested_id} gehört zur core-Plattform und kann nicht gestoppt oder neu gestartet werden."
         )?,
         ServiceControlError::OperationFailed { source, .. } => {
             writeln!(out, "Operation fehlgeschlagen: {source}")?

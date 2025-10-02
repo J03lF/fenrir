@@ -1,15 +1,15 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::config::{self, AppConfig};
 use crate::domain::db::DbEngine;
 use crate::infra::http::{HttpServer, HttpServerControl, HTTP_SERVICE_ID};
 use crate::infra::storage::memory::{InMemoryTicketRepository, InMemoryUserRepository};
 use crate::infra::{db, logging, ssh, telemetry};
-use crate::services::scheduler::ScheduledJobSpec;
+use crate::services::db_shell::DbShellControl;
+use crate::services::scheduler::{install_default_jobs, SchedulerControl};
 use crate::services::{
     AppServices, DbShellService, SchedulerService, ServiceDescriptor, ServiceKind, ServiceRegistry,
-    ServiceStatus, TicketService, UserService,
+    ServiceStatus, ServiceTag, TicketService, UserService,
 };
 use anyhow::{anyhow, Result};
 use tracing::info;
@@ -40,6 +40,7 @@ pub fn boot() -> Result<BootContext> {
             "Interaktive Datenbank-Subshell für Admin-Kommandos",
             ServiceKind::Infrastructure,
         )
+        .with_tags(&[ServiceTag::Platform])
         .critical(),
         ServiceStatus::Active,
         Some("bereit".to_string()),
@@ -52,6 +53,7 @@ pub fn boot() -> Result<BootContext> {
             "Verwaltet Benutzer und Rollen",
             ServiceKind::Security,
         )
+        .with_tags(&[ServiceTag::Platform])
         .critical(),
         ServiceStatus::Starting,
         Some("Initialisierung".to_string()),
@@ -63,6 +65,7 @@ pub fn boot() -> Result<BootContext> {
             "Kern-Use-Cases für das Ticketsystem",
             ServiceKind::Infrastructure,
         )
+        .with_tags(&[ServiceTag::Platform])
         .critical(),
         ServiceStatus::Starting,
         Some("Initialisierung".to_string()),
@@ -74,6 +77,7 @@ pub fn boot() -> Result<BootContext> {
             "Secure Shell Zugang und interaktive Sitzungen",
             ServiceKind::Transport,
         )
+        .with_tags(&[ServiceTag::Core, ServiceTag::Platform])
         .critical(),
         ServiceStatus::Starting,
         Some("Initialisierung".to_string()),
@@ -85,6 +89,7 @@ pub fn boot() -> Result<BootContext> {
             "Interaktive CLI-Shell (lokal)",
             ServiceKind::Cli,
         )
+        .with_tags(&[ServiceTag::Auxiliary])
         .critical(),
         ServiceStatus::Standby,
         Some("Wartend auf Aufruf".to_string()),
@@ -96,6 +101,7 @@ pub fn boot() -> Result<BootContext> {
             "Verwaltet periodische Jobs und Tasks",
             ServiceKind::BackgroundJob,
         )
+        .with_tags(&[ServiceTag::Core])
         .critical(),
         ServiceStatus::Starting,
         Some("Initialisierung".to_string()),
@@ -107,7 +113,8 @@ pub fn boot() -> Result<BootContext> {
             "HTTP Transport",
             "REST-API, Health und Telemetrie",
             ServiceKind::Transport,
-        ),
+        )
+        .with_tags(&[ServiceTag::Core]),
         if cfg.server.enable_http {
             ServiceStatus::Standby
         } else {
@@ -150,62 +157,12 @@ pub fn boot() -> Result<BootContext> {
     ));
     services.set_logging_handle(logging_handle.clone());
 
-    scheduler_service
-        .schedule_fixed_rate(
-            ScheduledJobSpec {
-                id: "telemetry-health-refresh".to_string(),
-                interval: Duration::from_secs(60),
-                initial_delay: Some(Duration::from_secs(10)),
-                description: "Aktualisiert Telemetrie-Uptime und Scheduler-Note".to_string(),
-            },
-            {
-                let registry = Arc::clone(&registry);
-                move || {
-                    let registry = Arc::clone(&registry);
-                    async move {
-                        if let Some(snapshot) = crate::infra::telemetry::snapshot() {
-                            registry.update_note(
-                                "scheduler",
-                                Some(format!("Uptime {}s", snapshot.uptime.as_secs())),
-                            );
-                        }
-                        Ok::<(), anyhow::Error>(())
-                    }
-                }
-            },
-        )
-        .map_err(|err| anyhow!(err))?;
-
-    let services_for_health = Arc::clone(&services);
-    scheduler_service
-        .schedule_fixed_rate(
-            ScheduledJobSpec {
-                id: "service-health-scan".to_string(),
-                interval: Duration::from_secs(30),
-                initial_delay: Some(Duration::from_secs(5)),
-                description: "Scannt Service-Registry auf Fehlzustände".to_string(),
-            },
-            move || {
-                let services = Arc::clone(&services_for_health);
-                async move {
-                    let snapshot = services.registry().snapshot();
-                    let failed = snapshot
-                        .iter()
-                        .filter(|svc| matches!(svc.status, ServiceStatus::Failed))
-                        .count();
-                    let degraded = snapshot
-                        .iter()
-                        .filter(|svc| matches!(svc.status, ServiceStatus::Degraded))
-                        .count();
-                    services.registry().update_note(
-                        "scheduler",
-                        Some(format!("Jobs aktiv – failed={failed}, degraded={degraded}")),
-                    );
-                    Ok::<(), anyhow::Error>(())
-                }
-            },
-        )
-        .map_err(|err| anyhow!(err))?;
+    install_default_jobs(
+        &scheduler_service,
+        Arc::clone(&registry),
+        Arc::clone(&db_shell_service),
+    )
+    .map_err(|err| anyhow!(err))?;
 
     let http_server = Arc::new(HttpServer::new(
         &cfg,
@@ -214,6 +171,17 @@ pub fn boot() -> Result<BootContext> {
     )?);
     let http_control = Arc::new(HttpServerControl::new(Arc::clone(&http_server)));
     services.register_runtime_service(http_control);
+    let db_shell_control = Arc::new(DbShellControl::new(
+        Arc::clone(&db_shell_service),
+        Arc::clone(&registry),
+    ));
+    services.register_runtime_service(db_shell_control);
+    let scheduler_control = Arc::new(SchedulerControl::new(
+        Arc::clone(&scheduler_service),
+        Arc::clone(&registry),
+        Arc::clone(&db_shell_service),
+    ));
+    services.register_runtime_service(scheduler_control);
 
     registry.set_status(
         "user-service",

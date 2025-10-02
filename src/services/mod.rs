@@ -46,6 +46,23 @@ impl ServiceKind {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ServiceTag {
+    Core,
+    Platform,
+    Auxiliary,
+}
+
+impl ServiceTag {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ServiceTag::Core => "core",
+            ServiceTag::Platform => "platform",
+            ServiceTag::Auxiliary => "auxiliary",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ServiceStatus {
     Starting,
@@ -76,6 +93,7 @@ pub struct ServiceDescriptor {
     pub description: &'static str,
     pub kind: ServiceKind,
     pub critical: bool,
+    pub tags: &'static [ServiceTag],
 }
 
 impl ServiceDescriptor {
@@ -91,6 +109,7 @@ impl ServiceDescriptor {
             description,
             kind,
             critical: false,
+            tags: &[],
         }
     }
 
@@ -99,6 +118,14 @@ impl ServiceDescriptor {
             critical: true,
             ..self
         }
+    }
+
+    pub const fn with_tags(self, tags: &'static [ServiceTag]) -> Self {
+        Self { tags, ..self }
+    }
+
+    pub fn has_tag(&self, tag: ServiceTag) -> bool {
+        self.tags.iter().any(|t| t == &tag)
     }
 }
 
@@ -146,6 +173,8 @@ pub enum ServiceControlError {
     NotControllable(String),
     #[error("service `{0}` ist als kritisch markiert – --force erforderlich")]
     ForceRequired(String),
+    #[error("service `{0}` ist als core markiert und kann nicht gestoppt werden")]
+    CoreLocked(String),
     #[error("operation für service `{id}` fehlgeschlagen: {source}")]
     OperationFailed {
         id: String,
@@ -345,6 +374,9 @@ impl AppServices {
         if snapshot.descriptor.critical && !force {
             return Err(ServiceControlError::ForceRequired(id.to_string()));
         }
+        if snapshot.descriptor.has_tag(ServiceTag::Core) {
+            return Err(ServiceControlError::CoreLocked(id.to_string()));
+        }
         let handle = self
             .managed_service(id)
             .ok_or_else(|| ServiceControlError::NotControllable(id.to_string()))?;
@@ -370,6 +402,9 @@ impl AppServices {
             .ok_or_else(|| ServiceControlError::UnknownService(id.to_string()))?;
         if snapshot.descriptor.critical && !force {
             return Err(ServiceControlError::ForceRequired(id.to_string()));
+        }
+        if snapshot.descriptor.has_tag(ServiceTag::Core) {
+            return Err(ServiceControlError::CoreLocked(id.to_string()));
         }
         let _ = self.stop_service(id, force)?;
         match self.start_service(id)? {

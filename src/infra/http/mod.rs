@@ -1,5 +1,7 @@
 use std::path::PathBuf;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex, RwLock, Weak};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
@@ -11,12 +13,13 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
+use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use hyper::{Request as HyperRequest, Response as HyperResponse};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as HyperBuilder;
 use hyper_util::service::TowerToHyperService;
-use http_body_util::BodyExt;
+use notify::{Config as NotifyConfig, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use rustls::{self, ServerConfig as RustlsServerConfig};
 use rustls_pemfile::{certs, pkcs8_private_keys, rsa_private_keys};
 use serde::{Deserialize, Serialize};
@@ -25,12 +28,12 @@ use tokio::net::{lookup_host, TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
-use tracing::{debug, info, warn};
 use tower::service_fn;
 use tower::util::ServiceExt;
+use tracing::{debug, info, warn};
 
 use crate::config::AppConfig;
-use crate::infra::telemetry;
+use crate::infra::{logging, telemetry};
 use crate::security::auth::{AuthError, ControlPlaneAuthorizer, Role};
 use crate::services::scheduler::ScheduledJobSnapshot;
 use crate::services::{
@@ -121,6 +124,22 @@ impl HttpTlsRuntime {
             reload_interval: cfg.reload_interval_seconds.map(Duration::from_secs),
         }
     }
+
+    fn validate(&self) -> Result<()> {
+        if self.enabled {
+            if self.cert_path.as_os_str().is_empty() {
+                return Err(anyhow!(
+                    "server.http.tls.cert_path muss gesetzt sein, wenn TLS aktiviert ist"
+                ));
+            }
+            if self.key_path.as_os_str().is_empty() {
+                return Err(anyhow!(
+                    "server.http.tls.key_path muss gesetzt sein, wenn TLS aktiviert ist"
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -200,6 +219,7 @@ impl HttpServer {
         let runtime = HttpTlsRuntime::from(&cfg.server.http.tls);
         let tls_provider = if runtime.enabled {
             let provider = Arc::new(HttpTlsProvider::new(runtime.clone())?);
+            provider.init_watchers()?;
             provider.spawn_auto_reload();
             Some(provider)
         } else {
@@ -218,6 +238,7 @@ impl HttpServer {
 
     pub async fn reload_tls(&self, cfg: &crate::config::HttpTlsConfig) -> Result<()> {
         let new_runtime = HttpTlsRuntime::from(cfg);
+        new_runtime.validate()?;
         let mut maybe_update: Option<(Arc<HttpTlsProvider>, HttpTlsRuntime)> = None;
         {
             let mut guard = self
@@ -226,9 +247,11 @@ impl HttpServer {
                 .map_err(|_| anyhow!("tls provider lock poisoned"))?;
             if new_runtime.enabled {
                 if let Some(provider) = guard.as_ref() {
-                    maybe_update = Some((Arc::clone(provider), new_runtime));
+                    maybe_update = Some((Arc::clone(provider), new_runtime.clone()));
                 } else {
                     let provider = Arc::new(HttpTlsProvider::new(new_runtime.clone())?);
+                    provider.init_watchers()?;
+                    provider.spawn_auto_reload();
                     *guard = Some(Arc::clone(&provider));
                     info!("HTTP TLS aktiviert und Zertifikate geladen");
                 }
@@ -470,6 +493,7 @@ struct ServiceSummary {
     description: &'static str,
     note: Option<String>,
     critical: bool,
+    tags: Vec<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -497,6 +521,17 @@ struct SchedulerJobSummary {
     interval_seconds: u64,
     description: String,
     active: bool,
+}
+
+#[derive(Deserialize)]
+struct LoggingLevelRequest {
+    level: String,
+}
+
+#[derive(Serialize)]
+struct LoggingLevelResponse {
+    level: String,
+    actor_role: &'static str,
 }
 
 #[derive(Serialize)]
@@ -591,6 +626,7 @@ fn snapshot_to_summary(svc: ServiceSnapshot) -> ServiceSummary {
         description: svc.descriptor.description,
         note: svc.note,
         critical: svc.descriptor.critical,
+        tags: svc.descriptor.tags.iter().map(|tag| tag.as_str()).collect(),
     }
 }
 
@@ -605,6 +641,7 @@ fn build_router(state: HttpState) -> Router {
         .route("/services/:id/stop", post(stop_service))
         .route("/services/:id/restart", post(restart_service))
         .route("/scheduler/jobs", get(list_scheduler_jobs))
+        .route("/logging/level", post(update_logging_level))
         .route("/metrics", get(metrics_snapshot))
         .with_state(state)
 }
@@ -756,6 +793,69 @@ async fn metrics_snapshot() -> impl IntoResponse {
     Json(body)
 }
 
+async fn update_logging_level(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Json(payload): Json<LoggingLevelRequest>,
+) -> Response {
+    let level = payload.level.trim();
+    if level.is_empty() {
+        return ServiceActionProblem::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_level",
+            "Loglevel darf nicht leer sein",
+        )
+        .into_response();
+    }
+
+    let role = if state.auth.is_configured() {
+        let token = extract_bearer_token(&headers);
+        match state.auth.authorize_token(token) {
+            Ok(role) => {
+                if !role.satisfies(Role::Admin) {
+                    return ServiceActionProblem::new(
+                        StatusCode::FORBIDDEN,
+                        "role_insufficient",
+                        "Aktion erfordert Rolle admin",
+                    )
+                    .into_response();
+                }
+                role
+            }
+            Err(err) => return map_auth_error(err).into_response(),
+        }
+    } else {
+        Role::Admin
+    };
+
+    let handle = match state.services.logging_handle() {
+        Some(handle) => handle,
+        None => {
+            return ServiceActionProblem::new(
+                StatusCode::NOT_IMPLEMENTED,
+                "logging_reload_unavailable",
+                "Kein Logging-Reload-Handle registriert",
+            )
+            .into_response();
+        }
+    };
+
+    if let Err(err) = logging::reload(&handle, level) {
+        return ServiceActionProblem::new(
+            StatusCode::BAD_REQUEST,
+            "logging_reload_failed",
+            format!("Loglevel konnte nicht gesetzt werden: {err}"),
+        )
+        .into_response();
+    }
+
+    let response = LoggingLevelResponse {
+        level: level.to_string(),
+        actor_role: role.as_str(),
+    };
+    (StatusCode::OK, Json(response)).into_response()
+}
+
 async fn start_service(
     State(state): State<HttpState>,
     AxumPath(id): AxumPath<String>,
@@ -868,6 +968,14 @@ fn map_service_control_error(err: ServiceControlError, id: &str) -> ServiceActio
                 id
             ),
         ),
+        ServiceControlError::CoreLocked(_) => ServiceActionProblem::new(
+            StatusCode::CONFLICT,
+            "core_locked",
+            format!(
+                "Service `{}` gehört zur core-Plattform und kann nicht gestoppt oder neu gestartet werden.",
+                id
+            ),
+        ),
         ServiceControlError::OperationFailed { source, .. } => ServiceActionProblem::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "operation_failed",
@@ -905,10 +1013,24 @@ struct HttpTlsProvider {
     runtime: RwLock<HttpTlsRuntime>,
     config: ArcSwap<RustlsServerConfig>,
     next_reload: Mutex<Option<Instant>>,
+    watcher: Mutex<Option<TlsFileWatcher>>,
+}
+
+struct TlsFileWatcher {
+    shutdown: mpsc::Sender<()>,
+    thread: thread::JoinHandle<()>,
+}
+
+fn tls_event_requires_reload(kind: &EventKind) -> bool {
+    matches!(
+        kind,
+        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+    )
 }
 
 impl HttpTlsProvider {
     fn new(runtime: HttpTlsRuntime) -> Result<Self> {
+        runtime.validate()?;
         let config = load_server_config_sync(&runtime)?;
         let provider = Self {
             next_reload: Mutex::new(
@@ -918,8 +1040,148 @@ impl HttpTlsProvider {
             ),
             runtime: RwLock::new(runtime),
             config: ArcSwap::from_pointee(config),
+            watcher: Mutex::new(None),
         };
         Ok(provider)
+    }
+
+    fn init_watchers(self: &Arc<Self>) -> Result<()> {
+        let runtime = self
+            .runtime
+            .read()
+            .map_err(|_| anyhow!("tls runtime lock poisoned"))?
+            .clone();
+        if runtime.enabled {
+            self.start_watcher(runtime)?;
+        }
+        Ok(())
+    }
+
+    fn restart_watcher(self: &Arc<Self>, runtime: HttpTlsRuntime) -> Result<()> {
+        self.stop_watcher();
+        if runtime.enabled {
+            self.start_watcher(runtime)?;
+        }
+        Ok(())
+    }
+
+    fn start_watcher(self: &Arc<Self>, runtime: HttpTlsRuntime) -> Result<()> {
+        let cert_path = runtime.cert_path.clone();
+        let key_path = runtime.key_path.clone();
+        if !cert_path.exists() {
+            return Err(anyhow!(
+                "TLS-Zertifikat '{}' wurde nicht gefunden",
+                cert_path.display()
+            ));
+        }
+        if !key_path.exists() {
+            return Err(anyhow!(
+                "TLS-Schlüssel '{}' wurde nicht gefunden",
+                key_path.display()
+            ));
+        }
+        let weak = Arc::downgrade(self);
+        let (shutdown_tx, shutdown_rx) = mpsc::channel();
+        let handle = thread::Builder::new()
+            .name("http-tls-watch".to_string())
+            .spawn(move || {
+                let (event_tx, event_rx) = mpsc::channel();
+                let mut watcher = match RecommendedWatcher::new(
+                    move |res| {
+                        let _ = event_tx.send(res);
+                    },
+                    NotifyConfig::default(),
+                ) {
+                    Ok(watcher) => watcher,
+                    Err(err) => {
+                        tracing::error!(error = %err, "TLS-Datei-Watcher konnte nicht erstellt werden");
+                        return;
+                    }
+                };
+
+                if let Err(err) = watcher.watch(&cert_path, RecursiveMode::NonRecursive) {
+                    tracing::error!(
+                        path = %cert_path.display(),
+                        error = %err,
+                        "TLS-Zertifikat kann nicht beobachtet werden"
+                    );
+                    return;
+                }
+                if key_path != cert_path {
+                    if let Err(err) = watcher.watch(&key_path, RecursiveMode::NonRecursive) {
+                        tracing::error!(
+                            path = %key_path.display(),
+                            error = %err,
+                            "TLS-Schlüssel kann nicht beobachtet werden"
+                        );
+                        return;
+                    }
+                }
+
+                loop {
+                    if shutdown_rx.try_recv().is_ok() {
+                        break;
+                    }
+                    match event_rx.recv_timeout(Duration::from_secs(1)) {
+                        Ok(Ok(event)) => {
+                            if tls_event_requires_reload(&event.kind) {
+                                if let Some(provider) = weak.upgrade() {
+                                    if let Err(err) = provider.refresh_sync() {
+                                        tracing::warn!(
+                                            error = %err,
+                                            "TLS-Zertifikate konnten nicht neu geladen werden"
+                                        );
+                                    } else {
+                                        tracing::info!("TLS-Zertifikate neu geladen (Filesystem-Event)");
+                                    }
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
+                        Ok(Err(err)) => {
+                            tracing::warn!(error = %err, "Fehler beim Beobachten der TLS-Artefakte");
+                        }
+                        Err(RecvTimeoutError::Timeout) => {}
+                        Err(RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+            })?;
+
+        let mut guard = self
+            .watcher
+            .lock()
+            .map_err(|_| anyhow!("tls watcher lock poisoned"))?;
+        *guard = Some(TlsFileWatcher {
+            shutdown: shutdown_tx,
+            thread: handle,
+        });
+        Ok(())
+    }
+
+    fn stop_watcher(&self) {
+        if let Ok(mut guard) = self.watcher.lock() {
+            if let Some(handle) = guard.take() {
+                let _ = handle.shutdown.send(());
+                let _ = handle.thread.join();
+            }
+        }
+    }
+
+    fn refresh_sync(&self) -> Result<()> {
+        let runtime = self
+            .runtime
+            .read()
+            .map_err(|_| anyhow!("tls runtime lock poisoned"))?
+            .clone();
+        let config = load_server_config_sync(&runtime)?;
+        self.config.store(Arc::new(config));
+        if let Ok(mut guard) = self.next_reload.lock() {
+            *guard = runtime
+                .reload_interval
+                .map(|interval| Instant::now() + interval);
+        }
+        Ok(())
     }
 
     fn spawn_auto_reload(self: &Arc<Self>) {
@@ -978,7 +1240,10 @@ impl HttpTlsProvider {
         });
         // Adapt Tower service to Hyper service
         let svc = TowerToHyperService::new(tower_svc);
-        builder.serve_connection(io, svc).await.map_err(|e| anyhow!(e))?;
+        builder
+            .serve_connection(io, svc)
+            .await
+            .map_err(|e| anyhow!(e))?;
         Ok(())
     }
 
@@ -1021,7 +1286,8 @@ impl HttpTlsProvider {
         Ok(())
     }
 
-    async fn update_runtime(&self, runtime: HttpTlsRuntime) -> Result<()> {
+    async fn update_runtime(self: &Arc<Self>, runtime: HttpTlsRuntime) -> Result<()> {
+        runtime.validate()?;
         {
             let mut guard = self
                 .runtime
@@ -1036,7 +1302,14 @@ impl HttpTlsProvider {
         }
         let config = load_server_config_async(&runtime).await?;
         self.config.store(Arc::new(config));
+        self.restart_watcher(runtime)?;
         Ok(())
+    }
+}
+
+impl Drop for HttpTlsProvider {
+    fn drop(&mut self) {
+        self.stop_watcher();
     }
 }
 
@@ -1123,7 +1396,9 @@ fn resolve_cipher_suites(names: &[String]) -> Result<Vec<rustls::SupportedCipher
         .map(|name| match name.as_str() {
             "TLS_AES_256_GCM_SHA384" => Ok(rustls::cipher_suite::TLS13_AES_256_GCM_SHA384),
             "TLS_AES_128_GCM_SHA256" => Ok(rustls::cipher_suite::TLS13_AES_128_GCM_SHA256),
-            "TLS_CHACHA20_POLY1305_SHA256" => Ok(rustls::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256),
+            "TLS_CHACHA20_POLY1305_SHA256" => {
+                Ok(rustls::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256)
+            }
             other => Err(anyhow!(format!("unbekannte Cipher Suite: {other}"))),
         })
         .collect()
@@ -1139,698 +1414,598 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       :root {
         color-scheme: dark light;
         font-family: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
-        background: radial-gradient(circle at top, #1d2a3a 0%, #0b1018 60%, #05070c 100%);
-        color: #e6edf6;
+        background: radial-gradient(circle at top, #132035 0%, #09121f 52%, #050a13 100%);
+        color: #e7eefb;
       }
       body {
         margin: 0;
-        padding: 3rem 1.5rem 4rem;
+        min-height: 100vh;
         display: flex;
+        align-items: stretch;
         justify-content: center;
+        padding: 3.5rem 1.5rem 4.5rem;
       }
-      main.layout {
-        max-width: 960px;
-        width: 100%;
+      main.shell {
+        width: min(1080px, 100%);
         display: grid;
-        gap: 2.5rem;
+        gap: 2.2rem;
       }
-      .hero {
+      header.navbar {
         display: flex;
-        flex-direction: column;
-        gap: 1rem;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0.9rem 1.2rem;
+        border-radius: 1rem;
+        background: rgba(10, 20, 33, 0.72);
+        border: 1px solid rgba(120, 160, 220, 0.18);
+        box-shadow: 0 18px 34px rgba(4, 10, 18, 0.32);
       }
-      .hero h1 {
-        font-size: 2.75rem;
-        letter-spacing: -0.015em;
+      header.navbar .brand {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+      }
+      header.navbar .brand span.logo {
+        width: 42px;
+        height: 42px;
+        border-radius: 12px;
+        background: linear-gradient(135deg, #3b81f6 0%, #34d3c7 100%);
+        display: grid;
+        place-items: center;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        color: #08101c;
+      }
+      header.navbar .brand h1 {
         margin: 0;
+        font-size: 1.2rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
       }
-      .hero .subtitle {
+      header.navbar .actions {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+      }
+      header.navbar .actions button {
+        appearance: none;
+        border: 0;
+        border-radius: 999px;
+        padding: 0.48rem 1.1rem;
+        font-size: 0.85rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        background: linear-gradient(135deg, rgba(59, 129, 246, 0.95), rgba(52, 211, 199, 0.95));
+        color: #07101b;
+        cursor: pointer;
+        font-weight: 600;
+        transition: filter 0.2s ease;
+      }
+      header.navbar .actions button:disabled {
+        filter: grayscale(1) opacity(0.6);
+        cursor: not-allowed;
+      }
+      section.hero {
+        display: grid;
+        gap: 1.3rem;
+      }
+      h2.title {
+        margin: 0;
+        font-size: clamp(2.3rem, 5vw, 3rem);
+        letter-spacing: -0.02em;
+      }
+      p.subtitle {
+        margin: 0;
         font-size: 1.1rem;
-        color: #9bb3cc;
-        margin: 0;
+        color: #9ab1d0;
+        max-width: 60ch;
       }
       .meta {
         display: flex;
         flex-wrap: wrap;
-        gap: 0.75rem;
-        align-items: center;
-        color: #7ea0c7;
-        font-size: 0.95rem;
+        gap: 0.7rem;
+        font-size: 0.92rem;
+        color: #84a3c9;
       }
       .meta span {
-        background: rgba(111, 150, 203, 0.16);
-        padding: 0.4rem 0.75rem;
+        padding: 0.45rem 0.85rem;
         border-radius: 999px;
+        background: rgba(106, 149, 203, 0.18);
+        border: 1px solid rgba(126, 172, 228, 0.24);
       }
-      .cards {
+      section.cards {
         display: grid;
-        gap: 1rem;
         grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        gap: 1.35rem;
       }
-      .token-panel {
+      article.card {
+        padding: 1.55rem;
+        border-radius: 1.2rem;
+        background: rgba(15, 24, 39, 0.78);
+        backdrop-filter: blur(12px);
+        border: 1px solid rgba(104, 150, 211, 0.24);
+        box-shadow: 0 24px 48px rgba(3, 8, 16, 0.35);
         display: grid;
-        gap: 0.5rem;
-        padding: 1.25rem 1.5rem;
-        border-radius: 1rem;
-        background: rgba(17, 26, 38, 0.72);
-        border: 1px solid rgba(113, 156, 201, 0.24);
-        box-shadow: 0 18px 40px rgba(5, 10, 18, 0.35);
+        gap: 0.75rem;
+        min-height: 150px;
       }
-      .token-panel label {
-        font-size: 0.95rem;
+      .card h3 {
+        margin: 0;
+        font-size: 1rem;
         text-transform: uppercase;
         letter-spacing: 0.12em;
-        color: #7aa6d9;
+        color: #7ea6db;
       }
-      .token-input-group {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.6rem;
-        align-items: center;
-      }
-      .token-input-group input {
-        flex: 1 1 240px;
-        background: rgba(12, 18, 28, 0.85);
-        border: 1px solid rgba(120, 158, 205, 0.45);
-        border-radius: 0.6rem;
-        padding: 0.45rem 0.75rem;
-        color: #e6edf6;
-        font-size: 0.95rem;
-      }
-      .card {
-        background: rgba(17, 26, 38, 0.72);
-        border: 1px solid rgba(113, 156, 201, 0.24);
-        border-radius: 1rem;
-        padding: 1.5rem;
-        box-shadow: 0 24px 60px rgba(4, 9, 16, 0.45);
-      }
-      .card h2 {
-        margin: 0 0 0.75rem;
-        font-size: 1.1rem;
-        text-transform: uppercase;
-        letter-spacing: 0.1em;
-        color: #7aa6d9;
-      }
-      .badge {
-        display: inline-flex;
-        align-items: center;
-        gap: 0.4rem;
-        padding: 0.2rem 0.6rem;
-        border-radius: 999px;
-        font-size: 0.85rem;
-        text-transform: uppercase;
-        letter-spacing: 0.12em;
+      .card .value {
+        font-size: 1.9rem;
         font-weight: 600;
       }
-      .badge.ok {
-        background: rgba(52, 199, 89, 0.18);
-        color: #83f4b1;
+      .card .hint {
+        font-size: 0.9rem;
+        color: #9db6d6;
       }
-      .badge.warn {
-        background: rgba(255, 204, 0, 0.2);
-        color: #f8e178;
+      .token-card {
+        display: grid;
+        gap: 0.75rem;
       }
-      .badge.err {
-        background: rgba(255, 69, 58, 0.18);
-        color: #ff998f;
+      .token-input {
+        display: flex;
+        gap: 0.6rem;
+        flex-wrap: wrap;
       }
-      .badge.critical {
-        background: rgba(255, 99, 71, 0.24);
-        color: #ffaea3;
+      .token-input input {
+        flex: 1 1 260px;
+        padding: 0.6rem 0.85rem;
+        border-radius: 0.9rem;
+        border: 1px solid rgba(134, 170, 225, 0.34);
+        background: rgba(12, 20, 31, 0.92);
+        color: #e6f0ff;
+        font-size: 0.95rem;
+        letter-spacing: 0.03em;
       }
-      table {
+      .token-input input:focus {
+        outline: none;
+        border-color: rgba(82, 150, 255, 0.55);
+        box-shadow: 0 0 0 3px rgba(82, 150, 255, 0.18);
+      }
+      .token-status {
+        font-size: 0.85rem;
+        color: #8fbce0;
+      }
+      section.services {
+        display: grid;
+        gap: 1.25rem;
+      }
+      .services header {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 1rem;
+      }
+      .services h2 {
+        margin: 0;
+        font-size: 1.35rem;
+      }
+      .services small {
+        color: #7e9dc4;
+      }
+      table.service-table {
         width: 100%;
         border-collapse: collapse;
         border-radius: 1rem;
         overflow: hidden;
-        background: rgba(12, 18, 28, 0.72);
-        border: 1px solid rgba(112, 149, 192, 0.2);
+        background: rgba(11, 19, 30, 0.82);
+        border: 1px solid rgba(106, 154, 213, 0.18);
+        box-shadow: 0 18px 34px rgba(5, 10, 18, 0.38);
       }
-      thead {
-        background: rgba(67, 103, 148, 0.35);
-        text-transform: uppercase;
-        letter-spacing: 0.08em;
-        font-size: 0.75rem;
+      table.service-table thead {
+        background: rgba(18, 42, 73, 0.55);
       }
-      th,
-      td {
-        padding: 0.85rem 1rem;
+      table.service-table th,
+      table.service-table td {
+        padding: 0.95rem 1.1rem;
         text-align: left;
+        font-size: 0.95rem;
       }
-      tbody tr:nth-child(even) {
-        background: rgba(13, 20, 30, 0.65);
+      table.service-table tbody tr + tr {
+        border-top: 1px solid rgba(123, 166, 224, 0.12);
       }
-      tbody tr:hover {
-        background: rgba(51, 84, 128, 0.25);
-      }
-      td.actions {
-        display: flex;
-        gap: 0.5rem;
-        flex-wrap: wrap;
-      }
-      button.action {
-        background: rgba(72, 122, 183, 0.18);
-        color: #9cc7ff;
-        border: 1px solid rgba(156, 199, 255, 0.25);
+      .status-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        padding: 0.3rem 0.75rem;
         border-radius: 999px;
-        padding: 0.35rem 0.9rem;
-        font-size: 0.85rem;
-        cursor: pointer;
-        transition: background 0.15s ease, transform 0.15s ease;
+        text-transform: uppercase;
+        font-size: 0.78rem;
       }
-      button.action:hover:not(:disabled) {
-        background: rgba(122, 172, 233, 0.25);
-        transform: translateY(-1px);
+      .status-active {
+        background: rgba(71, 209, 167, 0.16);
+        color: #49f1bd;
       }
-      button.action:disabled {
-        opacity: 0.45;
-        cursor: not-allowed;
+      .status-starting {
+        background: rgba(224, 176, 49, 0.18);
+        color: #f4c76a;
       }
-      .message {
-        padding: 0.85rem 1rem;
-        border-radius: 0.75rem;
-        border: 1px solid transparent;
-        font-size: 0.9rem;
+      .status-degraded {
+        background: rgba(214, 120, 20, 0.22);
+        color: #ffb46b;
       }
-      .message.hidden {
-        display: none;
+      .status-failed {
+        background: rgba(207, 60, 82, 0.22);
+        color: #ff8aa1;
       }
-      .message.success {
-        border-color: rgba(68, 207, 124, 0.35);
-        background: rgba(32, 163, 86, 0.18);
-        color: #8bf2b5;
+      .status-stopped {
+        background: rgba(113, 137, 169, 0.2);
+        color: #9fb4d4;
       }
-      .message.error {
-        border-color: rgba(255, 99, 71, 0.35);
-        background: rgba(255, 99, 71, 0.1);
-        color: #ffb3a6;
+      .tag-list {
+        display: inline-flex;
+        flex-wrap: wrap;
+        gap: 0.4rem;
       }
-      .footnote {
-        font-size: 0.85rem;
-        color: #6c8bad;
+      .tag {
+        padding: 0.25rem 0.6rem;
+        border-radius: 999px;
+        font-size: 0.78rem;
+        background: rgba(130, 167, 221, 0.18);
+        border: 1px solid rgba(130, 167, 221, 0.28);
+        letter-spacing: 0.04em;
       }
-      code {
-        background: rgba(102, 140, 189, 0.2);
-        padding: 0.2rem 0.4rem;
-        border-radius: 0.4rem;
+      .tag-core {
+        color: #ffd384;
+        border-color: rgba(255, 208, 122, 0.38);
+        background: rgba(255, 208, 122, 0.16);
       }
-      @media (max-width: 720px) {
+      .tag-platform {
+        color: #8cc6ff;
+      }
+      footer.note {
+        text-align: center;
+        font-size: 0.83rem;
+        color: rgba(139, 167, 204, 0.78);
+      }
+      @media (max-width: 640px) {
         body {
-          padding: 2rem 1rem 3rem;
+          padding-top: 2.5rem;
         }
-        .meta {
+        header.navbar {
           flex-direction: column;
-          align-items: flex-start;
+          align-items: stretch;
+          gap: 0.8rem;
         }
-        td.actions {
+        header.navbar .actions {
+          justify-content: flex-end;
+        }
+        table.service-table th:nth-child(4),
+        table.service-table td:nth-child(4),
+        table.service-table th:nth-child(5),
+        table.service-table td:nth-child(5) {
+          display: none;
+        }
+        .token-input {
           flex-direction: column;
         }
       }
     </style>
   </head>
   <body>
-    <main class="layout">
-      <header class="hero">
-        <h1 id="app-name">Fenrir Control Plane</h1>
-        <p class="subtitle">
-          Operational Dashboard für den Ticketsystem-Monolithen – SSH, CLI und
-          HTTP Services im Überblick.
-        </p>
-        <div class="meta">
-          <span id="app-version">Version unbekannt</span>
-          <span id="http-endpoint">HTTP Endpoint: n/a</span>
-          <span id="updated-at">Aktualisiert: -</span>
+    <main class="shell">
+      <header class="navbar">
+        <div class="brand">
+          <span class="logo">F</span>
+          <h1>Fenrir Control Plane</h1>
+        </div>
+        <div class="actions">
+          <button type="button" data-test-btn disabled>API Test</button>
         </div>
       </header>
 
-      <section class="token-panel" id="token-panel">
-        <label for="token-input">Control-Plane Token</label>
-        <div class="token-input-group">
-          <input
-            id="token-input"
-            type="password"
-            placeholder="Bearer Token eingeben"
-            autocomplete="off"
-          />
-          <button id="apply-token" class="action">Übernehmen</button>
-          <button id="clear-token" class="action">Löschen</button>
+      <section class="hero">
+        <h2 class="title">Fenrir Operations Portal</h2>
+        <p class="subtitle">
+          Transparente Übersicht über Transports, Scheduler und Services des Fenrir Ticket-Backends.
+          Aktionen werden auditierbar und rollenbasiert abgesichert.
+        </p>
+        <div class="meta" data-meta>
+          <span>lade Applikationsdaten …</span>
         </div>
-        <p id="token-status" class="footnote">Kein Token gesetzt – nur öffentliche Infos verfügbar.</p>
       </section>
 
       <section class="cards">
-        <article class="card">
-          <h2>Health Status</h2>
-          <div class="badge" id="live-status">Live: -</div>
-          <div class="badge" id="ready-status">Ready: -</div>
-          <p class="footnote">
-            Readiness berücksichtigt registrierte Dienste sowie Telemetrie-Probes.
-          </p>
+        <article class="card token-card">
+          <h3>API Token</h3>
+          <div class="token-input">
+            <input
+              type="password"
+              autocomplete="off"
+              placeholder="Bearer Token hier einfügen"
+              aria-label="Control Plane Token"
+              data-token-input
+            />
+          </div>
+          <div class="token-status" data-token-status>Token nicht gesetzt – Anfragen erfolgen ohne Auth.</div>
         </article>
-        <article class="card">
-          <h2>REST API</h2>
-          <p>
-            <code>GET /health/live</code><br />
-            <code>GET /health/ready</code><br />
-            <code>GET /metrics</code><br />
-            <code>GET /services</code><br />
-            <code>GET /scheduler/jobs</code>
-          </p>
-          <p class="footnote">
-            Lifecycle-Aktionen: <code>POST /services/&lt;id&gt;/(start|stop|restart)</code>
-            mit optionalem <code>{"force": true}</code>.
-          </p>
+        <article class="card" data-card="app">
+          <h3>Applikation</h3>
+          <div class="value" data-app-name>–</div>
+          <div class="hint" data-app-version>Version wird geladen …</div>
         </article>
-        <article class="card">
-          <h2>CLI Steuerung</h2>
-          <p>
-            <code>services list</code><br />
-            <code>services start &lt;id&gt;</code><br />
-            <code>services stop &lt;id&gt; [--force]</code><br />
-            <code>services restart &lt;id&gt; [--force]</code>
-          </p>
-          <p class="footnote">
-            Kritische Services verlangen ein explizites Bestätigen mittels Force.
-          </p>
+        <article class="card" data-card="uptime">
+          <h3>Uptime</h3>
+          <div class="value" data-uptime>–</div>
+          <div class="hint">Quelle: Telemetrie-Snapshot</div>
+        </article>
+        <article class="card" data-card="health">
+          <h3>Status</h3>
+          <div class="value" data-health>—</div>
+          <div class="hint" data-health-note>Prüfe Readiness-Status …</div>
         </article>
       </section>
 
-      <section class="card">
-        <h2>Service Registry</h2>
-        <div id="action-message" class="message hidden"></div>
-        <div class="footnote" style="margin-bottom: 0.75rem;">
-          Aktionen werden live gegen den Service-Katalog ausgeführt. Kritische
-          Einträge sind markiert.
-        </div>
-        <table>
+      <section class="services">
+        <header>
+          <h2>Registrierte Services</h2>
+          <small data-service-meta>lade Registry …</small>
+        </header>
+        <table class="service-table">
           <thead>
             <tr>
               <th>ID</th>
-              <th>Typ</th>
+              <th>Name</th>
               <th>Status</th>
-              <th>Beschreibung</th>
+              <th>Tags</th>
               <th>Hinweis</th>
-              <th>Aktionen</th>
             </tr>
           </thead>
-          <tbody id="services-body">
+          <tbody data-services>
             <tr>
-              <td colspan="6">Lade aktuelle Serviceliste...</td>
+              <td colspan="5">Service-Registry wird abgefragt …</td>
             </tr>
           </tbody>
         </table>
       </section>
 
-      <section class="card">
-        <h2>Scheduler Jobs</h2>
-        <div class="footnote" style="margin-bottom: 0.75rem;">
-          Zeigt periodische Hintergrundaufgaben inkl. Intervall und Aktivitätsstatus.
-        </div>
-        <table>
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Intervall</th>
-              <th>Beschreibung</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody id="jobs-body">
-            <tr>
-              <td colspan="4">Lade Scheduler-Jobs...</td>
-            </tr>
-          </tbody>
-        </table>
-      </section>
-
-      <footer class="footnote">
-        &copy; Fenrir Ticketsystem – Security-first Monolith mit modularen
-        Transports (SSH, CLI, HTTP) und dynamischem Service-Runtime-Management.
+      <footer class="note">
+        Zugriff auf erweiterte Aktionen erfolgt über die CLI oder autorisierte API-Clients.
+        Audit-Logs halten administrative Eingriffe nach.
       </footer>
     </main>
 
     <script>
-      const API = {
-        info: "/info",
-        live: "/health/live",
-        ready: "/health/ready",
-        services: "/services",
-        jobs: "/scheduler/jobs",
-      };
-      const TOKEN_STORAGE_KEY = "fenrir-control-token";
+      const metaEl = document.querySelector('[data-meta]');
+      const svcBody = document.querySelector('[data-services]');
+      const metaServices = document.querySelector('[data-service-meta]');
+      const appName = document.querySelector('[data-app-name]');
+      const appVersion = document.querySelector('[data-app-version]');
+      const uptimeEl = document.querySelector('[data-uptime]');
+      const healthValue = document.querySelector('[data-health]');
+      const healthNote = document.querySelector('[data-health-note]');
+      const tokenInput = document.querySelector('[data-token-input]');
+      const tokenStatus = document.querySelector('[data-token-status]');
+      const testButton = document.querySelector('[data-test-btn]');
 
-      const state = {
-        messageEl: null,
-        servicesBody: null,
-        jobsBody: null,
-        liveBadge: null,
-        readyBadge: null,
-        updatedEl: null,
-        appNameEl: null,
-        appVersionEl: null,
-        endpointEl: null,
-        tokenInput: null,
-        tokenStatus: null,
-        token: null,
+      const TOKEN_KEY = 'fenrir-control-plane-token';
+
+      const loadToken = () => {
+        try {
+          return localStorage.getItem(TOKEN_KEY) ?? '';
+        } catch (_) {
+          return '';
+        }
       };
 
-      async function fetchJson(url, options = {}) {
-        const headers = new Headers(options.headers || {});
-        headers.set("Accept", "application/json");
-        if (state.token) {
-          headers.set("Authorization", `Bearer ${state.token}`);
+      const saveToken = (value) => {
+        try {
+          if (!value) {
+            localStorage.removeItem(TOKEN_KEY);
+          } else {
+            localStorage.setItem(TOKEN_KEY, value);
+          }
+        } catch (_) {
+          // storage might be unavailable; ignore.
         }
-        const response = await fetch(url, { ...options, headers });
-        const text = await response.text();
-        const data = text ? JSON.parse(text) : null;
-        if (!response.ok) {
-          const message = data?.message || data?.error || response.statusText;
-          throw new Error(`${response.status} ${message}`);
-        }
-        return data;
-      }
+      };
 
-      function setBadge(el, value, okLabel, warnLabel) {
-        if (!el) return;
-        el.classList.remove("badge", "ok", "warn", "err");
-        if (value === true) {
-          el.classList.add("badge", "ok");
-          el.textContent = okLabel;
-        } else if (value === false) {
-          el.classList.add("badge", "err");
-          el.textContent = warnLabel;
+      const currentToken = () => tokenInput.value.trim();
+
+      const authHeaders = () => {
+        const token = currentToken();
+        if (!token) {
+          return {};
+        }
+        return { Authorization: token.startsWith('Bearer ') ? token : `Bearer ${token}` };
+      };
+
+      const setTokenUi = (token) => {
+        if (!token) {
+          tokenStatus.textContent = 'Token nicht gesetzt – Anfragen erfolgen ohne Auth.';
+          testButton.disabled = true;
         } else {
-          el.classList.add("badge", "warn");
-          el.textContent = "Unbekannt";
+          tokenStatus.textContent = 'Token aktiv – geschützte Endpunkte verwenden nun Autorisierung.';
+          testButton.disabled = false;
         }
-      }
+      };
 
-      function formatSince(seconds) {
-        if (seconds == null) return "-";
-        if (seconds < 60) return `${seconds}s`;
-        const minutes = Math.floor(seconds / 60);
-        if (minutes < 60) return `${minutes}m`;
-        const hours = Math.floor(minutes / 60);
-        if (hours < 24) return `${hours}h`;
-        const days = Math.floor(hours / 24);
-        return `${days}d`;
-      }
-
-      function setMessage(message, type = "success") {
-        if (!state.messageEl) return;
-        if (!message) {
-          state.messageEl.classList.add("hidden");
-          state.messageEl.textContent = "";
-          return;
+      const formatDuration = (seconds) => {
+        if (seconds == null) return '–';
+        const days = Math.floor(seconds / 86400);
+        const hours = Math.floor((seconds % 86400) / 3600);
+        const minutes = Math.floor((seconds % 3600) / 60);
+        if (days > 0) {
+          return `${days}d ${hours}h`;
         }
-        state.messageEl.className = `message ${type}`;
-        state.messageEl.textContent = message;
-        if (type === "success") {
-          setTimeout(() => setMessage(""), 4000);
+        if (hours > 0) {
+          return `${hours}h ${minutes}m`;
         }
-      }
+        return `${minutes}m`;
+      };
 
-      function shouldDisable(action, status) {
-        switch (action) {
-          case "start":
-            return status === "starting" || status === "active";
-          case "stop":
-            return status === "stopped" || status === "standby";
-          case "restart":
-            return status === "stopped" || status === "standby";
+      const statusClass = (status) => {
+        switch (status) {
+          case 'active':
+            return 'status-pill status-active';
+          case 'starting':
+            return 'status-pill status-starting';
+          case 'degraded':
+            return 'status-pill status-degraded';
+          case 'failed':
+            return 'status-pill status-failed';
+          case 'stopped':
+            return 'status-pill status-stopped';
           default:
-            return false;
+            return 'status-pill status-starting';
         }
-      }
+      };
 
-      function createActionButton(label, action, id, service) {
-        const button = document.createElement("button");
-        button.className = "action";
-        button.textContent = label;
-        button.disabled = shouldDisable(action, service.status);
-        button.addEventListener("click", async () => {
-          try {
-            const previous = button.disabled;
-            button.disabled = true;
-            await performAction(id, action, service.critical);
-            await refreshServices();
-            button.disabled = shouldDisable(action, service.status);
-          } catch (err) {
-            setMessage(err.message, "error");
-            button.disabled = false;
-          }
-        });
-        return button;
-      }
-
-      async function performAction(id, action, critical) {
-        let force = false;
-        if (critical && (action === "stop" || action === "restart")) {
-          const confirmed = window.confirm(
-            `Service ${id} ist kritisch. Aktion erzwingen?`
-          );
-          if (!confirmed) {
-            throw new Error("Aktion vom Operator abgebrochen");
-          }
-          force = true;
+      const renderTags = (tags) => {
+        if (!tags || tags.length === 0) {
+          return '<span class="tag">none</span>';
         }
+        return tags
+          .map((tag) => {
+            let cls = 'tag';
+            if (tag === 'core') cls += ' tag-core';
+            if (tag === 'platform') cls += ' tag-platform';
+            return `<span class="${cls}">${tag}</span>`;
+          })
+          .join('');
+      };
 
-        const url = `/services/${encodeURIComponent(id)}/${action}`;
-        const options = {
-          method: "POST",
-        };
-        if (action !== "start") {
-          options.headers = { "Content-Type": "application/json" };
-          options.body = JSON.stringify({ force });
-        }
+      const updateMeta = (info) => {
+        appName.textContent = info.app?.name ?? 'Fenrir';
+        appVersion.textContent = `Version ${info.app?.version ?? 'unbekannt'}`;
+        const host = info.http?.host ?? 'localhost';
+        const port = info.http?.port ?? 'n/a';
+        metaEl.innerHTML = `
+          <span>${host}:${port}</span>
+          <span>Control Plane</span>
+        `;
+      };
 
-        const data = await fetchJson(url, options);
-        const service = data.service;
-        const status = service?.status || "?";
-        setMessage(
-          `${data.action.toUpperCase()} ${id}: ${data.outcome.replace(/_/g, " ")} → Status ${status.toUpperCase()}`,
-          "success"
-        );
-      }
-
-      function renderServices(services) {
-        if (!state.servicesBody) return;
-        state.servicesBody.innerHTML = "";
-        if (!services?.length) {
-          const row = document.createElement("tr");
-          const cell = document.createElement("td");
-          cell.colSpan = 6;
-          cell.textContent = "Keine Services registriert.";
-          row.appendChild(cell);
-          state.servicesBody.appendChild(row);
+      const updateServices = (payload) => {
+        if (!payload?.services) {
+          svcBody.innerHTML = '<tr><td colspan="5">Keine Services registriert.</td></tr>';
+          metaServices.textContent = '0 Services';
           return;
         }
+        const items = payload.services;
+        metaServices.textContent = `${items.length} Services`;
+        svcBody.innerHTML = items
+          .map((svc) => {
+            const status = svc.status ?? 'unknown';
+            const note = svc.note ?? '–';
+            const tags = renderTags(svc.tags ?? []);
+            return `
+              <tr>
+                <td>${svc.id}</td>
+                <td>${svc.name}</td>
+                <td><span class="${statusClass(status)}">${status}</span></td>
+                <td class="tag-list">${tags}</td>
+                <td>${note}</td>
+              </tr>
+            `;
+          })
+          .join('');
+      };
 
-        for (const service of services) {
-          const row = document.createElement("tr");
-
-          const idCell = document.createElement("td");
-          idCell.textContent = service.id;
-          if (service.critical) {
-            const critical = document.createElement("span");
-            critical.className = "badge critical";
-            critical.textContent = "CRITICAL";
-            critical.style.marginLeft = "0.5rem";
-            idCell.appendChild(critical);
-          }
-          row.appendChild(idCell);
-
-          const kindCell = document.createElement("td");
-          kindCell.textContent = service.kind;
-          row.appendChild(kindCell);
-
-          const statusCell = document.createElement("td");
-          statusCell.textContent = `${service.status} (${formatSince(service.since_seconds)})`;
-          row.appendChild(statusCell);
-
-          const descCell = document.createElement("td");
-          descCell.textContent = service.description;
-          row.appendChild(descCell);
-
-          const noteCell = document.createElement("td");
-          noteCell.textContent = service.note || "-";
-          row.appendChild(noteCell);
-
-          const actionCell = document.createElement("td");
-          actionCell.className = "actions";
-          actionCell.appendChild(createActionButton("Start", "start", service.id, service));
-          actionCell.appendChild(createActionButton("Stop", "stop", service.id, service));
-          actionCell.appendChild(createActionButton("Restart", "restart", service.id, service));
-          row.appendChild(actionCell);
-
-          state.servicesBody.appendChild(row);
-        }
-      }
-
-      function renderJobs(jobs) {
-        if (!state.jobsBody) return;
-        state.jobsBody.innerHTML = "";
-        if (!jobs?.length) {
-          const row = document.createElement("tr");
-          const cell = document.createElement("td");
-          cell.colSpan = 4;
-          cell.textContent = "Keine Scheduler-Jobs registriert.";
-          row.appendChild(cell);
-          state.jobsBody.appendChild(row);
-          return;
-        }
-
-        for (const job of jobs) {
-          const row = document.createElement("tr");
-
-          const idCell = document.createElement("td");
-          idCell.textContent = job.id;
-          row.appendChild(idCell);
-
-          const intervalCell = document.createElement("td");
-          intervalCell.textContent = `${job.interval_seconds}s`;
-          row.appendChild(intervalCell);
-
-          const descCell = document.createElement("td");
-          descCell.textContent = job.description;
-          row.appendChild(descCell);
-
-          const statusCell = document.createElement("td");
-          statusCell.textContent = job.active ? "aktiv" : "inaktiv";
-          row.appendChild(statusCell);
-
-          state.jobsBody.appendChild(row);
-        }
-      }
-
-      async function refreshServices() {
-        try {
-          const payload = await fetchJson(API.services);
-          renderServices(payload.services);
-        } catch (err) {
-          setMessage(`Services konnten nicht geladen werden: ${err.message}`, "error");
-        }
-      }
-
-      async function refreshJobs() {
-        try {
-          const payload = await fetchJson(API.jobs);
-          renderJobs(payload.jobs);
-        } catch (err) {
-          setMessage(`Scheduler-Jobs konnten nicht geladen werden: ${err.message}`, "error");
-        }
-      }
-
-      async function refreshHealth() {
-        try {
-          const [live, ready] = await Promise.all([
-            fetchJson(API.live),
-            fetchJson(API.ready),
-          ]);
-          setBadge(state.liveBadge, live?.live, "Live: OK", "Live: Fehler");
-          setBadge(state.readyBadge, ready?.ready, "Ready: OK", "Ready: Fehler");
-        } catch (err) {
-          setBadge(state.liveBadge, null, "Live: ?", "Live: ?");
-          setBadge(state.readyBadge, null, "Ready: ?", "Ready: ?");
-          setMessage(`Health-Abfragen fehlgeschlagen: ${err.message}`, "error");
-        }
-      }
-
-      async function refreshInfo() {
-        try {
-          const info = await fetchJson(API.info);
-          if (state.appNameEl) {
-            state.appNameEl.textContent = `${info.app.name} Control Plane`;
-          }
-          if (state.appVersionEl) {
-            state.appVersionEl.textContent = `Version ${info.app.version}`;
-          }
-          if (state.endpointEl) {
-            state.endpointEl.textContent = `HTTP Endpoint: ${info.http.base_url}`;
-          }
-        } catch (err) {
-          setMessage(`Info-Endpunkt nicht erreichbar: ${err.message}`, "error");
-        }
-      }
-
-      async function refreshAll() {
-        await Promise.all([refreshInfo(), refreshHealth(), refreshServices(), refreshJobs()]);
-        if (state.updatedEl) {
-          const date = new Date();
-          state.updatedEl.textContent = `Aktualisiert: ${date.toLocaleTimeString()}`;
-        }
-      }
-
-      function updateTokenStatus() {
-        if (!state.tokenStatus) return;
-        if (state.token) {
-          state.tokenStatus.textContent = "Token aktiv – autorisierte Daten werden geladen.";
+      const updateHealth = (live, ready) => {
+        if (live && ready) {
+          healthValue.textContent = 'bereit';
+          healthNote.textContent = 'System lebt & ist einsatzbereit.';
+        } else if (live && !ready) {
+          healthValue.textContent = 'initialisiert';
+          healthNote.textContent = 'Liveness ok, Ready-Checks ausstehend.';
         } else {
-          state.tokenStatus.textContent = "Kein Token gesetzt – nur öffentliche Infos verfügbar.";
+          healthValue.textContent = 'nicht erreichbar';
+          healthNote.textContent = 'Bitte Logs prüfen oder Admin informieren.';
         }
-      }
+      };
 
-      function bindTokenPanel() {
-        const apply = document.getElementById("apply-token");
-        const clear = document.getElementById("clear-token");
-        if (apply) {
-          apply.addEventListener("click", () => {
-            const token = state.tokenInput?.value.trim();
-            if (!token) {
-              setMessage("Bitte Token eingeben", "error");
-              return;
-            }
-            state.token = token;
-            window.localStorage.setItem(TOKEN_STORAGE_KEY, token);
-            if (state.tokenInput) {
-              state.tokenInput.value = "";
-            }
-            updateTokenStatus();
-            setMessage("Token übernommen", "success");
-            refreshAll();
-          });
+      const fetchWithToken = async (url) => {
+        const headers = authHeaders();
+        return fetch(url, {
+          headers,
+        });
+      };
+
+      const bootstrap = async () => {
+        const token = loadToken();
+        tokenInput.value = token;
+        setTokenUi(token);
+
+        try {
+          const [infoRes, servicesRes, metricsRes] = await Promise.all([
+            fetchWithToken('/info'),
+            fetchWithToken('/services'),
+            fetchWithToken('/metrics'),
+          ]);
+
+          if (infoRes.ok) {
+            const info = await infoRes.json();
+            updateMeta(info);
+          }
+
+          if (servicesRes.ok) {
+            const services = await servicesRes.json();
+            updateServices(services);
+          } else {
+            svcBody.innerHTML = '<tr><td colspan="5">Fehler beim Laden der Services.</td></tr>';
+            metaServices.textContent = 'Fehler';
+          }
+
+          if (metricsRes.ok) {
+            const metrics = await metricsRes.json();
+            uptimeEl.textContent = formatDuration(metrics.uptime_seconds);
+            updateHealth(metrics.live, metrics.ready);
+          } else {
+            uptimeEl.textContent = '–';
+            healthValue.textContent = 'unbekannt';
+            healthNote.textContent = 'Telemetrie nicht verfügbar.';
+          }
+        } catch (error) {
+          svcBody.innerHTML = '<tr><td colspan="5">Netzwerkfehler: Daten konnten nicht geladen werden.</td></tr>';
+          metaServices.textContent = 'Fehler';
+          uptimeEl.textContent = '–';
+          healthValue.textContent = 'unbekannt';
+          healthNote.textContent = 'Netzwerkverbindung prüfen.';
+          console.warn('control-plane bootstrap failed', error);
         }
-        if (clear) {
-          clear.addEventListener("click", () => {
-            state.token = null;
-            window.localStorage.removeItem(TOKEN_STORAGE_KEY);
-            updateTokenStatus();
-            setMessage("Token entfernt", "success");
-            refreshAll();
-          });
+      };
+
+      tokenInput.addEventListener('change', () => {
+        const token = currentToken();
+        saveToken(token);
+        setTokenUi(token);
+      });
+
+      testButton.addEventListener('click', async () => {
+        testButton.disabled = true;
+        testButton.textContent = 'prüfe …';
+        try {
+          const response = await fetchWithToken('/services');
+          if (response.ok) {
+            tokenStatus.textContent = 'Token gültig – Zugriff erlaubt.';
+          } else if (response.status === 401) {
+            tokenStatus.textContent = 'Token ungültig – Autorisierung fehlgeschlagen (401).';
+          } else if (response.status === 403) {
+            tokenStatus.textContent = 'Token besitzt nicht ausreichende Rolle (403).';
+          } else {
+            tokenStatus.textContent = `Anfrage fehlgeschlagen (Status ${response.status}).`;
+          }
+        } catch (error) {
+          tokenStatus.textContent = 'Netzwerkfehler – Anfrage konnte nicht gesendet werden.';
+        } finally {
+          setTimeout(() => {
+            testButton.textContent = 'API Test';
+            testButton.disabled = currentToken() === '';
+          }, 600);
         }
-      }
+      });
 
-      async function initialise() {
-        state.messageEl = document.getElementById("action-message");
-        state.servicesBody = document.getElementById("services-body");
-        state.jobsBody = document.getElementById("jobs-body");
-        state.liveBadge = document.getElementById("live-status");
-        state.readyBadge = document.getElementById("ready-status");
-        state.updatedEl = document.getElementById("updated-at");
-        state.appNameEl = document.getElementById("app-name");
-        state.appVersionEl = document.getElementById("app-version");
-        state.endpointEl = document.getElementById("http-endpoint");
-        state.tokenInput = document.getElementById("token-input");
-        state.tokenStatus = document.getElementById("token-status");
-        const stored = window.localStorage.getItem(TOKEN_STORAGE_KEY);
-        if (stored) {
-          state.token = stored;
-        }
-        updateTokenStatus();
-        bindTokenPanel();
-
-        await refreshAll();
-        setInterval(refreshHealth, 20000);
-        setInterval(refreshServices, 15000);
-        setInterval(refreshJobs, 20000);
-      }
-
-      if (document.readyState === "loading") {
-        document.addEventListener("DOMContentLoaded", initialise);
-      } else {
-        initialise();
-      }
+      bootstrap();
     </script>
   </body>
 </html>

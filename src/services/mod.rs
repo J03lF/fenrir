@@ -13,14 +13,22 @@ use async_trait::async_trait;
 use futures::future::BoxFuture;
 use thiserror::Error;
 use tokio::runtime::{Handle, Runtime};
+use tokio::sync::broadcast;
 use tokio::task;
 
+use crate::audit::{AuditError, AuditEvent, AuditLog};
 use crate::infra::logging::ReloadHandle;
 
 pub use db_shell::DbShellService;
 pub use scheduler::SchedulerService;
 pub use ticket::TicketService;
 pub use user::UserService;
+
+#[derive(Debug)]
+pub struct ServiceActionReport {
+    pub id: String,
+    pub result: Result<ServiceControlOutcome, ServiceControlError>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ServiceKind {
@@ -284,6 +292,8 @@ pub struct AppServices {
     registry: Arc<ServiceRegistry>,
     managed: RwLock<BTreeMap<&'static str, Arc<dyn ManagedService>>>,
     logging: RwLock<Option<ReloadHandle>>,
+    audit_log: Arc<dyn AuditLog>,
+    audit_bus: broadcast::Sender<AuditEvent>,
 }
 
 impl AppServices {
@@ -293,7 +303,9 @@ impl AppServices {
         ticket: Arc<TicketService>,
         user: Arc<UserService>,
         registry: Arc<ServiceRegistry>,
+        audit_log: Arc<dyn AuditLog>,
     ) -> Self {
+        let (audit_bus, _) = broadcast::channel(256);
         Self {
             db_shell,
             scheduler,
@@ -302,6 +314,8 @@ impl AppServices {
             registry,
             managed: RwLock::new(BTreeMap::new()),
             logging: RwLock::new(None),
+            audit_log,
+            audit_bus,
         }
     }
 
@@ -319,6 +333,24 @@ impl AppServices {
 
     pub fn logging_handle(&self) -> Option<ReloadHandle> {
         self.logging.read().ok().and_then(|guard| guard.clone())
+    }
+
+    pub fn audit_store(&self) -> Arc<dyn AuditLog> {
+        Arc::clone(&self.audit_log)
+    }
+
+    pub fn record_audit(&self, event: AuditEvent) -> Result<(), AuditError> {
+        self.audit_log.append(event.clone())?;
+        let _ = self.audit_bus.send(event);
+        Ok(())
+    }
+
+    pub fn audit_recent(&self, limit: usize) -> Result<Vec<AuditEvent>, AuditError> {
+        self.audit_log.recent(limit)
+    }
+
+    pub fn audit_subscribe(&self) -> broadcast::Receiver<AuditEvent> {
+        self.audit_bus.subscribe()
     }
 
     pub fn scheduler_service(&self) -> Arc<SchedulerService> {
@@ -348,6 +380,23 @@ impl AppServices {
     {
         let service = ClosureManagedService::new(id, start, stop);
         self.register_runtime_service(service);
+    }
+
+    fn controllable_non_core_ids(&self) -> Vec<&'static str> {
+        let managed = self
+            .managed
+            .read()
+            .map(|guard| guard.keys().copied().collect::<Vec<_>>())
+            .unwrap_or_default();
+        self.registry
+            .snapshot()
+            .into_iter()
+            .filter(|snapshot| {
+                managed.contains(&snapshot.descriptor.id)
+                    && !snapshot.descriptor.has_tag(ServiceTag::Core)
+            })
+            .map(|snapshot| snapshot.descriptor.id)
+            .collect()
     }
 
     fn managed_service(&self, id: &str) -> Option<Arc<dyn ManagedService>> {
@@ -427,6 +476,36 @@ impl AppServices {
             }
             other => Ok(other),
         }
+    }
+
+    pub fn stop_all_non_core(&self, force: bool) -> Vec<ServiceActionReport> {
+        self.controllable_non_core_ids()
+            .into_iter()
+            .map(|id| ServiceActionReport {
+                id: id.to_string(),
+                result: self.stop_service(id, force),
+            })
+            .collect()
+    }
+
+    pub fn start_all_non_core(&self) -> Vec<ServiceActionReport> {
+        self.controllable_non_core_ids()
+            .into_iter()
+            .map(|id| ServiceActionReport {
+                id: id.to_string(),
+                result: self.start_service(id),
+            })
+            .collect()
+    }
+
+    pub fn restart_all_non_core(&self, force: bool) -> Vec<ServiceActionReport> {
+        self.controllable_non_core_ids()
+            .into_iter()
+            .map(|id| ServiceActionReport {
+                id: id.to_string(),
+                result: self.restart_service(id, force),
+            })
+            .collect()
     }
 }
 

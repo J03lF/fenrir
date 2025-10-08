@@ -55,7 +55,7 @@ timeout_ms = 5000
 
 [telemetry]
 tracing_level = "info"
-metrics_enabled = false
+metrics_enabled = true
 health_enabled = true
 
 [audit]

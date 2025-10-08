@@ -1,5 +1,7 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use crate::audit::InMemoryAuditLog;
 use crate::config::{self, AppConfig};
 use crate::domain::db::DbEngine;
 use crate::infra::http::{HttpServer, HTTP_SERVICE_ID};
@@ -39,8 +41,7 @@ pub fn boot() -> Result<BootContext> {
             "Interaktive Datenbank-Subshell für Admin-Kommandos",
             ServiceKind::Infrastructure,
         )
-        .with_tags(&[ServiceTag::Platform])
-        .critical(),
+        .with_tags(&[ServiceTag::Platform]),
         ServiceStatus::Active,
         Some("bereit".to_string()),
     );
@@ -52,8 +53,7 @@ pub fn boot() -> Result<BootContext> {
             "Verwaltet Benutzer und Rollen",
             ServiceKind::Security,
         )
-        .with_tags(&[ServiceTag::Platform])
-        .critical(),
+        .with_tags(&[ServiceTag::Platform]),
         ServiceStatus::Starting,
         Some("Initialisierung".to_string()),
     );
@@ -64,8 +64,7 @@ pub fn boot() -> Result<BootContext> {
             "Kern-Use-Cases für das Ticketsystem",
             ServiceKind::Infrastructure,
         )
-        .with_tags(&[ServiceTag::Platform])
-        .critical(),
+        .with_tags(&[ServiceTag::Platform]),
         ServiceStatus::Starting,
         Some("Initialisierung".to_string()),
     );
@@ -88,8 +87,7 @@ pub fn boot() -> Result<BootContext> {
             "Interaktive CLI-Shell (lokal)",
             ServiceKind::Cli,
         )
-        .with_tags(&[ServiceTag::Auxiliary])
-        .critical(),
+        .with_tags(&[ServiceTag::Auxiliary]),
         ServiceStatus::Standby,
         Some("Wartend auf Aufruf".to_string()),
     );
@@ -147,12 +145,17 @@ pub fn boot() -> Result<BootContext> {
     scheduler_service.start();
     info!("scheduler service started");
 
+    let audit_capacity = if cfg.audit.enabled { 1024 } else { 0 };
+    let audit_log: Arc<dyn crate::audit::AuditLog> =
+        Arc::new(InMemoryAuditLog::new(audit_capacity));
+
     let services = Arc::new(AppServices::new(
         Arc::clone(&db_shell_service),
         Arc::clone(&scheduler_service),
         Arc::clone(&ticket_service),
         Arc::clone(&user_service),
         Arc::clone(&registry),
+        Arc::clone(&audit_log),
     ));
     services.set_logging_handle(logging_handle.clone());
 
@@ -253,6 +256,33 @@ pub fn boot() -> Result<BootContext> {
             },
         );
     }
+    register_registry_toggle_service(
+        &services,
+        &registry,
+        "user-service",
+        ServiceStatus::Active,
+        "Service aktiv",
+        ServiceStatus::Standby,
+        "Service gestoppt",
+    );
+    register_registry_toggle_service(
+        &services,
+        &registry,
+        "ticket-service",
+        ServiceStatus::Active,
+        "Service aktiv",
+        ServiceStatus::Standby,
+        "Service gestoppt",
+    );
+    register_registry_toggle_service(
+        &services,
+        &registry,
+        "cli-shell",
+        ServiceStatus::Standby,
+        "Bereit für neue Sessions",
+        ServiceStatus::Stopped,
+        "CLI deaktiviert",
+    );
 
     registry.set_status(
         "user-service",
@@ -320,6 +350,55 @@ pub async fn start_transports(ctx: &BootContext) -> Result<()> {
     spawn_config_reloader(ctx)?;
     info!("transport initialisation triggered");
     Ok(())
+}
+
+fn register_registry_toggle_service(
+    services: &AppServices,
+    registry: &Arc<ServiceRegistry>,
+    id: &'static str,
+    active_status: ServiceStatus,
+    active_note: &'static str,
+    standby_status: ServiceStatus,
+    standby_note: &'static str,
+) {
+    let state = Arc::new(AtomicBool::new(true));
+    let registry_for_start = Arc::clone(registry);
+    let registry_for_stop = Arc::clone(registry);
+    services.register_dynamic_service(
+        id,
+        {
+            let state = Arc::clone(&state);
+            move || {
+                let registry = Arc::clone(&registry_for_start);
+                let state = Arc::clone(&state);
+                Box::pin(async move {
+                    let was_active = state.swap(true, Ordering::SeqCst);
+                    if was_active {
+                        Ok(false)
+                    } else {
+                        registry.set_status(id, active_status, Some(active_note.to_string()));
+                        Ok(true)
+                    }
+                })
+            }
+        },
+        {
+            let state = Arc::clone(&state);
+            move |_force| {
+                let registry = Arc::clone(&registry_for_stop);
+                let state = Arc::clone(&state);
+                Box::pin(async move {
+                    let was_active = state.swap(false, Ordering::SeqCst);
+                    if !was_active {
+                        Ok(false)
+                    } else {
+                        registry.set_status(id, standby_status, Some(standby_note.to_string()));
+                        Ok(true)
+                    }
+                })
+            }
+        },
+    );
 }
 
 fn spawn_config_reloader(ctx: &BootContext) -> Result<()> {

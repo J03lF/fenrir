@@ -5,6 +5,7 @@ use axum::ServiceExt;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+use fenrir::audit::{AuditLog, InMemoryAuditLog};
 use fenrir::domain::db::{DbAdminPort, DbEngine, DbExecutionResult, DbResult, DbTable, DbTableSchema};
 use fenrir::infra::http::router_with_dependencies;
 use fenrir::infra::storage::memory::{InMemoryTicketRepository, InMemoryUserRepository};
@@ -96,12 +97,14 @@ fn build_test_services(registry: Arc<ServiceRegistry>) -> Arc<AppServices> {
     let user_repo: Arc<dyn fenrir::domain::user::UserRepository> =
         Arc::new(InMemoryUserRepository::new());
     let user_service = Arc::new(UserService::new(user_repo));
+    let audit_log: Arc<dyn AuditLog> = Arc::new(InMemoryAuditLog::new(64));
     Arc::new(AppServices::new(
         db_shell,
         scheduler,
         ticket_service,
         user_service,
         registry,
+        audit_log,
     ))
 }
 

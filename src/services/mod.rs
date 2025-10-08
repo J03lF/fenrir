@@ -1,4 +1,5 @@
 pub mod db_shell;
+pub mod module;
 pub mod scheduler;
 pub mod ticket;
 pub mod user;
@@ -18,8 +19,10 @@ use tokio::task;
 
 use crate::audit::{AuditError, AuditEvent, AuditLog};
 use crate::infra::logging::ReloadHandle;
+use once_cell::sync::OnceCell;
 
 pub use db_shell::DbShellService;
+pub use module::ModuleService;
 pub use scheduler::SchedulerService;
 pub use ticket::TicketService;
 pub use user::UserService;
@@ -199,15 +202,24 @@ struct ServiceRecord {
     note: Option<String>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ServiceRegistry {
     inner: Arc<RwLock<BTreeMap<&'static str, ServiceRecord>>>,
+    events: broadcast::Sender<ServiceSnapshot>,
+}
+
+impl Default for ServiceRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ServiceRegistry {
     pub fn new() -> Self {
+        let (events, _) = broadcast::channel(256);
         Self {
             inner: Arc::new(RwLock::new(BTreeMap::new())),
+            events,
         }
     }
 
@@ -223,64 +235,111 @@ impl ServiceRegistry {
             since: SystemTime::now(),
             note: note.into(),
         };
-        if let Ok(mut guard) = self.inner.write() {
+        let snapshot = if let Ok(mut guard) = self.inner.write() {
             guard.insert(descriptor.id, record);
+            guard.get(descriptor.id).map(snapshot_from_record)
         } else {
             tracing::error!(service_id = descriptor.id, "service registry lock poisoned");
+            None
+        };
+        if let Some(snapshot) = snapshot {
+            let _ = self.events.send(snapshot);
         }
     }
 
     pub fn set_status(&self, id: &str, status: ServiceStatus, note: impl Into<Option<String>>) {
-        match self.inner.write() {
+        let snapshot = match self.inner.write() {
             Ok(mut guard) => {
                 if let Some(record) = guard.get_mut(id) {
                     record.status = status;
                     record.note = note.into();
                     record.since = SystemTime::now();
+                    Some(snapshot_from_record(record))
                 } else {
                     tracing::warn!(
                         service_id = id,
                         "versuch, unbekannten Service zu aktualisieren"
                     );
+                    None
                 }
             }
-            Err(_) => tracing::error!(service_id = id, "service registry lock poisoned"),
+            Err(_) => {
+                tracing::error!(service_id = id, "service registry lock poisoned");
+                None
+            }
+        };
+        if let Some(snapshot) = snapshot {
+            let _ = self.events.send(snapshot);
         }
     }
 
     pub fn update_note(&self, id: &str, note: impl Into<Option<String>>) {
-        if let Ok(mut guard) = self.inner.write() {
+        let snapshot = if let Ok(mut guard) = self.inner.write() {
             if let Some(record) = guard.get_mut(id) {
                 record.note = note.into();
+                Some(snapshot_from_record(record))
+            } else {
+                None
             }
+        } else {
+            None
+        };
+        if let Some(snapshot) = snapshot {
+            let _ = self.events.send(snapshot);
         }
     }
 
     pub fn snapshot(&self) -> Vec<ServiceSnapshot> {
         match self.inner.read() {
-            Ok(guard) => guard
-                .values()
-                .map(|record| ServiceSnapshot {
-                    descriptor: record.descriptor,
-                    status: record.status,
-                    since: record.since,
-                    note: record.note.clone(),
-                })
-                .collect(),
+            Ok(guard) => guard.values().map(snapshot_from_record).collect(),
             Err(_) => Vec::new(),
         }
     }
 
     pub fn get(&self, id: &str) -> Option<ServiceSnapshot> {
         match self.inner.read() {
-            Ok(guard) => guard.get(id).map(|record| ServiceSnapshot {
-                descriptor: record.descriptor,
-                status: record.status,
-                since: record.since,
-                note: record.note.clone(),
-            }),
+            Ok(guard) => guard.get(id).map(snapshot_from_record),
             Err(_) => None,
         }
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<ServiceSnapshot> {
+        self.events.subscribe()
+    }
+}
+
+fn snapshot_from_record(record: &ServiceRecord) -> ServiceSnapshot {
+    ServiceSnapshot {
+        descriptor: record.descriptor,
+        status: record.status,
+        since: record.since,
+        note: record.note.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn broadcasts_on_register_and_update() {
+        let registry = ServiceRegistry::new();
+        let mut receiver = registry.subscribe();
+        let descriptor =
+            ServiceDescriptor::new("test-service", "Test Service", "Test", ServiceKind::Other);
+        registry.register(descriptor, ServiceStatus::Starting, None::<String>);
+        let event = receiver.try_recv().expect("expected register event");
+        assert_eq!(event.descriptor.id, "test-service");
+        assert_eq!(event.status, ServiceStatus::Starting);
+
+        registry.set_status(
+            "test-service",
+            ServiceStatus::Active,
+            Some("ok".to_string()),
+        );
+        let event = receiver.try_recv().expect("expected status update");
+        assert_eq!(event.status, ServiceStatus::Active);
+        assert_eq!(event.note.as_deref(), Some("ok"));
     }
 }
 
@@ -294,6 +353,7 @@ pub struct AppServices {
     logging: RwLock<Option<ReloadHandle>>,
     audit_log: Arc<dyn AuditLog>,
     audit_bus: broadcast::Sender<AuditEvent>,
+    module_service: OnceCell<Arc<ModuleService>>,
 }
 
 impl AppServices {
@@ -316,7 +376,18 @@ impl AppServices {
             logging: RwLock::new(None),
             audit_log,
             audit_bus,
+            module_service: OnceCell::new(),
         }
+    }
+
+    pub fn attach_module_service(&self, service: Arc<ModuleService>) -> Result<(), &'static str> {
+        self.module_service
+            .set(service)
+            .map_err(|_| "module service already attached")
+    }
+
+    pub fn module_service(&self) -> Option<Arc<ModuleService>> {
+        self.module_service.get().cloned()
     }
 
     pub fn registry(&self) -> Arc<ServiceRegistry> {

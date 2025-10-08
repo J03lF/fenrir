@@ -12,13 +12,53 @@ use std::io::{self, Write};
 use tracing::warn;
 
 const TRANSPORT: &str = "cli";
+const COLOR_DIM: &str = "\x1b[38;5;244m";
+const COLOR_ACCENT: &str = "\x1b[38;5;214m";
+const COLOR_RESET: &str = "\x1b[0m";
+
+enum ServiceCliAction {
+    Start,
+    Stop,
+    Restart,
+}
+
+impl ServiceCliAction {
+    fn verb(&self) -> &'static str {
+        match self {
+            ServiceCliAction::Start => "start",
+            ServiceCliAction::Stop => "stop",
+            ServiceCliAction::Restart => "restart",
+        }
+    }
+}
 
 const DETAILS: &[&str] = &[
     "list – zeigt alle registrierten Services mit Status und Hinweis",
     "jobs – listet Scheduler-Jobs mit Intervall",
-    "start <id> – startet einen steuerbaren Service",
-    "stop <id|--all> [--force] – stoppt Service oder alle nicht-core Services",
-    "restart <id|--all> [--force] – Neustart Service oder aller nicht-core Services",
+    "start <id> – startet einen steuerbaren Service (veraltet, nutze 'start service <id>')",
+    "stop <id|--all> [--force] – veraltet, nutze 'stop service <id|--all>'",
+    "restart <id|--all> [--force] – veraltet, nutze 'restart service <id|--all>'",
+];
+
+const START_DETAILS: &[&str] = &[
+    "start service <id> – startet einen steuerbaren Service",
+    "start service --all – startet alle nicht-core Services",
+];
+
+const STOP_DETAILS: &[&str] = &[
+    "stop service <id> [--force] – stoppt einen Service",
+    "stop service --all [--force] – stoppt alle nicht-core Services",
+];
+
+const RESTART_DETAILS: &[&str] = &[
+    "restart service <id> [--force] – startet Service neu",
+    "restart service --all [--force] – Neustart aller nicht-core Services",
+];
+
+const LIST_DETAILS: &[&str] = &[
+    "list services – zeigt registrierte Services",
+    "list jobs – listet Scheduler-Jobs",
+    "list modules – zeigt verfügbare Module (in Vorbereitung)",
 ];
 
 pub fn command() -> CommandEntry {
@@ -28,6 +68,46 @@ pub fn command() -> CommandEntry {
         "services [list|jobs|start|stop|restart]",
         DETAILS,
         handle,
+    )
+}
+
+pub fn start_command() -> CommandEntry {
+    CommandEntry::new(
+        "start",
+        "Startet Ressourcen wie Services",
+        "start service <id|--all>",
+        START_DETAILS,
+        handle_start,
+    )
+}
+
+pub fn stop_command() -> CommandEntry {
+    CommandEntry::new(
+        "stop",
+        "Stoppt Ressourcen kontrolliert",
+        "stop service <id|--all> [--force]",
+        STOP_DETAILS,
+        handle_stop,
+    )
+}
+
+pub fn restart_command() -> CommandEntry {
+    CommandEntry::new(
+        "restart",
+        "Startet Ressourcen neu",
+        "restart service <id|--all> [--force]",
+        RESTART_DETAILS,
+        handle_restart,
+    )
+}
+
+pub fn list_command() -> CommandEntry {
+    CommandEntry::new(
+        "list",
+        "Listet Ressourcen (Services, Jobs, Module)",
+        "list <services|jobs|modules>",
+        LIST_DETAILS,
+        handle_list,
     )
 }
 
@@ -47,12 +127,77 @@ fn handle(
     match action {
         "list" => list_services(deps, out)?,
         "jobs" => list_jobs(deps, out)?,
-        "start" => start_service(deps, rest, out)?,
-        "stop" => stop_service(deps, rest, out)?,
-        "restart" => restart_service(deps, rest, out)?,
+        "start" => {
+            warn_deprecated(out, "services start", "start service <id>")?;
+            start_service(deps, rest, out)?;
+        }
+        "stop" => {
+            warn_deprecated(out, "services stop", "stop service <id>")?;
+            stop_service(deps, rest, out)?;
+        }
+        "restart" => {
+            warn_deprecated(out, "services restart", "restart service <id>")?;
+            restart_service(deps, rest, out)?;
+        }
         other => {
             writeln!(out, "unbekannte Aktion: {other}")?;
             writeln!(out, "verfügbar: services [list|jobs|start|stop|restart]")?;
+        }
+    }
+    Ok(CommandOutcome::Continue)
+}
+
+fn handle_start(
+    deps: &CliDependencies,
+    args: &[&str],
+    _registry: &CommandRegistry,
+    out: &mut dyn Write,
+    _env: ShellEnvironment,
+) -> io::Result<CommandOutcome> {
+    route_service_action(ServiceCliAction::Start, deps, args, out)?;
+    Ok(CommandOutcome::Continue)
+}
+
+fn handle_stop(
+    deps: &CliDependencies,
+    args: &[&str],
+    _registry: &CommandRegistry,
+    out: &mut dyn Write,
+    _env: ShellEnvironment,
+) -> io::Result<CommandOutcome> {
+    route_service_action(ServiceCliAction::Stop, deps, args, out)?;
+    Ok(CommandOutcome::Continue)
+}
+
+fn handle_restart(
+    deps: &CliDependencies,
+    args: &[&str],
+    _registry: &CommandRegistry,
+    out: &mut dyn Write,
+    _env: ShellEnvironment,
+) -> io::Result<CommandOutcome> {
+    route_service_action(ServiceCliAction::Restart, deps, args, out)?;
+    Ok(CommandOutcome::Continue)
+}
+
+fn handle_list(
+    deps: &CliDependencies,
+    args: &[&str],
+    _registry: &CommandRegistry,
+    out: &mut dyn Write,
+    _env: ShellEnvironment,
+) -> io::Result<CommandOutcome> {
+    if args.is_empty() {
+        list_services(deps, out)?;
+        return Ok(CommandOutcome::Continue);
+    }
+    match args[0] {
+        "services" | "service" => list_services(deps, out)?,
+        "jobs" | "job" => list_jobs(deps, out)?,
+        "modules" | "module" => module_placeholder(out, "list")?,
+        other => {
+            writeln!(out, "unbekannte Ressource: {other}")?;
+            writeln!(out, "verfügbar: list services|jobs|modules")?;
         }
     }
     Ok(CommandOutcome::Continue)
@@ -144,6 +289,50 @@ fn render_job(table: &mut Table, job: ScheduledJobSnapshot) {
             "inactive".to_string()
         },
     ]);
+}
+
+fn route_service_action(
+    action: ServiceCliAction,
+    deps: &CliDependencies,
+    args: &[&str],
+    out: &mut dyn Write,
+) -> io::Result<()> {
+    let usage = match action {
+        ServiceCliAction::Start => "start service <id|--all>",
+        ServiceCliAction::Stop => "stop service <id|--all> [--force]",
+        ServiceCliAction::Restart => "restart service <id|--all> [--force]",
+    };
+
+    if args.is_empty() {
+        writeln!(out, "Nutzung: {usage}")?;
+        return Ok(());
+    }
+
+    match args[0].to_ascii_lowercase().as_str() {
+        "service" | "services" => {
+            let tail = if args.len() > 1 { &args[1..] } else { &[] };
+            match action {
+                ServiceCliAction::Start => start_service(deps, tail, out),
+                ServiceCliAction::Stop => stop_service(deps, tail, out),
+                ServiceCliAction::Restart => restart_service(deps, tail, out),
+            }
+        }
+        "module" | "modules" => module_placeholder(out, action.verb()),
+        other => {
+            writeln!(out, "unbekannte Ressource: {other}")?;
+            writeln!(out, "gültig: service | module")
+        }
+    }
+}
+
+fn module_placeholder(out: &mut dyn Write, action: &str) -> io::Result<()> {
+    writeln!(
+        out,
+        "{dim}[Info]{reset} modules {action} steht noch aus – Distribution-Workflow folgt.",
+        dim = COLOR_DIM,
+        reset = COLOR_RESET,
+        action = action
+    )
 }
 
 fn start_service(deps: &CliDependencies, args: &[&str], out: &mut dyn Write) -> io::Result<()> {
@@ -269,6 +458,18 @@ fn render_control_error(
         }
     }
     Ok(())
+}
+
+fn warn_deprecated(out: &mut dyn Write, legacy: &str, modern: &str) -> io::Result<()> {
+    writeln!(
+        out,
+        "{dim}[Hinweis]{reset} '{legacy}' wird entfernt – nutze {accent}{modern}{reset}.",
+        dim = COLOR_DIM,
+        accent = COLOR_ACCENT,
+        reset = COLOR_RESET,
+        legacy = legacy,
+        modern = modern
+    )
 }
 
 fn render_bulk_results(

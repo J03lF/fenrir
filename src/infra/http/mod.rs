@@ -494,6 +494,18 @@ struct ServicesResponse {
     services: Vec<ServiceSummary>,
 }
 
+#[derive(Serialize)]
+struct ServiceStateEvent {
+    id: &'static str,
+    name: &'static str,
+    kind: &'static str,
+    status: &'static str,
+    note: Option<String>,
+    since_seconds: Option<u64>,
+    critical: bool,
+    tags: Vec<&'static str>,
+}
+
 #[derive(Clone, Serialize)]
 struct ServiceSummary {
     id: &'static str,
@@ -741,6 +753,28 @@ fn snapshot_to_summary(svc: ServiceSnapshot) -> ServiceSummary {
     }
 }
 
+fn snapshot_to_state_event(snapshot: ServiceSnapshot) -> ServiceStateEvent {
+    ServiceStateEvent {
+        id: snapshot.descriptor.id,
+        name: snapshot.descriptor.name,
+        kind: snapshot.descriptor.kind.as_str(),
+        status: snapshot.status.label(),
+        note: snapshot.note,
+        since_seconds: snapshot
+            .since
+            .elapsed()
+            .ok()
+            .map(|duration| duration.as_secs()),
+        critical: snapshot.descriptor.critical,
+        tags: snapshot
+            .descriptor
+            .tags
+            .iter()
+            .map(|tag| tag.as_str())
+            .collect(),
+    }
+}
+
 fn build_router(state: HttpState) -> Router {
     Router::new()
         .route("/", get(index))
@@ -983,8 +1017,8 @@ async fn audit_events_stream(
         }
     }
 
-    let receiver = state.services.audit_subscribe();
-    let stream = BroadcastStream::new(receiver).filter_map(|result| match result {
+    let audit_receiver = state.services.audit_subscribe();
+    let audit_stream = BroadcastStream::new(audit_receiver).filter_map(|result| match result {
         Ok(event) => match serde_json::to_string(&audit_event_to_view(event)) {
             Ok(json) => Some(Ok::<Event, Infallible>(
                 Event::default().event("audit").data(json),
@@ -996,6 +1030,22 @@ async fn audit_events_stream(
         },
         Err(BroadcastStreamRecvError::Lagged(_)) => None,
     });
+
+    let service_receiver = state.registry.subscribe();
+    let service_stream = BroadcastStream::new(service_receiver).filter_map(|result| match result {
+        Ok(snapshot) => match serde_json::to_string(&snapshot_to_state_event(snapshot)) {
+            Ok(json) => Some(Ok::<Event, Infallible>(
+                Event::default().event("service-state").data(json),
+            )),
+            Err(err) => {
+                warn!(error = %err, "failed to encode service event for sse");
+                None
+            }
+        },
+        Err(BroadcastStreamRecvError::Lagged(_)) => None,
+    });
+
+    let stream = audit_stream.merge(service_stream);
 
     Sse::new(stream)
         .keep_alive(
@@ -2522,6 +2572,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       let uptimeAnchor = null;
       let isLoading = false;
       let auditCache = [];
+      let servicesCache = new Map();
       let eventSource = null;
       let sseWarned = false;
 
@@ -2718,6 +2769,14 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
             console.warn('Fehler beim Verarbeiten von Audit-SSE', error);
           }
         });
+        eventSource.addEventListener('service-state', (event) => {
+          try {
+            const payload = JSON.parse(event.data);
+            applyServiceState(payload);
+          } catch (error) {
+            console.warn('Fehler beim Verarbeiten von Service-SSE', error);
+          }
+        });
         eventSource.addEventListener('audit-error', (event) => {
           if (!sseWarned) {
             showAlert(event.data || 'Event-Stream verweigert. Bitte Token prüfen.');
@@ -2814,13 +2873,15 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         `;
       };
 
-      const updateServices = (payload) => {
-        if (!payload?.services || payload.services.length === 0) {
+      const renderServicesTable = () => {
+        if (servicesCache.size === 0) {
           svcBody.innerHTML = '<tr><td colspan="6">Keine Services registriert.</td></tr>';
           metaServices.textContent = '0 Services';
           return;
         }
-        const items = payload.services;
+        const items = Array.from(servicesCache.values()).sort((a, b) =>
+          (a.id || '').localeCompare(b.id || ''),
+        );
         metaServices.textContent = `${items.length} Services`;
         svcBody.innerHTML = items
           .map((svc) => {
@@ -2830,7 +2891,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
             return `
               <tr>
                 <td class="service-id">${svc.id}</td>
-                <td class="service-name">${svc.name}</td>
+                <td class="service-name">${svc.name ?? svc.id}</td>
                 <td class="status-cell"><span class="${statusClass(status)}" title="${status}">${status}</span></td>
                 <td class="tags-cell"><div class="tag-list">${tags}</div></td>
                 <td class="note-cell">${note}</td>
@@ -2839,6 +2900,40 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
             `;
           })
           .join('');
+      };
+
+      const updateServices = (payload) => {
+        servicesCache = new Map();
+        if (payload?.services && Array.isArray(payload.services)) {
+          payload.services.forEach((svc) => {
+            servicesCache.set(svc.id, {
+              ...svc,
+              note: svc.note ?? '–',
+              tags: Array.isArray(svc.tags) ? svc.tags : [],
+            });
+          });
+        }
+        renderServicesTable();
+      };
+
+      const applyServiceState = (event) => {
+        if (!event || !event.id) {
+          return;
+        }
+        const existing = servicesCache.get(event.id) || {};
+        const tags = Array.isArray(event.tags) ? event.tags : existing.tags ?? [];
+        const updated = {
+          ...existing,
+          id: event.id,
+          name: event.name ?? existing.name ?? event.id,
+          kind: event.kind ?? existing.kind ?? 'other',
+          status: event.status ?? existing.status ?? 'unknown',
+          note: event.note ?? existing.note ?? '–',
+          tags,
+          critical: event.critical ?? existing.critical ?? false,
+        };
+        servicesCache.set(event.id, updated);
+        renderServicesTable();
       };
 
       const updateHealth = (live, ready) => {
@@ -2915,6 +3010,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
           if (servicesRes.ok) {
             updateServices(await servicesRes.json());
           } else {
+            servicesCache = new Map();
             svcBody.innerHTML = '<tr><td colspan="6">Fehler beim Laden der Services.</td></tr>';
             metaServices.textContent = `Fehler (${servicesRes.status})`;
           }
@@ -2936,6 +3032,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
             auditMeta.textContent = `Fehler (${auditRes.status})`;
           }
         } catch (error) {
+          servicesCache = new Map();
           svcBody.innerHTML = '<tr><td colspan="6">Netzwerkfehler: Daten konnten nicht geladen werden.</td></tr>';
           metaServices.textContent = 'Fehler';
           showAlert(background ? 'Auto-Refresh fehlgeschlagen – Verbindung prüfen.' : 'Netzwerkfehler: Bitte Verbindung prüfen.');

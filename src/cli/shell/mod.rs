@@ -2,16 +2,23 @@ use crate::cli::commands::builtins;
 use crate::cli::commands::registry::{
     CliDependencies, CommandOutcome, CommandStatus, ShellEnvironment,
 };
-use crate::cli::completion::SimpleCompleter;
+use crate::cli::completion::ContextualCompleter;
 use crate::config::AppConfig;
-use crate::prompts;
+use crate::prompts::{self, PromptContext};
 use crate::services::{AppServices, ServiceStatus};
+use crate::utils;
 use rustyline::history::{DefaultHistory, History};
 use rustyline::{error::ReadlineError, Editor};
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+const COLOR_RESET: &str = "\x1b[0m";
+const COLOR_DIM: &str = "\x1b[38;5;244m";
+const COLOR_SUCCESS: &str = "\x1b[38;5;76m";
+const COLOR_ERROR: &str = "\x1b[38;5;203m";
 
 pub fn run_shell(config: Arc<AppConfig>, services: Arc<AppServices>) -> io::Result<()> {
     let mut stdout = io::stdout();
@@ -29,12 +36,19 @@ pub fn run_shell(config: Arc<AppConfig>, services: Arc<AppServices>) -> io::Resu
         Some(format!("lokale Sitzung pid={}", std::process::id())),
     );
 
-    let mut editor =
-        Editor::<SimpleCompleter, DefaultHistory>::new().map_err(map_readline_error)?;
-    editor.set_helper(Some(SimpleCompleter::new(registry.command_names())));
-    let history_path = init_history(&mut editor);
-    let prompt_set = prompts::prompt_set(config.as_ref());
+    let prompt_context = PromptContext::local_default(&config.server.ssh.server_name);
+    let prompt_set = prompts::prompt_set(config.as_ref(), &prompt_context);
 
+    let mut editor =
+        Editor::<ContextualCompleter, DefaultHistory>::new().map_err(map_readline_error)?;
+    editor.set_helper(Some(ContextualCompleter::new(
+        registry.command_names(),
+        dependencies.clone(),
+    )));
+    if let Some(helper) = editor.helper_mut() {
+        helper.update_commands(registry.command_names());
+    }
+    let history_path = init_history(&mut editor);
     loop {
         match editor.readline(&prompt_set.main_cli) {
             Ok(line) => {
@@ -48,39 +62,64 @@ pub fn run_shell(config: Arc<AppConfig>, services: Arc<AppServices>) -> io::Resu
                 let mut parts = cmd.split_whitespace();
                 if let Some(name) = parts.next() {
                     let args: Vec<&str> = parts.collect();
+                    show_pending(&mut stdout, name, &args)?;
+                    let started = Instant::now();
                     match registry.execute(
                         name,
                         &args,
                         &dependencies,
                         &mut stdout,
                         ShellEnvironment::Cli,
-                    )? {
-                        CommandStatus::Executed(CommandOutcome::Continue) => {}
-                        CommandStatus::Executed(CommandOutcome::ExitShell) => break,
-                        CommandStatus::Executed(CommandOutcome::EnterDbShell) => {
-                            let session = services.db_shell.create_session();
-                            if let Err(err) =
-                                crate::cli::commands::builtins::db_shell::run_local_db_shell(
-                                    session,
-                                    prompt_set.db_cli.clone(),
-                                )
-                            {
-                                writeln!(&mut stdout, "db-shell Fehler: {err}")?;
-                                services.registry().set_status(
-                                    "db-shell",
-                                    ServiceStatus::Degraded,
-                                    Some(format!("Fehler: {err}")),
-                                );
-                            } else {
-                                services.registry().set_status(
-                                    "db-shell",
-                                    ServiceStatus::Active,
-                                    Some("Bereit für neue Sessions".to_string()),
-                                );
+                    ) {
+                        Ok(CommandStatus::Executed(outcome)) => {
+                            let duration = started.elapsed();
+                            show_success(&mut stdout, name, &args, duration, &outcome)?;
+                            match outcome {
+                                CommandOutcome::Continue => {}
+                                CommandOutcome::ExitShell => break,
+                                CommandOutcome::EnterDbShell => {
+                                    let session = services.db_shell.create_session();
+                                    if let Err(err) =
+                                        crate::cli::commands::builtins::db_shell::run_local_db_shell(
+                                            session,
+                                            prompt_set.db_cli.clone(),
+                                        )
+                                    {
+                                        writeln!(&mut stdout, "db-shell Fehler: {err}")?;
+                                        services.registry().set_status(
+                                            "db-shell",
+                                            ServiceStatus::Degraded,
+                                            Some(format!("Fehler: {err}")),
+                                        );
+                                    } else {
+                                        services.registry().set_status(
+                                            "db-shell",
+                                            ServiceStatus::Active,
+                                            Some("Bereit für neue Sessions".to_string()),
+                                        );
+                                    }
+                                }
                             }
                         }
-                        CommandStatus::NotFound => {
-                            writeln!(&mut stdout, "unbekannter Befehl: {}", name)?;
+                        Ok(CommandStatus::NotFound) => {
+                            let duration = started.elapsed();
+                            show_error(
+                                &mut stdout,
+                                "CLI-0001",
+                                format!(
+                                    "Befehl '{name}' unbekannt – nutze 'help' oder Tab für Vorschläge"
+                                ),
+                                duration,
+                            )?;
+                        }
+                        Err(err) => {
+                            let duration = started.elapsed();
+                            show_error(
+                                &mut stdout,
+                                "CLI-0002",
+                                format!("Befehl '{name}' abgebrochen: {err}"),
+                                duration,
+                            )?;
                         }
                     }
                 }
@@ -88,7 +127,12 @@ pub fn run_shell(config: Arc<AppConfig>, services: Arc<AppServices>) -> io::Resu
             Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => break,
             Err(ReadlineError::Io(err)) => return Err(err),
             Err(err) => {
-                writeln!(&mut stdout, "Eingabefehler: {err}")?;
+                show_error(
+                    &mut stdout,
+                    "CLI-0003",
+                    format!("Eingabefehler: {err}"),
+                    Duration::from_secs(0),
+                )?;
                 break;
             }
         }
@@ -135,4 +179,72 @@ fn map_readline_error(err: ReadlineError) -> io::Error {
         ReadlineError::Io(err) => err,
         other => io::Error::new(io::ErrorKind::Other, other.to_string()),
     }
+}
+
+fn show_pending(out: &mut dyn Write, command: &str, args: &[&str]) -> io::Result<()> {
+    let joined = if args.is_empty() {
+        command.to_string()
+    } else {
+        format!("{} {}", command, args.join(" "))
+    };
+    writeln!(
+        out,
+        "{dim}→{reset} {text}",
+        dim = COLOR_DIM,
+        reset = COLOR_RESET,
+        text = joined
+    )?;
+    out.flush()
+}
+
+fn show_success(
+    out: &mut dyn Write,
+    command: &str,
+    args: &[&str],
+    duration: std::time::Duration,
+    outcome: &CommandOutcome,
+) -> io::Result<()> {
+    let joined = if args.is_empty() {
+        command.to_string()
+    } else {
+        format!("{} {}", command, args.join(" "))
+    };
+    let note = match outcome {
+        CommandOutcome::Continue => "ok",
+        CommandOutcome::ExitShell => "exit",
+        CommandOutcome::EnterDbShell => "db",
+    };
+    writeln!(
+        out,
+        "{color}✔{reset} {cmd} [{note} • {time}]",
+        color = COLOR_SUCCESS,
+        reset = COLOR_RESET,
+        cmd = joined,
+        note = note,
+        time = utils::format_brief_duration(duration)
+    )?;
+    out.flush()
+}
+
+fn show_error(
+    out: &mut dyn Write,
+    code: &str,
+    message: String,
+    duration: std::time::Duration,
+) -> io::Result<()> {
+    let hint = if duration.is_zero() {
+        String::new()
+    } else {
+        format!(" • {}", utils::format_brief_duration(duration))
+    };
+    writeln!(
+        out,
+        "{color}✖ {code}{reset} {msg}{hint}",
+        color = COLOR_ERROR,
+        code = code,
+        reset = COLOR_RESET,
+        msg = message,
+        hint = hint
+    )?;
+    out.flush()
 }

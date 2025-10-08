@@ -9,6 +9,7 @@ pub struct AppConfig {
     pub telemetry: TelemetrySection,
     pub audit: AuditSection,
     pub cli: CliSection,
+    pub modules: ModulesSection,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -138,6 +139,48 @@ pub struct AuditSection {
 #[derive(Debug, Deserialize, Clone)]
 pub struct CliSection {
     pub prompt_theme: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ModulesSection {
+    pub registry: ModuleRegistrySection,
+    pub storage: ModuleStorageSection,
+    #[serde(default)]
+    pub trust: ModuleTrustSection,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ModuleRegistrySection {
+    pub endpoint: String,
+    #[serde(default = "default_registry_index")]
+    pub index_file: String,
+    #[serde(default)]
+    pub allow_offline: bool,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ModuleStorageSection {
+    pub install_dir: String,
+    #[serde(default)]
+    pub cache_dir: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ModuleTrustSection {
+    #[serde(default = "default_require_signature")]
+    pub require_signature: bool,
+    #[serde(default)]
+    pub allowed_signers: Vec<String>,
+    #[serde(default)]
+    pub keyring_path: Option<String>,
+}
+
+fn default_registry_index() -> String {
+    "index.json".to_string()
+}
+
+fn default_require_signature() -> bool {
+    true
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -342,6 +385,52 @@ pub fn validate(cfg: &AppConfig) -> Result<(), ConfigError> {
     validate_http_tls(&cfg.server.http)?;
     validate_ssh_tls(&cfg.server.ssh)?;
     cfg.security.http.validate()?;
+
+    if cfg.modules.registry.endpoint.trim().is_empty() {
+        return Err(ConfigError::Invalid(
+            "modules.registry.endpoint must not be empty",
+        ));
+    }
+    if cfg.modules.storage.install_dir.trim().is_empty() {
+        return Err(ConfigError::Invalid(
+            "modules.storage.install_dir must not be empty",
+        ));
+    }
+    if let Some(cache_dir) = &cfg.modules.storage.cache_dir {
+        if cache_dir.trim().is_empty() {
+            return Err(ConfigError::Invalid(
+                "modules.storage.cache_dir must not be empty when set",
+            ));
+        }
+    }
+    if cfg.modules.trust.require_signature {
+        let _keyring_path = cfg
+            .modules
+            .trust
+            .keyring_path
+            .as_ref()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .ok_or(ConfigError::Invalid(
+                "modules.trust.keyring_path must be provided when signatures are required",
+            ))?;
+        if cfg.modules.trust.allowed_signers.is_empty() {
+            return Err(ConfigError::Invalid(
+                "modules.trust.allowed_signers must list at least one signer when signatures are required",
+            ));
+        }
+        if cfg
+            .modules
+            .trust
+            .allowed_signers
+            .iter()
+            .any(|signer| signer.trim().is_empty())
+        {
+            return Err(ConfigError::Invalid(
+                "modules.trust.allowed_signers must not contain empty entries",
+            ));
+        }
+    }
     Ok(())
 }
 

@@ -13,7 +13,7 @@ use crate::cli::commands::registry::{
 };
 use crate::cli::completion;
 use crate::config::AppConfig;
-use crate::prompts;
+use crate::prompts::{self, PromptContext};
 use crate::services::db_shell::DbShellSession;
 use crate::services::{AppServices, ServiceStatus};
 
@@ -557,7 +557,13 @@ pub async fn start(cfg: &Arc<AppConfig>, services: &Arc<AppServices>) -> Result<
     impl Server for Factory {
         type Handler = Handler;
         fn new(&mut self, _peer_addr: Option<std::net::SocketAddr>) -> Self::Handler {
-            let prompts = prompts::prompt_set(self.config.as_ref());
+            let prompt_ctx = PromptContext {
+                user: self.username.clone(),
+                host: self.config.server.ssh.server_name.clone(),
+                role: "ssh".to_string(),
+                transport: "ssh".to_string(),
+            };
+            let prompts = prompts::prompt_set(self.config.as_ref(), &prompt_ctx);
             let services = Arc::clone(&self.services);
             let config = Arc::clone(&self.config);
             let dependencies =

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "keys": [
+    {
+      "id": "fenrir-core",
+
+      "algorithm": "ed25519",
+      "public_key": "bGVUhZ+TD6G9o1WyI66P49blii/8SjPYisX977G9I8Y="
+    }
+  ]
+}

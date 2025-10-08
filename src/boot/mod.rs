@@ -5,12 +5,15 @@ use crate::audit::InMemoryAuditLog;
 use crate::config::{self, AppConfig};
 use crate::domain::db::DbEngine;
 use crate::infra::http::{HttpServer, HTTP_SERVICE_ID};
+use crate::infra::modules::{
+    Ed25519ModuleVerifier, FilesystemModuleRegistry, FilesystemModuleStorage,
+};
 use crate::infra::storage::memory::{InMemoryTicketRepository, InMemoryUserRepository};
 use crate::infra::{db, logging, ssh, telemetry};
 use crate::services::scheduler::install_default_jobs;
 use crate::services::{
-    AppServices, DbShellService, SchedulerService, ServiceDescriptor, ServiceKind, ServiceRegistry,
-    ServiceStatus, ServiceTag, TicketService, UserService,
+    AppServices, DbShellService, ModuleService, SchedulerService, ServiceDescriptor, ServiceKind,
+    ServiceRegistry, ServiceStatus, ServiceTag, TicketService, UserService,
 };
 use anyhow::{anyhow, Result};
 use tracing::info;
@@ -93,6 +96,17 @@ pub fn boot() -> Result<BootContext> {
     );
     registry.register(
         ServiceDescriptor::new(
+            "module-runtime",
+            "Module Runtime",
+            "Verwaltet installierte CLI-Module",
+            ServiceKind::Infrastructure,
+        )
+        .with_tags(&[ServiceTag::Platform]),
+        ServiceStatus::Standby,
+        Some("Keine Module installiert".to_string()),
+    );
+    registry.register(
+        ServiceDescriptor::new(
             "scheduler",
             "Background Scheduler",
             "Verwaltet periodische Jobs und Tasks",
@@ -149,6 +163,24 @@ pub fn boot() -> Result<BootContext> {
     let audit_log: Arc<dyn crate::audit::AuditLog> =
         Arc::new(InMemoryAuditLog::new(audit_capacity));
 
+    let module_registry: Arc<dyn crate::domain::module::ModuleRegistryPort> = Arc::new(
+        FilesystemModuleRegistry::new(&cfg.modules.registry)
+            .map_err(|err| anyhow!("module registry init failed: {err}"))?,
+    );
+    let module_storage: Arc<dyn crate::domain::module::ModuleStoragePort> = Arc::new(
+        FilesystemModuleStorage::new(&cfg.modules.storage)
+            .map_err(|err| anyhow!("module storage init failed: {err}"))?,
+    );
+    let module_verifier: Arc<dyn crate::domain::module::ModuleVerifierPort> = Arc::new(
+        Ed25519ModuleVerifier::from_config(&cfg.modules.trust)
+            .map_err(|err| anyhow!("module verifier init failed: {err}"))?,
+    );
+    let module_service = Arc::new(ModuleService::new(
+        Arc::clone(&module_registry),
+        Arc::clone(&module_storage),
+        Arc::clone(&module_verifier),
+    ));
+
     let services = Arc::new(AppServices::new(
         Arc::clone(&db_shell_service),
         Arc::clone(&scheduler_service),
@@ -158,6 +190,14 @@ pub fn boot() -> Result<BootContext> {
         Arc::clone(&audit_log),
     ));
     services.set_logging_handle(logging_handle.clone());
+    services
+        .attach_module_service(Arc::clone(&module_service))
+        .map_err(|err| anyhow!("module service attach failed: {err}"))?;
+    registry.set_status(
+        "module-runtime",
+        ServiceStatus::Active,
+        Some("Bereit für Module".to_string()),
+    );
 
     install_default_jobs(
         &scheduler_service,

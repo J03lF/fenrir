@@ -1,7 +1,7 @@
 use crate::cli::commands::registry::{
     CliDependencies, CommandEntry, CommandOutcome, CommandRegistry, ShellEnvironment,
 };
-use crate::cli::completion::SimpleCompleter;
+use crate::cli::completion::ListCompleter;
 use crate::domain::db::{
     DbError, DbExecutionResult, DbResult, DbResultSet, DbTable, DbTableSchema,
 };
@@ -93,9 +93,8 @@ pub fn run_local_db_shell(mut session: DbShellSession, prompt: String) -> io::Re
     )?;
     writeln!(&mut stdout, "Nutze 'help' für Übersicht der Befehle.")?;
 
-    let mut editor =
-        Editor::<SimpleCompleter, DefaultHistory>::new().map_err(map_readline_error)?;
-    editor.set_helper(Some(SimpleCompleter::new(completion_words(Some(&session)))));
+    let mut editor = Editor::<ListCompleter, DefaultHistory>::new().map_err(map_readline_error)?;
+    editor.set_helper(Some(ListCompleter::new(completion_words(Some(&session)))));
     let executor = RuntimeExecutor::new()?;
 
     loop {

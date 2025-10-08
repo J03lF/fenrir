@@ -1,4 +1,5 @@
 use crate::config::AppConfig;
+use whoami;
 
 const CLEAR_SCREEN: &str = "\x1B[2J\x1B[H";
 const COLOR_RESET: &str = "\x1b[0m";
@@ -26,6 +27,25 @@ pub struct PromptSet {
     pub main_transport: String,
     pub db_cli: String,
     pub db_transport: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct PromptContext {
+    pub user: String,
+    pub host: String,
+    pub role: String,
+    pub transport: String,
+}
+
+impl PromptContext {
+    pub fn local_default(app_host: &str) -> Self {
+        Self {
+            user: whoami::username(),
+            host: whoami::fallible::hostname().unwrap_or_else(|_| app_host.to_string()),
+            role: std::env::var("FENRIR_CLI_ROLE").unwrap_or_else(|_| "admin".to_string()),
+            transport: "local".to_string(),
+        }
+    }
 }
 
 pub fn clear_screen_sequence() -> &'static str {
@@ -57,23 +77,30 @@ pub fn help_hint() -> String {
     )
 }
 
-pub fn prompt_set(config: &AppConfig) -> PromptSet {
+pub fn prompt_set(config: &AppConfig, context: &PromptContext) -> PromptSet {
+    let app = &config.app.name;
     let main_transport = format!(
-        "[{color}{user}{reset}@{color2}{server}{reset}] {dim}»{reset} ",
-        color = COLOR_PROMPT,
-        color2 = COLOR_PRIMARY,
-        server = config.server.ssh.server_name,
-        user = config.server.ssh.user,
+        "[{role_color}{role}{reset}::{accent}{transport}{reset}] {primary}{user}@{host}{reset} {dim}{app}{reset} {dim}»{reset} ",
+        role_color = COLOR_ACCENT,
+        role = context.role,
+        accent = COLOR_PROMPT,
+        transport = context.transport,
+        primary = COLOR_PRIMARY,
+        user = context.user,
+        host = context.host,
         dim = COLOR_DIM,
         reset = COLOR_RESET,
     );
     let db_transport = format!(
-        "[{color}{user}{reset}@{color2}{server}{reset}] {color3}db{reset} {dim}»{reset} ",
-        color = COLOR_PROMPT,
-        color2 = COLOR_PRIMARY,
-        color3 = COLOR_ACCENT,
-        server = config.server.ssh.server_name,
-        user = config.server.ssh.user,
+        "[{role_color}{role}{reset}::{accent}{transport}{reset}] {primary}{user}@{host}{reset} {color_db}db{reset} {dim}{app}{reset} {dim}»{reset} ",
+        role_color = COLOR_ACCENT,
+        role = context.role,
+        accent = COLOR_PROMPT,
+        transport = context.transport,
+        primary = COLOR_PRIMARY,
+        user = context.user,
+        host = context.host,
+        color_db = COLOR_ACCENT,
         dim = COLOR_DIM,
         reset = COLOR_RESET,
     );

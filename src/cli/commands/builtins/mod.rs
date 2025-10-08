@@ -15,6 +15,10 @@ pub fn register_builtins(registry: &mut CommandRegistry) {
     registry.register(audit::command());
     registry.register(db_shell::command());
     registry.register(services::command());
+    registry.register(services::list_command());
+    registry.register(services::start_command());
+    registry.register(services::stop_command());
+    registry.register(services::restart_command());
     registry.register(log::command());
     registry.register(modules::command());
     registry.register(user::command());

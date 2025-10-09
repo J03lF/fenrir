@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use crate::domain::module::{
     InstalledModule, ModuleId, ModuleInstallResult, ModuleInstallStatus, ModuleManifest,
-    ModuleRegistryPort, ModuleResult, ModuleSearchQuery, ModuleServiceError, ModuleStorageError,
+    ModuleRegistryPort, ModuleResult, ModuleRuntimeError, ModuleRuntimeInfo, ModuleRuntimePort,
+    ModuleSearchQuery, ModuleServiceError, ModuleStartConfig, ModuleStorageError,
     ModuleStoragePort, ModuleSummary, ModuleVerifierPort, ModuleVersion,
 };
 
@@ -21,6 +22,7 @@ pub struct ModuleService {
     registry: Arc<dyn ModuleRegistryPort>,
     storage: Arc<dyn ModuleStoragePort>,
     verifier: Arc<dyn ModuleVerifierPort>,
+    runtime: Arc<dyn ModuleRuntimePort>,
 }
 
 impl ModuleService {
@@ -28,11 +30,13 @@ impl ModuleService {
         registry: Arc<dyn ModuleRegistryPort>,
         storage: Arc<dyn ModuleStoragePort>,
         verifier: Arc<dyn ModuleVerifierPort>,
+        runtime: Arc<dyn ModuleRuntimePort>,
     ) -> Self {
         Self {
             registry,
             storage,
             verifier,
+            runtime,
         }
     }
 
@@ -199,6 +203,90 @@ impl ModuleService {
         }
 
         Ok(results)
+    }
+
+    // ========================================================================
+    // Module Runtime Management
+    // ========================================================================
+
+    /// Start a module instance
+    pub async fn start(
+        &self,
+        config: ModuleStartConfig,
+    ) -> Result<ModuleRuntimeInfo, ModuleRuntimeError> {
+        // Verify module is installed
+        let _installed = self
+            .storage
+            .load(&config.module_id)
+            .await
+            .map_err(|e| ModuleRuntimeError::InvalidState(e.to_string()))?
+            .ok_or_else(|| ModuleRuntimeError::NotInstalled {
+                module_id: config.module_id.to_string(),
+            })?;
+
+        // Check if already running
+        if let Ok(info) = self.runtime.status(&config.module_id).await {
+            if matches!(info.status, crate::domain::module::ModuleRuntimeStatus::Running) {
+                return Err(ModuleRuntimeError::AlreadyRunning {
+                    module_id: config.module_id.to_string(),
+                });
+            }
+        }
+
+        // Start the module
+        let runtime_info = self.runtime.start(config).await?;
+
+        tracing::info!(
+            module_id = %runtime_info.module_id,
+            pid = ?runtime_info.pid,
+            port = ?runtime_info.port,
+            "module started successfully"
+        );
+
+        Ok(runtime_info)
+    }
+
+    /// Stop a running module instance
+    pub async fn stop(&self, module_id: &ModuleId) -> Result<(), ModuleRuntimeError> {
+        self.runtime.stop(module_id).await?;
+
+        tracing::info!(
+            module_id = %module_id,
+            "module stopped successfully"
+        );
+
+        Ok(())
+    }
+
+    /// Get runtime status of a module
+    pub async fn runtime_status(
+        &self,
+        module_id: &ModuleId,
+    ) -> Result<ModuleRuntimeInfo, ModuleRuntimeError> {
+        self.runtime.status(module_id).await
+    }
+
+    /// List all running modules
+    pub async fn list_running(&self) -> Result<Vec<ModuleRuntimeInfo>, ModuleRuntimeError> {
+        self.runtime.list_running().await
+    }
+
+    /// Restart a module instance
+    pub async fn restart(
+        &self,
+        module_id: &ModuleId,
+    ) -> Result<ModuleRuntimeInfo, ModuleRuntimeError> {
+        tracing::info!(module_id = %module_id, "restarting module");
+        self.runtime.restart(module_id).await
+    }
+
+    /// Get logs from a running module
+    pub async fn logs(
+        &self,
+        module_id: &ModuleId,
+        tail: Option<usize>,
+    ) -> Result<Vec<String>, ModuleRuntimeError> {
+        self.runtime.logs(module_id, tail).await
     }
 }
 

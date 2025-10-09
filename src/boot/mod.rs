@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -6,7 +7,7 @@ use crate::config::{self, AppConfig};
 use crate::domain::db::DbEngine;
 use crate::infra::http::{HttpServer, HTTP_SERVICE_ID};
 use crate::infra::modules::{
-    registry::HttpModuleRegistry, Ed25519ModuleVerifier, FilesystemModuleStorage,
+    registry::HttpModuleRegistry, Ed25519ModuleVerifier, FilesystemModuleStorage, ProcessModuleRuntime,
 };
 use crate::infra::storage::memory::{InMemoryTicketRepository, InMemoryUserRepository};
 use crate::infra::{db, logging, ssh, telemetry};
@@ -175,10 +176,15 @@ pub fn boot() -> Result<BootContext> {
         Ed25519ModuleVerifier::from_config(&cfg.modules.trust)
             .map_err(|err| anyhow!("module verifier init failed: {err}"))?,
     );
+    let runtime_state_dir = PathBuf::from(&cfg.modules.storage.install_dir).join("runtime");
+    let module_runtime: Arc<dyn crate::domain::module::ModuleRuntimePort> = Arc::new(
+        ProcessModuleRuntime::new(Arc::clone(&module_storage), runtime_state_dir),
+    );
     let module_service = Arc::new(ModuleService::new(
         Arc::clone(&module_registry),
         Arc::clone(&module_storage),
         Arc::clone(&module_verifier),
+        Arc::clone(&module_runtime),
     ));
 
     let services = Arc::new(AppServices::new(

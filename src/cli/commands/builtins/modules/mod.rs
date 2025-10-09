@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::future::Future;
 use std::io::{self, Write};
 use std::sync::{mpsc, Arc};
@@ -13,20 +14,24 @@ use crate::cli::commands::registry::{
 };
 use crate::cli::commands::table::Table;
 use crate::domain::module::{
-    ModuleId, ModuleInstallStatus, ModuleManifest, ModuleRegistryError, ModuleServiceError,
-    ModuleStorageError, ModuleVerificationError, ModuleVersion,
+    ModuleId, ModuleInstallStatus, ModuleManifest, ModuleRegistryError, ModuleRuntimeError,
+    ModuleServiceError, ModuleStorageError, ModuleVerificationError, ModuleVersion,
 };
 use crate::services::ModuleService;
 use crate::utils;
 
 const DETAILS: &[&str] = &[
-    "modules list                     – zeigt installierte Module",
+    "modules list                     – zeigt alle Module mit Runtime-Status",
     "modules search [pattern]         – durchsucht Registry",
     "modules info <name[@version]>    – zeigt Manifest-Informationen",
     "modules install <name[@version]> – installiert/aktualisiert Modul",
     "modules uninstall <name>         – entfernt ein installiertes Modul",
     "modules update [name]            – aktualisiert Modul(e)",
     "modules check-updates            – prüft verfügbare Updates",
+    "modules start <name>             – startet ein installiertes Modul",
+    "modules stop <name>              – stoppt ein laufendes Modul",
+    "modules restart <name>           – startet ein laufendes Modul neu",
+    "modules logs <name> [--tail N]   – zeigt Logs eines laufenden Moduls",
 ];
 
 // Helper to run async code from sync command handler
@@ -105,6 +110,10 @@ fn handle(
         Some("uninstall") => uninstall_module(Arc::clone(&service), deps, out, &args[1..]),
         Some("update") => update_modules(Arc::clone(&service), deps, out, &args[1..]),
         Some("check-updates") => check_updates(Arc::clone(&service), deps, out),
+        Some("start") => start_module(Arc::clone(&service), deps, out, &args[1..]),
+        Some("stop") => stop_module(Arc::clone(&service), deps, out, &args[1..]),
+        Some("restart") => restart_module(Arc::clone(&service), deps, out, &args[1..]),
+        Some("logs") => module_logs(Arc::clone(&service), out, &args[1..]),
         Some(other) => {
             writeln!(
                 out,
@@ -121,12 +130,17 @@ fn handle(
 }
 
 fn list_installed(service: Arc<ModuleService>, out: &mut dyn Write) -> io::Result<()> {
-    let result = run_module_future(move || {
-        let service = Arc::clone(&service);
+    // Clone service for both futures
+    let service_for_modules = Arc::clone(&service);
+    let service_for_runtime = Arc::clone(&service);
+
+    // Get installed modules
+    let modules_result = run_module_future(move || {
+        let service = Arc::clone(&service_for_modules);
         async move { service.list_installed().await }
     });
 
-    let modules = match result {
+    let modules = match modules_result {
         Ok(modules) => modules,
         Err(err) => {
             render_service_error(
@@ -138,35 +152,68 @@ fn list_installed(service: Arc<ModuleService>, out: &mut dyn Write) -> io::Resul
         }
     };
 
-    writeln!(out, "Installierte Module")?;
-    writeln!(out, "====================")?;
-
     if modules.is_empty() {
+        writeln!(out, "Installierte Module")?;
+        writeln!(out, "====================")?;
         writeln!(out, "(keine Module installiert)")?;
         return Ok(());
     }
 
+    // Get runtime status for all modules
+    let runtime_result = run_runtime_future(move || {
+        let service = Arc::clone(&service_for_runtime);
+        async move { service.list_running().await }
+    });
+
+    let running_modules: HashMap<String, _> = match runtime_result {
+        Ok(infos) => infos
+            .into_iter()
+            .map(|info| (info.module_id.to_string(), info))
+            .collect(),
+        Err(_) => HashMap::new(), // If runtime query fails, just show modules without status
+    };
+
+    writeln!(out, "Installierte Module (mit Runtime-Status)")?;
+    writeln!(out, "==========================================")?;
+
     let mut table = Table::new(vec![
         "Modul".to_string(),
         "Version".to_string(),
-        "Installiert".to_string(),
-        "Pfad".to_string(),
+        "Status".to_string(),
+        "PID".to_string(),
+        "Port".to_string(),
+        "Laufzeit".to_string(),
     ]);
 
     for module in modules {
-        let duration = module
-            .installed_at
-            .elapsed()
-            .ok()
-            .map(utils::format_brief_duration)
-            .unwrap_or_else(|| "-".to_string());
+        let module_id = module.manifest.id.clone();
 
-        table.add_row(vec![
-            module.manifest.id.clone(),
-            module.manifest.version.to_string(),
-            format!("vor {}", duration),
-            module.path.clone(),
-        ]);
+        // Check if module is running
+        if let Some(runtime_info) = running_modules.get(&module_id) {
+            let duration = runtime_info
+                .started_at
+                .and_then(|started| started.elapsed().ok())
+                .map(utils::format_brief_duration)
+                .unwrap_or_else(|| "-".to_string());
+
+            table.add_row(vec![
+                module_id,
+                module.manifest.version.to_string(),
+                "Running".to_string(),
+                runtime_info.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string()),
+                runtime_info.port.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string()),
+                duration,
+            ]);
+        } else {
+            table.add_row(vec![
+                module_id,
+                module.manifest.version.to_string(),
+                "Stopped".to_string(),
+                "-".to_string(),
+                "-".to_string(),
+                "-".to_string(),
+            ]);
+        }
     }
 
     table.render(out, "  ")
@@ -753,5 +800,337 @@ fn module_cli_actor() -> AuditActor {
     AuditActor::User {
         user_id: format!("cli::{}", whoami::username()),
         role: "operator".to_string(),
+    }
+}
+
+// ========================================================================
+// Module Runtime Commands
+// ========================================================================
+
+fn start_module(
+    service: Arc<ModuleService>,
+    deps: &CliDependencies,
+    out: &mut dyn Write,
+    args: &[&str],
+) -> io::Result<()> {
+    if args.len() != 1 {
+        writeln!(out, "Kommando: modules start <name>")?;
+        return Ok(());
+    }
+
+    let module_id = match ModuleId::new(args[0]) {
+        Ok(id) => id,
+        Err(err) => {
+            writeln!(out, "Ungültige Modul-ID '{}': {}", args[0], err)?;
+            return Ok(());
+        }
+    };
+
+    let module_id_clone = module_id.clone();
+    let result = run_runtime_future(move || {
+        let service = Arc::clone(&service);
+        async move {
+            use crate::domain::module::ModuleStartConfig;
+            let config = ModuleStartConfig {
+                module_id: module_id_clone,
+                port: None, // Port wird aus der Modul-Config gelesen
+                env_vars: vec![],
+                auto_restart: false,
+            };
+            service.start(config).await
+        }
+    });
+
+    match result {
+        Ok(info) => {
+            writeln!(
+                out,
+                "✓ Modul '{}' gestartet (PID: {}, Port: {})",
+                module_id,
+                info.pid.map(|p| p.to_string()).unwrap_or_else(|| "?".to_string()),
+                info.port.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string())
+            )?;
+            record_module_audit(
+                deps,
+                "module::start",
+                &module_id,
+                None,
+                AuditOutcome::Success,
+                AuditMetadata::default()
+                    .insert("pid", info.pid.map(|p| p.to_string()).unwrap_or_default())
+                    .insert("port", info.port.map(|p| p.to_string()).unwrap_or_default()),
+            );
+        }
+        Err(err) => {
+            render_runtime_error(out, "Start fehlgeschlagen", &err)?;
+            record_module_audit(
+                deps,
+                "module::start",
+                &module_id,
+                None,
+                AuditOutcome::Failure,
+                AuditMetadata::default()
+                    .insert("error_code", runtime_error_code(&err))
+                    .insert("error", err.to_string()),
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn stop_module(
+    service: Arc<ModuleService>,
+    deps: &CliDependencies,
+    out: &mut dyn Write,
+    args: &[&str],
+) -> io::Result<()> {
+    if args.len() != 1 {
+        writeln!(out, "Kommando: modules stop <name>")?;
+        return Ok(());
+    }
+
+    let module_id = match ModuleId::new(args[0]) {
+        Ok(id) => id,
+        Err(err) => {
+            writeln!(out, "Ungültige Modul-ID '{}': {}", args[0], err)?;
+            return Ok(());
+        }
+    };
+
+    let module_id_clone = module_id.clone();
+    let result = run_runtime_future(move || {
+        let service = Arc::clone(&service);
+        async move { service.stop(&module_id_clone).await }
+    });
+
+    match result {
+        Ok(_) => {
+            writeln!(out, "✓ Modul '{}' wurde gestoppt.", module_id)?;
+            record_module_audit(
+                deps,
+                "module::stop",
+                &module_id,
+                None,
+                AuditOutcome::Success,
+                AuditMetadata::default(),
+            );
+        }
+        Err(err) => {
+            render_runtime_error(out, "Stop fehlgeschlagen", &err)?;
+            record_module_audit(
+                deps,
+                "module::stop",
+                &module_id,
+                None,
+                AuditOutcome::Failure,
+                AuditMetadata::default()
+                    .insert("error_code", runtime_error_code(&err))
+                    .insert("error", err.to_string()),
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn restart_module(
+    service: Arc<ModuleService>,
+    deps: &CliDependencies,
+    out: &mut dyn Write,
+    args: &[&str],
+) -> io::Result<()> {
+    if args.len() != 1 {
+        writeln!(out, "Kommando: modules restart <name>")?;
+        return Ok(());
+    }
+
+    let module_id = match ModuleId::new(args[0]) {
+        Ok(id) => id,
+        Err(err) => {
+            writeln!(out, "Ungültige Modul-ID '{}': {}", args[0], err)?;
+            return Ok(());
+        }
+    };
+
+    let module_id_clone = module_id.clone();
+    let result = run_runtime_future(move || {
+        let service = Arc::clone(&service);
+        async move { service.restart(&module_id_clone).await }
+    });
+
+    match result {
+        Ok(info) => {
+            writeln!(
+                out,
+                "✓ Modul '{}' wurde neu gestartet (PID: {}, Restart-Zähler: {})",
+                module_id,
+                info.pid.map(|p| p.to_string()).unwrap_or_else(|| "?".to_string()),
+                info.restart_count
+            )?;
+            record_module_audit(
+                deps,
+                "module::restart",
+                &module_id,
+                None,
+                AuditOutcome::Success,
+                AuditMetadata::default()
+                    .insert("pid", info.pid.map(|p| p.to_string()).unwrap_or_default())
+                    .insert("restart_count", info.restart_count.to_string()),
+            );
+        }
+        Err(err) => {
+            render_runtime_error(out, "Restart fehlgeschlagen", &err)?;
+            record_module_audit(
+                deps,
+                "module::restart",
+                &module_id,
+                None,
+                AuditOutcome::Failure,
+                AuditMetadata::default()
+                    .insert("error_code", runtime_error_code(&err))
+                    .insert("error", err.to_string()),
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn module_logs(
+    service: Arc<ModuleService>,
+    out: &mut dyn Write,
+    args: &[&str],
+) -> io::Result<()> {
+    if args.is_empty() {
+        writeln!(out, "Kommando: modules logs <name> [--tail N]")?;
+        return Ok(());
+    }
+
+    let module_id = match ModuleId::new(args[0]) {
+        Ok(id) => id,
+        Err(err) => {
+            writeln!(out, "Ungültige Modul-ID '{}': {}", args[0], err)?;
+            return Ok(());
+        }
+    };
+
+    // Parse optional tail
+    let mut tail = None;
+    let mut iter = args[1..].iter();
+    while let Some(flag) = iter.next() {
+        if flag == &"--tail" {
+            let Some(value) = iter.next() else {
+                writeln!(out, "--tail benötigt einen Wert")?;
+                return Ok(());
+            };
+            tail = Some(match value.parse::<usize>() {
+                Ok(n) => n,
+                Err(_) => {
+                    writeln!(out, "Ungültiger tail-Wert: {}", value)?;
+                    return Ok(());
+                }
+            });
+        }
+    }
+
+    let module_id_clone = module_id.clone();
+    let result = run_runtime_future(move || {
+        let service = Arc::clone(&service);
+        async move { service.logs(&module_id_clone, tail).await }
+    });
+
+    match result {
+        Ok(lines) => {
+            writeln!(out, "Logs für Modul {} (Zeilen: {})", module_id, lines.len())?;
+            writeln!(out, "========================================")?;
+            for line in lines {
+                writeln!(out, "{}", line)?;
+            }
+        }
+        Err(err) => {
+            render_runtime_error(out, "Log-Abfrage fehlgeschlagen", &err)?;
+        }
+    }
+
+    Ok(())
+}
+
+// Helper to run runtime futures (similar to run_module_future)
+fn run_runtime_future<F, Fut, T>(factory: F) -> Result<T, ModuleRuntimeError>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = Result<T, ModuleRuntimeError>> + Send + 'static,
+    T: Send + 'static,
+{
+    if Handle::try_current().is_ok() {
+        return std::thread::spawn(move || {
+            Runtime::new()
+                .map_err(|err| {
+                    ModuleRuntimeError::InvalidState(format!("runtime init failed: {err}"))
+                })?
+                .block_on(factory())
+        })
+        .join()
+        .unwrap_or_else(|err| {
+            Err(ModuleRuntimeError::InvalidState(format!(
+                "blocking thread panicked: {err:?}"
+            )))
+        });
+    }
+    Runtime::new()
+        .map_err(|err| ModuleRuntimeError::InvalidState(format!("runtime init failed: {err}")))?
+        .block_on(factory())
+}
+
+fn render_runtime_error(
+    out: &mut dyn Write,
+    context: &str,
+    err: &ModuleRuntimeError,
+) -> io::Result<()> {
+    writeln!(
+        out,
+        "✗ {}: {} ({})",
+        context,
+        runtime_error_message(err),
+        runtime_error_code(err)
+    )
+}
+
+fn runtime_error_code(err: &ModuleRuntimeError) -> &'static str {
+    match err {
+        ModuleRuntimeError::NotInstalled { .. } => "not_installed",
+        ModuleRuntimeError::AlreadyRunning { .. } => "already_running",
+        ModuleRuntimeError::NotRunning { .. } => "not_running",
+        ModuleRuntimeError::StartFailed { .. } => "start_failed",
+        ModuleRuntimeError::StopFailed { .. } => "stop_failed",
+        ModuleRuntimeError::PortInUse { .. } => "port_in_use",
+        ModuleRuntimeError::InvalidState(_) => "invalid_state",
+        ModuleRuntimeError::Io(_) => "io_error",
+    }
+}
+
+fn runtime_error_message(err: &ModuleRuntimeError) -> String {
+    match err {
+        ModuleRuntimeError::NotInstalled { module_id } => {
+            format!("Modul '{}' ist nicht installiert", module_id)
+        }
+        ModuleRuntimeError::AlreadyRunning { module_id } => {
+            format!("Modul '{}' läuft bereits", module_id)
+        }
+        ModuleRuntimeError::NotRunning { module_id } => {
+            format!("Modul '{}' läuft nicht", module_id)
+        }
+        ModuleRuntimeError::StartFailed { module_id, reason } => {
+            format!("Start von '{}' fehlgeschlagen: {}", module_id, reason)
+        }
+        ModuleRuntimeError::StopFailed { module_id, reason } => {
+            format!("Stop von '{}' fehlgeschlagen: {}", module_id, reason)
+        }
+        ModuleRuntimeError::PortInUse { port } => {
+            format!("Port {} ist bereits belegt", port)
+        }
+        ModuleRuntimeError::InvalidState(msg) => format!("Ungültiger Zustand: {}", msg),
+        ModuleRuntimeError::Io(msg) => format!("I/O-Fehler: {}", msg),
     }
 }

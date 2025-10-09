@@ -49,6 +49,9 @@ urlencoding = "2.1"
 flate2 = { version = "1.0", default-features = true }
 tar = "0.4"
 
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.27", features = ["signal", "process"] }
+
 [dev-dependencies]
 assert_cmd = "2.0"
 predicates = "3.1"

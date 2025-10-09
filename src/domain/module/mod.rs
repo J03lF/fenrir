@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::time::SystemTime;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct ModuleId(String);
 
 impl ModuleId {
@@ -293,6 +293,111 @@ impl From<ModuleStorageError> for ModuleServiceError {
 impl From<ModuleVerificationError> for ModuleServiceError {
     fn from(err: ModuleVerificationError) -> Self {
         Self::Verification(err)
+    }
+}
+
+// ============================================================================
+// Module Runtime Domain
+// ============================================================================
+
+/// Status of a running module instance
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModuleRuntimeStatus {
+    /// Module is currently running
+    Running,
+    /// Module is stopped
+    Stopped,
+    /// Module failed to start or crashed
+    Failed,
+    /// Module is starting up
+    Starting,
+    /// Module is stopping
+    Stopping,
+}
+
+/// Information about a running module instance
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleRuntimeInfo {
+    pub module_id: ModuleId,
+    pub version: ModuleVersion,
+    pub status: ModuleRuntimeStatus,
+    pub pid: Option<u32>,
+    pub port: Option<u16>,
+    pub started_at: Option<SystemTime>,
+    pub stopped_at: Option<SystemTime>,
+    pub restart_count: u32,
+}
+
+/// Configuration for starting a module
+#[derive(Debug, Clone)]
+pub struct ModuleStartConfig {
+    pub module_id: ModuleId,
+    pub port: Option<u16>,
+    pub env_vars: Vec<(String, String)>,
+    pub auto_restart: bool,
+}
+
+/// Port trait for module runtime management
+#[async_trait]
+pub trait ModuleRuntimePort: Send + Sync {
+    /// Start a module instance
+    async fn start(
+        &self,
+        config: ModuleStartConfig,
+    ) -> Result<ModuleRuntimeInfo, ModuleRuntimeError>;
+
+    /// Stop a running module instance
+    async fn stop(&self, module_id: &ModuleId) -> Result<(), ModuleRuntimeError>;
+
+    /// Get status of a module instance
+    async fn status(&self, module_id: &ModuleId) -> Result<ModuleRuntimeInfo, ModuleRuntimeError>;
+
+    /// List all running modules
+    async fn list_running(&self) -> Result<Vec<ModuleRuntimeInfo>, ModuleRuntimeError>;
+
+    /// Restart a module instance
+    async fn restart(&self, module_id: &ModuleId) -> Result<ModuleRuntimeInfo, ModuleRuntimeError>;
+
+    /// Get logs from a module instance
+    async fn logs(
+        &self,
+        module_id: &ModuleId,
+        tail: Option<usize>,
+    ) -> Result<Vec<String>, ModuleRuntimeError>;
+}
+
+/// Errors that can occur during module runtime operations
+#[derive(thiserror::Error, Debug)]
+pub enum ModuleRuntimeError {
+    #[error("module `{module_id}` is not installed")]
+    NotInstalled { module_id: String },
+
+    #[error("module `{module_id}` is already running")]
+    AlreadyRunning { module_id: String },
+
+    #[error("module `{module_id}` is not running")]
+    NotRunning { module_id: String },
+
+    #[error("failed to start module `{module_id}`: {reason}")]
+    StartFailed { module_id: String, reason: String },
+
+    #[error("failed to stop module `{module_id}`: {reason}")]
+    StopFailed { module_id: String, reason: String },
+
+    #[error("port {port} is already in use")]
+    PortInUse { port: u16 },
+
+    #[error("io error: {0}")]
+    Io(String),
+
+    #[error("invalid state: {0}")]
+    InvalidState(String),
+}
+
+impl From<ModuleRuntimeError> for ModuleServiceError {
+    fn from(err: ModuleRuntimeError) -> Self {
+        Self::Storage(ModuleStorageError::InvalidState(err.to_string()))
     }
 }
 

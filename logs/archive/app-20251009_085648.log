@@ -1,0 +1,25 @@
+2025-10-09T08:46:41.313722Z  INFO main ThreadId(01) fenrir::infra::logging: dateilogging initialisiert log_path=logs/app.log
+2025-10-09T08:46:41.313825Z  INFO main ThreadId(01) fenrir::infra::logging: db-logdatei vorbereitet log_path=logs/db.log
+2025-10-09T08:46:41.314030Z  INFO main ThreadId(01) fenrir::boot: core services registered in registry
+2025-10-09T08:46:41.314267Z  INFO main ThreadId(01) fenrir::boot: scheduler service started
+2025-10-09T08:46:41.314561Z  INFO tokio-runtime-worker ThreadId(13) fenrir::services::scheduler: scheduler heartbeat loop started
+2025-10-09T08:46:41.315621Z  INFO                 main ThreadId(01) fenrir::boot: user and ticket services initialised
+2025-10-09T08:46:41.315637Z  INFO                 main ThreadId(01) fenrir::boot: boot complete app=fenrir version=0.1.3
+2025-10-09T08:46:41.315704Z  INFO                 main ThreadId(01) fenrir::boot: transport initialisation triggered
+2025-10-09T08:46:41.315725Z  INFO tokio-runtime-worker ThreadId(03) fenrir::boot: ssh server task spawned
+2025-10-09T08:46:41.316201Z  INFO tokio-runtime-worker ThreadId(03) fenrir::infra::ssh: starting SSH server host=127.0.0.1 port=2222
+2025-10-09T08:46:41.316417Z  INFO tokio-runtime-worker ThreadId(08) fenrir::infra::http: HTTP server task spawned
+2025-10-09T08:46:48.218613Z  INFO tokio-runtime-worker ThreadId(02) thrussh::server::encrypted: pty-req: unknown pty code 42
+2025-10-09T08:46:50.661972Z  INFO tokio-runtime-worker ThreadId(02) fenrir::cli::commands::builtins::modules: modules command invoked command="modules"
+2025-10-09T08:46:50.667229Z  WARN ThreadId(17) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-10-09T08:46:50.667342Z  WARN ThreadId(17) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.idea name=".idea"
+2025-10-09T08:47:10.821563Z  INFO tokio-runtime-worker ThreadId(07) fenrir::cli::commands::builtins::modules: modules command invoked command="modules"
+2025-10-09T08:47:10.828931Z  INFO ThreadId(34) fenrir::infra::modules::runtime::process: module process started module_id=fenrir-api pid=70082 port=None
+2025-10-09T08:47:10.830485Z  INFO ThreadId(34) fenrir::services::module: module started successfully module_id=fenrir-api pid=Some(70082) port=None
+2025-10-09T08:47:30.985999Z  INFO tokio-runtime-worker ThreadId(13) fenrir::cli::commands::builtins::modules: modules command invoked command="modules"
+2025-10-09T08:47:39.685836Z  INFO tokio-runtime-worker ThreadId(13) fenrir::cli::commands::builtins::modules: modules command invoked command="modules"
+2025-10-09T08:47:45.595304Z  INFO tokio-runtime-worker ThreadId(13) fenrir::cli::commands::builtins::modules: modules command invoked command="modules"
+2025-10-09T08:47:46.101177Z  INFO ThreadId(65) fenrir::infra::modules::runtime::process: module stopped module_id=fenrir-api pid=70082
+2025-10-09T08:47:46.101366Z  INFO ThreadId(65) fenrir::services::module: module stopped successfully module_id=fenrir-api
+2025-10-09T08:56:42.648769Z  INFO tokio-runtime-worker ThreadId(02) fenrir::services::scheduler: scheduler heartbeat stopped
+2025-10-09T08:56:42.649475Z  INFO tokio-runtime-worker ThreadId(02) fenrir::services::scheduler: scheduler service dropped and resources cleaned up

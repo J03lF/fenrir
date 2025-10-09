@@ -10,12 +10,14 @@ use async_trait::async_trait;
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Method, Request, StatusCode};
 use axum::Router;
-use tower::ServiceExt;
 use semver::{Version, VersionReq};
 use serde_json::{json, Value};
+use tower::ServiceExt;
 
 use fenrir::audit::{AuditLog, InMemoryAuditLog};
-use fenrir::domain::db::{DbAdminPort, DbEngine, DbExecutionResult, DbResult, DbTable, DbTableSchema};
+use fenrir::domain::db::{
+    DbAdminPort, DbEngine, DbExecutionResult, DbResult, DbTable, DbTableSchema,
+};
 use fenrir::domain::module::{
     InstalledModule, ModuleArtifactDescriptor, ModuleBundle, ModuleChecksum, ModuleId,
     ModuleInstallResult, ModuleInstallStatus, ModuleManifest, ModuleRegistryError,
@@ -123,7 +125,11 @@ impl StubModuleRegistry {
 
     fn latest(&self) -> Option<ModuleManifest> {
         let guard = self.versions.lock().unwrap();
-        guard.iter().rev().next().map(|(_, manifest)| manifest.clone())
+        guard
+            .iter()
+            .rev()
+            .next()
+            .map(|(_, manifest)| manifest.clone())
     }
 }
 
@@ -218,7 +224,10 @@ impl ModuleStoragePort for StubModuleStorage {
         bundle: ModuleBundle,
     ) -> Result<ModuleInstallResult, ModuleStorageError> {
         let mut guard = self.installed.lock().unwrap();
-        let path = format!("/modules/{}/{}", bundle.manifest.id, bundle.manifest.version);
+        let path = format!(
+            "/modules/{}/{}",
+            bundle.manifest.id, bundle.manifest.version
+        );
 
         if let Some(existing) = guard
             .iter_mut()
@@ -267,7 +276,10 @@ struct StubModuleVerifier;
 
 #[async_trait]
 impl ModuleVerifierPort for StubModuleVerifier {
-    async fn verify(&self, _bundle: &ModuleBundle) -> Result<(), fenrir::domain::module::ModuleVerificationError> {
+    async fn verify(
+        &self,
+        _bundle: &ModuleBundle,
+    ) -> Result<(), fenrir::domain::module::ModuleVerificationError> {
         Ok(())
     }
 }
@@ -309,11 +321,7 @@ fn attach_module_service(
     let registry_port: Arc<dyn ModuleRegistryPort> = registry;
     let storage_port: Arc<dyn ModuleStoragePort> = storage;
 
-    let module_service = Arc::new(ModuleService::new(
-        registry_port,
-        storage_port,
-        verifier,
-    ));
+    let module_service = Arc::new(ModuleService::new(registry_port, storage_port, verifier));
 
     services.attach_module_service(module_service).unwrap();
 }
@@ -348,7 +356,11 @@ async fn modules_available_requires_auth() {
 
     let response = router
         .clone()
-        .oneshot(Request::get("/modules/available").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::get("/modules/available")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -365,7 +377,11 @@ async fn modules_available_lists_registry_entries() {
 
     let response = router
         .clone()
-        .oneshot(bearer_request(Method::GET, "/modules/available", "viewer-token"))
+        .oneshot(bearer_request(
+            Method::GET,
+            "/modules/available",
+            "viewer-token",
+        ))
         .await
         .unwrap();
 
@@ -383,7 +399,11 @@ async fn modules_install_and_update_flow() {
     let (router, services) = build_router(Arc::clone(&registry));
     let registry_stub = Arc::new(StubModuleRegistry::new(vec![sample_manifest("0.3.0")]));
     let storage_stub = Arc::new(StubModuleStorage::new());
-    attach_module_service(&services, Arc::clone(&registry_stub), Arc::clone(&storage_stub));
+    attach_module_service(
+        &services,
+        Arc::clone(&registry_stub),
+        Arc::clone(&storage_stub),
+    );
 
     // Install initial version
     let response = router
@@ -416,12 +436,19 @@ async fn modules_install_and_update_flow() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(payload["results"].as_array().unwrap()[0]["status"], "updated");
+    assert_eq!(
+        payload["results"].as_array().unwrap()[0]["status"],
+        "updated"
+    );
 
     // Ensure installed list reflects new version
     let response = router
         .clone()
-        .oneshot(bearer_request(Method::GET, "/modules/installed", "viewer-token"))
+        .oneshot(bearer_request(
+            Method::GET,
+            "/modules/installed",
+            "viewer-token",
+        ))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -433,7 +460,11 @@ async fn modules_install_and_update_flow() {
     // Uninstall module
     let response = router
         .clone()
-        .oneshot(bearer_request(Method::DELETE, "/modules/sample-module", "operator-token"))
+        .oneshot(bearer_request(
+            Method::DELETE,
+            "/modules/sample-module",
+            "operator-token",
+        ))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
@@ -441,7 +472,11 @@ async fn modules_install_and_update_flow() {
     // Confirm removal
     let response = router
         .clone()
-        .oneshot(bearer_request(Method::GET, "/modules/installed", "viewer-token"))
+        .oneshot(bearer_request(
+            Method::GET,
+            "/modules/installed",
+            "viewer-token",
+        ))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);

@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::cli::commands::registry::{
-    CliDependencies, CommandEntry, CommandOutcome, CommandRegistry, ShellEnvironment,
+    CliDependencies, CommandArgument, CommandEntry, CommandOutcome, CommandRegistry, CommandShape,
+    CommandSubcommand, CompletionKind, ShellEnvironment,
 };
 use crate::infra::logging::{self, LogKind};
 use tracing::{info, warn};
@@ -17,13 +18,42 @@ const DETAILS: &[&str] = &[
     "log level <stufe> – setzt das Runtime-Loglevel (z. B. trace|debug|info|warn|error)",
 ];
 
+const LOG_LEVEL_OPTIONS: &[&str] = &["trace", "debug", "info", "warn", "error"];
+const LOG_ARCHIVE_OPTIONS: &[&str] = &["app", "db"];
+
+const LOG_LEVEL_ARGUMENT: CommandArgument =
+    CommandArgument::required("level").with_completion(CompletionKind::Static(LOG_LEVEL_OPTIONS));
+const LOG_ARCHIVE_ARGUMENT: CommandArgument = CommandArgument::optional("target")
+    .with_completion(CompletionKind::Static(LOG_ARCHIVE_OPTIONS));
+
+const LOG_SUBCOMMANDS: &[CommandSubcommand] = &[
+    CommandSubcommand::new("app", &[], &[], "App-Log streamen"),
+    CommandSubcommand::new("db", &[], &[], "DB-Log streamen"),
+    CommandSubcommand::new("all", &[], &[], "App- und DB-Log öffnen"),
+    CommandSubcommand::new(
+        "level",
+        &[],
+        &[LOG_LEVEL_ARGUMENT],
+        "Loglevel zur Laufzeit aktualisieren",
+    ),
+    CommandSubcommand::new(
+        "archive",
+        &[],
+        &[LOG_ARCHIVE_ARGUMENT],
+        "Neueste Archivdatei anzeigen",
+    ),
+];
+
+const LOG_SHAPE: CommandShape = CommandShape::new("log", &[], &[], LOG_SUBCOMMANDS);
+
 pub fn command() -> CommandEntry {
-    CommandEntry::new(
+    CommandEntry::with_shape(
         "log",
         "Öffnet einen Log-Stream in einem neuen Terminal",
         "log [app|db|all|archive <ziel>|level <stufe>]",
         DETAILS,
         handle,
+        LOG_SHAPE,
     )
 }
 

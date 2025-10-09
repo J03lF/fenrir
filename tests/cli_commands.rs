@@ -136,3 +136,18 @@ async fn user_and_ticket_commands_work_end_to_end() {
         "modules output missing ticket service: {modules_output}"
     );
 }
+
+#[test]
+fn modules_command_exposes_subcommands_for_completion() {
+    let registry = builtins::build_registry();
+    let shapes = registry.shapes();
+    let modules_shape = shapes
+        .into_iter()
+        .find(|shape| shape.name == "modules")
+        .expect("modules command shape");
+
+    assert!(
+        !modules_shape.subcommands.is_empty(),
+        "modules shape must expose subcommands for completion",
+    );
+}

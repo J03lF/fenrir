@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context, Result};
+use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
@@ -11,7 +12,7 @@ use crate::cli::commands::builtins::db_shell::{self, RuntimeExecutor};
 use crate::cli::commands::registry::{
     CliDependencies, CommandOutcome, CommandRegistry, CommandStatus, ShellEnvironment,
 };
-use crate::cli::completion;
+use crate::cli::completion::{self, ContextualCompleter};
 use crate::config::AppConfig;
 use crate::prompts::{self, PromptContext};
 use crate::services::db_shell::DbShellSession;
@@ -32,6 +33,7 @@ struct Handler {
     services: Arc<AppServices>,
     dependencies: CliDependencies,
     registry: CommandRegistry,
+    completer: Arc<ContextualCompleter>,
     history: Vec<String>,
     history_index: Option<usize>,
     mode: ShellMode,
@@ -397,22 +399,138 @@ impl Handler {
     }
 
     fn handle_tab(&mut self, channel: ChannelId, session: &mut Session) {
-        let commands = match self.mode {
-            ShellMode::Main => self.registry.command_names(),
-            ShellMode::DbShell => db_shell::completion_words(self.db_session.as_ref()),
-        };
+        match self.mode {
+            ShellMode::Main => self.complete_main(channel, session),
+            ShellMode::DbShell => self.complete_db(channel, session),
+        }
+    }
+
+    fn complete_main(&mut self, channel: ChannelId, session: &mut Session) {
+        let (start, suggestions) = self.completer.suggestions_for(&self.buffer, self.cursor);
+        if suggestions.is_empty() {
+            session.data(channel, CryptoVec::from_slice(b"\x07"));
+            return;
+        }
+
+        let before = self.buffer[..start].to_string();
+        let remainder = self.buffer[self.cursor..].to_string();
+        let prefix = self.buffer[start..self.cursor].to_string();
+        let mut updated_buffer = false;
+
+        let command_completion = start == 0
+            && self.cursor == prefix.len()
+            && !prefix.is_empty()
+            && self.registry.get(prefix.as_str()).is_some();
+
+        if command_completion {
+            if !self.buffer.ends_with(' ') {
+                self.buffer.push(' ');
+                self.cursor = self.buffer.len();
+                updated_buffer = true;
+            }
+        }
+
+        if suggestions.len() == 1 {
+            let completion = &suggestions[0];
+            if completion == prefix.as_str() && remainder.is_empty() {
+                let (_, cycle_matches) =
+                    self.completer.cycle_suggestions(&self.buffer, self.cursor);
+                if let Some(next) = cycle_matches.first() {
+                    if next != completion {
+                        self.buffer = before.clone();
+                        self.buffer.push_str(next);
+                        self.cursor = self.buffer.len();
+                        self.buffer.push_str(&remainder);
+                        self.render_buffer(session, channel);
+                        return;
+                    }
+                }
+                session.data(channel, CryptoVec::from_slice(b"\x07"));
+                return;
+            }
+            self.buffer = before.clone();
+            self.buffer.push_str(completion);
+            self.cursor = self.buffer.len();
+            if remainder.is_empty() {
+                self.buffer.push(' ');
+                self.cursor += 1;
+            }
+            self.buffer.push_str(&remainder);
+            self.render_buffer(session, channel);
+            return;
+        }
+
+        if let Some(common) = completion::longest_common_prefix(&suggestions) {
+            if common.len() > prefix.len() {
+                self.buffer = before.clone();
+                self.buffer.push_str(&common);
+                self.cursor = self.buffer.len();
+                self.buffer.push_str(&remainder);
+                updated_buffer = true;
+            }
+        }
+
+        if !updated_buffer {
+            let (_, cycle_matches) = self.completer.cycle_suggestions(&self.buffer, self.cursor);
+            if let Some(completion) = cycle_matches.first() {
+                if completion != prefix.as_str() {
+                    self.buffer = before.clone();
+                    self.buffer.push_str(completion);
+                    self.cursor = self.buffer.len();
+                    self.buffer.push_str(&remainder);
+                    updated_buffer = true;
+                }
+            }
+        }
+
+        if suggestions.len() > 1 {
+            self.show_suggestions(&suggestions, channel, session);
+        }
+
+        if updated_buffer {
+            self.render_buffer(session, channel);
+            return;
+        }
+
+        self.render_buffer(session, channel);
+    }
+
+    fn show_suggestions(&self, suggestions: &[String], channel: ChannelId, session: &mut Session) {
+        session.data(channel, CryptoVec::from_slice(b"\r\n"));
+        self.print_suggestions_raw(suggestions, channel, session);
+    }
+
+    fn print_suggestions_raw(
+        &self,
+        suggestions: &[String],
+        channel: ChannelId,
+        session: &mut Session,
+    ) {
+        let mut seen = HashSet::new();
+        let mut writer = SessionWriter::new(session, channel);
+        for entry in suggestions {
+            if seen.insert(entry) {
+                let _ = writeln!(&mut writer, "{entry}");
+            }
+        }
+    }
+
+    fn complete_db(&mut self, channel: ChannelId, session: &mut Session) {
+        let commands = db_shell::completion_words(self.db_session.as_ref());
         if commands.is_empty() {
             session.data(channel, CryptoVec::from_slice(b"\x07"));
             return;
         }
-        let pos = self.cursor;
-        let (start, matches) = completion::completion_matches(&commands, &self.buffer, pos);
+        let (start, matches) = completion::completion_matches(&commands, &self.buffer, self.cursor);
         if matches.is_empty() {
             session.data(channel, CryptoVec::from_slice(b"\x07"));
             return;
         }
+
         let before = self.buffer[..start].to_string();
         let remainder = self.buffer[self.cursor..].to_string();
+        let prefix_len = self.cursor - start;
+
         if matches.len() == 1 {
             let completion = &matches[0];
             self.buffer = before.clone();
@@ -428,13 +546,13 @@ impl Handler {
         }
 
         if let Some(common) = completion::longest_common_prefix(&matches) {
-            let prefix_len = self.cursor - start;
             if common.len() > prefix_len {
                 self.buffer = before.clone();
                 self.buffer.push_str(&common);
                 self.cursor = self.buffer.len();
                 self.buffer.push_str(&remainder);
                 self.render_buffer(session, channel);
+                return;
             }
         }
 
@@ -568,6 +686,13 @@ pub async fn start(cfg: &Arc<AppConfig>, services: &Arc<AppServices>) -> Result<
             let config = Arc::clone(&self.config);
             let dependencies =
                 CliDependencies::new(Arc::clone(&self.config), Arc::clone(&self.services));
+            let registry = builtins::build_registry();
+            let mut completer = ContextualCompleter::new(
+                registry.shapes(),
+                dependencies.clone(),
+                ShellEnvironment::Ssh,
+            );
+            completer.update_catalog(registry.shapes());
             Handler {
                 username: self.username.clone(),
                 password_env: self.password_env.clone(),
@@ -579,7 +704,8 @@ pub async fn start(cfg: &Arc<AppConfig>, services: &Arc<AppServices>) -> Result<
                 config,
                 services,
                 dependencies,
-                registry: builtins::build_registry(),
+                registry,
+                completer: Arc::new(completer),
                 history: Vec::new(),
                 history_index: None,
                 mode: ShellMode::Main,

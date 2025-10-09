@@ -1,5 +1,5 @@
 use crate::cli::commands::registry::{
-    CliDependencies, CommandEntry, CommandOutcome, CommandRegistry, ShellEnvironment,
+    CliDependencies, CommandEntry, CommandOutcome, CommandRegistry, CommandShape, ShellEnvironment,
 };
 use std::io::{self, Write};
 
@@ -8,13 +8,16 @@ const DETAILS: &[&str] = &[
     "In Subshells (z. B. db-shell) kehrt 'exit' zur Hauptshell zurück",
 ];
 
+const EXIT_SHAPE: CommandShape = CommandShape::basic("exit");
+
 pub fn command() -> CommandEntry {
-    CommandEntry::new(
+    CommandEntry::with_shape(
         "exit",
         "Beendet die aktuelle Sitzung",
         "exit",
         DETAILS,
         handle,
+        EXIT_SHAPE,
     )
 }
 

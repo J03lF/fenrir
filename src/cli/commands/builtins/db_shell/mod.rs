@@ -1,5 +1,5 @@
 use crate::cli::commands::registry::{
-    CliDependencies, CommandEntry, CommandOutcome, CommandRegistry, ShellEnvironment,
+    CliDependencies, CommandEntry, CommandOutcome, CommandRegistry, CommandShape, ShellEnvironment,
 };
 use crate::cli::completion::ListCompleter;
 use crate::domain::db::{
@@ -21,13 +21,16 @@ const DETAILS: &[&str] = &[
     "Destruktive SQLs benötigen '--force' am Zeilenende",
 ];
 
+const DB_SHELL_SHAPE: CommandShape = CommandShape::basic("db-shell");
+
 pub fn command() -> CommandEntry {
-    CommandEntry::new(
+    CommandEntry::with_shape(
         "db-shell",
         "Öffnet die Datenbank-Subshell",
         "db-shell",
         DETAILS,
         handle,
+        DB_SHELL_SHAPE,
     )
 }
 

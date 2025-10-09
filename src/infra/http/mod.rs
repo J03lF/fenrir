@@ -46,8 +46,8 @@ use crate::audit::{AuditActor, AuditEvent, AuditMetadata, AuditOutcome};
 use crate::config::AppConfig;
 use crate::domain::module::{
     InstalledModule, ModuleError, ModuleId, ModuleInstallResult, ModuleInstallStatus,
-    ModuleManifest, ModuleRegistryError, ModuleSearchQuery, ModuleServiceError,
-    ModuleStorageError, ModuleVersion,
+    ModuleManifest, ModuleRegistryError, ModuleSearchQuery, ModuleServiceError, ModuleStorageError,
+    ModuleVersion,
 };
 use crate::infra::{logging, telemetry};
 use crate::security::auth::{AuthError, ControlPlaneAuthorizer, Role};
@@ -831,7 +831,7 @@ fn snapshot_to_state_event(snapshot: ServiceSnapshot) -> ServiceStateEvent {
             .tags
             .iter()
             .map(|tag| tag.as_str())
-        .collect(),
+            .collect(),
     }
 }
 
@@ -874,21 +874,17 @@ fn map_install_result(result: ModuleInstallResult) -> ModuleInstallResponse {
 fn module_error_problem(err: ModuleServiceError) -> ServiceActionProblem {
     match err {
         ModuleServiceError::Registry(inner) => match inner {
-            ModuleRegistryError::Unavailable(msg) => ServiceActionProblem::new(
-                StatusCode::BAD_GATEWAY,
-                "registry_unavailable",
-                msg,
-            ),
+            ModuleRegistryError::Unavailable(msg) => {
+                ServiceActionProblem::new(StatusCode::BAD_GATEWAY, "registry_unavailable", msg)
+            }
             ModuleRegistryError::NotFound { module } => ServiceActionProblem::new(
                 StatusCode::NOT_FOUND,
                 "module_not_found",
                 format!("Modul '{}' wurde nicht gefunden", module),
             ),
-            ModuleRegistryError::Protocol(msg) => ServiceActionProblem::new(
-                StatusCode::BAD_GATEWAY,
-                "registry_protocol_error",
-                msg,
-            ),
+            ModuleRegistryError::Protocol(msg) => {
+                ServiceActionProblem::new(StatusCode::BAD_GATEWAY, "registry_protocol_error", msg)
+            }
         },
         ModuleServiceError::Storage(inner) => match inner {
             ModuleStorageError::Unavailable(msg) | ModuleStorageError::Io(msg) => {
@@ -898,11 +894,9 @@ fn module_error_problem(err: ModuleServiceError) -> ServiceActionProblem {
                     msg,
                 )
             }
-            ModuleStorageError::InvalidState(msg) => ServiceActionProblem::new(
-                StatusCode::CONFLICT,
-                "module_invalid_state",
-                msg,
-            ),
+            ModuleStorageError::InvalidState(msg) => {
+                ServiceActionProblem::new(StatusCode::CONFLICT, "module_invalid_state", msg)
+            }
         },
         ModuleServiceError::Verification(inner) => ServiceActionProblem::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -914,15 +908,13 @@ fn module_error_problem(err: ModuleServiceError) -> ServiceActionProblem {
 
 fn module_validation_problem(code: &'static str, err: ModuleError) -> ServiceActionProblem {
     match err {
-        ModuleError::Validation(msg) =>
-            ServiceActionProblem::new(StatusCode::BAD_REQUEST, code, msg),
+        ModuleError::Validation(msg) => {
+            ServiceActionProblem::new(StatusCode::BAD_REQUEST, code, msg)
+        }
     }
 }
 
-async fn list_installed_modules(
-    State(state): State<HttpState>,
-    headers: HeaderMap,
-) -> Response {
+async fn list_installed_modules(State(state): State<HttpState>, headers: HeaderMap) -> Response {
     if let Err(problem) = authorize(&state.auth, &headers, Role::Viewer) {
         return problem.into_response();
     }
@@ -933,11 +925,12 @@ async fn list_installed_modules(
 
     match service.list_installed().await {
         Ok(modules) => {
-            let views = modules
-                .into_iter()
-                .map(installed_module_to_view)
-                .collect();
-            (StatusCode::OK, Json(InstalledModulesResponse { modules: views })).into_response()
+            let views = modules.into_iter().map(installed_module_to_view).collect();
+            (
+                StatusCode::OK,
+                Json(InstalledModulesResponse { modules: views }),
+            )
+                .into_response()
         }
         Err(err) => module_error_problem(err).into_response(),
     }
@@ -1004,10 +997,7 @@ async fn install_module_version(
         None => None,
     };
 
-    match service
-        .install(&module_id, maybe_version.as_ref())
-        .await
-    {
+    match service.install(&module_id, maybe_version.as_ref()).await {
         Ok(result) => (StatusCode::OK, Json(map_install_result(result))).into_response(),
         Err(err) => module_error_problem(err).into_response(),
     }
@@ -1037,9 +1027,7 @@ async fn update_module_versions(
     if let Some(module_id_raw) = payload.module_id.as_deref() {
         let module_id = match ModuleId::new(module_id_raw.trim()) {
             Ok(id) => id,
-            Err(err) => {
-                return module_validation_problem("invalid_module_id", err).into_response()
-            }
+            Err(err) => return module_validation_problem("invalid_module_id", err).into_response(),
         };
 
         match service.update(&module_id, fenrir_version).await {

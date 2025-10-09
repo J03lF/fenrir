@@ -1,4 +1,4 @@
-app = { name = "fenrir", version = "0.1.3" }
+app = { name = "fenrir", version = "0.1.4" }
 
 [server]
 enable_http = true

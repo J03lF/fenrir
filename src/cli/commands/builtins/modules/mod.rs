@@ -4,13 +4,15 @@ use std::io::{self, Write};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
+
 use tokio::runtime::{Handle, Runtime};
 use tracing::{info, warn};
 use whoami;
 
 use crate::audit::{AuditActor, AuditEvent, AuditMetadata, AuditOutcome};
 use crate::cli::commands::registry::{
-    CliDependencies, CommandEntry, CommandOutcome, CommandRegistry, ShellEnvironment,
+    CliDependencies, CommandArgument, CommandEntry, CommandOutcome, CommandRegistry, CommandShape,
+    CommandSubcommand, CompletionContext, CompletionKind, ShellEnvironment,
 };
 use crate::cli::commands::table::Table;
 use crate::domain::module::{
@@ -33,6 +35,118 @@ const DETAILS: &[&str] = &[
     "modules restart <name>           – startet ein laufendes Modul neu",
     "modules logs <name> [--tail N]   – zeigt Logs eines laufenden Moduls",
 ];
+
+const MODULE_ALIASES: &[&str] = &["module"];
+
+const MODULE_ID_ARGUMENT: CommandArgument = CommandArgument {
+    name: "module",
+    optional: false,
+    variadic: false,
+    completion: CompletionKind::Dynamic(complete_module_ids),
+};
+
+const MODULE_OPTIONAL_ID_ARGUMENT: CommandArgument = CommandArgument {
+    name: "module",
+    optional: true,
+    variadic: false,
+    completion: CompletionKind::Dynamic(complete_module_ids),
+};
+
+const MODULE_LOG_TAIL_ARGUMENT: CommandArgument = CommandArgument {
+    name: "--tail",
+    optional: true,
+    variadic: false,
+    completion: CompletionKind::Static(&["--tail"]),
+};
+
+const MODULE_SUBCOMMANDS: &[CommandSubcommand] = &[
+    CommandSubcommand::new("list", &[], &[], "Installierte Module auflisten"),
+    CommandSubcommand::new("search", &[], &[], "Registry nach Modulen durchsuchen"),
+    CommandSubcommand::new(
+        "info",
+        &[],
+        &[MODULE_ID_ARGUMENT],
+        "Manifest eines Moduls anzeigen",
+    ),
+    CommandSubcommand::new(
+        "install",
+        &[],
+        &[MODULE_ID_ARGUMENT],
+        "Modul installieren oder aktualisieren",
+    ),
+    CommandSubcommand::new(
+        "uninstall",
+        &["remove"],
+        &[MODULE_ID_ARGUMENT],
+        "Modul deinstallieren",
+    ),
+    CommandSubcommand::new(
+        "update",
+        &[],
+        &[MODULE_OPTIONAL_ID_ARGUMENT],
+        "Module aktualisieren",
+    ),
+    CommandSubcommand::new(
+        "check-updates",
+        &["check_updates"],
+        &[],
+        "Verfügbare Modul-Updates prüfen",
+    ),
+    CommandSubcommand::new(
+        "start",
+        &[],
+        &[MODULE_ID_ARGUMENT],
+        "Modul zur Laufzeit starten",
+    ),
+    CommandSubcommand::new(
+        "stop",
+        &[],
+        &[MODULE_ID_ARGUMENT],
+        "Laufendes Modul stoppen",
+    ),
+    CommandSubcommand::new("restart", &[], &[MODULE_ID_ARGUMENT], "Modul neu starten"),
+    CommandSubcommand::new(
+        "logs",
+        &[],
+        &[MODULE_ID_ARGUMENT, MODULE_LOG_TAIL_ARGUMENT],
+        "Modullogs anzeigen",
+    ),
+];
+
+const MODULES_SHAPE: CommandShape =
+    CommandShape::new("modules", MODULE_ALIASES, &[], MODULE_SUBCOMMANDS);
+
+pub(crate) fn resolve_module_subcommand(alias: &str) -> Option<&'static str> {
+    MODULE_SUBCOMMANDS
+        .iter()
+        .find(|entry| {
+            entry.name == alias || entry.aliases.iter().any(|candidate| *candidate == alias)
+        })
+        .map(|entry| entry.name)
+}
+
+fn complete_module_ids(deps: &CliDependencies, _ctx: &CompletionContext<'_>) -> Vec<String> {
+    let Some(service) = deps.services.module_service() else {
+        return Vec::new();
+    };
+
+    match run_module_call(Arc::clone(&service), |svc| async move {
+        svc.list_installed().await
+    }) {
+        Ok(installed) => {
+            let mut ids: Vec<_> = installed
+                .into_iter()
+                .map(|module| module.manifest.id)
+                .collect();
+            ids.sort();
+            ids
+        }
+        Err(err) => {
+            warn!(target = "cli::completion", error = %err, "module id completion failed");
+            Vec::new()
+        }
+    }
+}
 
 // Helper to run async code from sync command handler
 fn run_module_future<F, Fut, T>(factory: F) -> Result<T, ModuleServiceError>
@@ -67,13 +181,127 @@ where
         .block_on(factory())
 }
 
+// Helper to run runtime futures (similar to run_module_future)
+fn run_runtime_future<F, Fut, T>(factory: F) -> Result<T, ModuleRuntimeError>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = Result<T, ModuleRuntimeError>> + Send + 'static,
+    T: Send + 'static,
+{
+    if Handle::try_current().is_ok() {
+        return std::thread::spawn(move || {
+            Runtime::new()
+                .map_err(|err| {
+                    ModuleRuntimeError::InvalidState(format!("runtime init failed: {err}"))
+                })?
+                .block_on(factory())
+        })
+        .join()
+        .unwrap_or_else(|err| {
+            Err(ModuleRuntimeError::InvalidState(format!(
+                "blocking thread panicked: {err:?}"
+            )))
+        });
+    }
+    Runtime::new()
+        .map_err(|err| ModuleRuntimeError::InvalidState(format!("runtime init failed: {err}")))?
+        .block_on(factory())
+}
+
+fn run_module_call<F, Fut, T>(
+    service: Arc<ModuleService>,
+    factory: F,
+) -> Result<T, ModuleServiceError>
+where
+    F: FnOnce(Arc<ModuleService>) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<T, ModuleServiceError>> + Send + 'static,
+    T: Send + 'static,
+{
+    run_module_future(move || {
+        let service = Arc::clone(&service);
+        factory(service)
+    })
+}
+
+struct ModulesCommandCtx<'a> {
+    deps: &'a CliDependencies,
+    service: Arc<ModuleService>,
+}
+
+impl<'a> ModulesCommandCtx<'a> {
+    fn new(deps: &'a CliDependencies, service: Arc<ModuleService>) -> Self {
+        Self { deps, service }
+    }
+
+    fn service(&self) -> Arc<ModuleService> {
+        Arc::clone(&self.service)
+    }
+
+    fn module_call<F, Fut, T>(&self, factory: F) -> Result<T, ModuleServiceError>
+    where
+        F: FnOnce(Arc<ModuleService>) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, ModuleServiceError>> + Send + 'static,
+        T: Send + 'static,
+    {
+        let service = self.service();
+        run_module_future(move || factory(service))
+    }
+
+    fn runtime_call<F, Fut, T>(&self, factory: F) -> Result<T, ModuleRuntimeError>
+    where
+        F: FnOnce(Arc<ModuleService>) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, ModuleRuntimeError>> + Send + 'static,
+        T: Send + 'static,
+    {
+        let service = self.service();
+        run_runtime_future(move || factory(service))
+    }
+
+    fn record_audit(
+        &self,
+        action: &str,
+        module: &ModuleId,
+        version: Option<&ModuleVersion>,
+        outcome: AuditOutcome,
+        metadata: AuditMetadata,
+    ) {
+        let mut metadata = metadata.insert("transport", "cli").insert(
+            "command",
+            format!("modules {}", action.split("::").last().unwrap_or(action)),
+        );
+
+        if let Some(version) = version {
+            metadata = metadata.insert("version", version.to_string());
+        }
+
+        let target = module.as_str().to_string();
+        let event = AuditEvent::builder()
+            .actor(module_cli_actor())
+            .action(action)
+            .target(target)
+            .outcome(outcome)
+            .metadata(metadata)
+            .build();
+
+        match event {
+            Ok(event) => {
+                if let Err(err) = self.deps.services.record_audit(event) {
+                    warn!(error = %err, "module audit append failed");
+                }
+            }
+            Err(err) => warn!(error = %err, "module audit build failed"),
+        }
+    }
+}
+
 pub fn command() -> CommandEntry {
-    CommandEntry::new(
+    CommandEntry::with_shape(
         "modules",
         "Modulverwaltung",
         "modules <subcommand>",
         DETAILS,
         handle,
+        MODULES_SHAPE,
     )
 }
 
@@ -93,54 +321,71 @@ fn handle(
         return Ok(CommandOutcome::Continue);
     };
 
-    let outcome = match args.first().copied() {
-        None | Some("list") => {
-            list_installed(Arc::clone(&service), out)?;
-            Ok(())
-        }
-        Some("search") => {
-            let pattern = args.get(1).map(|v| v.to_string());
-            search_registry(Arc::clone(&service), pattern, out)
-        }
-        Some("info") => {
-            let target = args.get(1).copied();
-            module_info(Arc::clone(&service), out, target)
-        }
-        Some("install") => install_module(Arc::clone(&service), deps, out, &args[1..]),
-        Some("uninstall") => uninstall_module(Arc::clone(&service), deps, out, &args[1..]),
-        Some("update") => update_modules(Arc::clone(&service), deps, out, &args[1..]),
-        Some("check-updates") => check_updates(Arc::clone(&service), deps, out),
-        Some("start") => start_module(Arc::clone(&service), deps, out, &args[1..]),
-        Some("stop") => stop_module(Arc::clone(&service), deps, out, &args[1..]),
-        Some("restart") => restart_module(Arc::clone(&service), deps, out, &args[1..]),
-        Some("logs") => module_logs(Arc::clone(&service), out, &args[1..]),
-        Some(other) => {
-            writeln!(
-                out,
-                "Unbekannter Subcommand '{other}'. Nutze 'help modules'."
-            )?;
-            Ok(())
-        }
+    let ctx = ModulesCommandCtx::new(deps, Arc::clone(&service));
+    let (subcommand_name, rest_args) = match args.split_first() {
+        Some((name, rest)) => (*name, rest),
+        None => ("list", &[][..]),
     };
 
-    if let Err(err) = outcome {
-        writeln!(out, "Fehler: {err}")?;
+    if let Some(canonical) = resolve_module_subcommand(subcommand_name) {
+        dispatch_module(canonical, &ctx, out, rest_args)?;
+    } else if subcommand_name.is_empty() {
+        handle_list(&ctx, out, rest_args)?;
+    } else {
+        writeln!(
+            out,
+            "Unbekannter Subcommand '{subcommand_name}'. Nutze 'help modules'."
+        )?;
+        writeln!(out, "Verfügbare Subcommands: {}", available_subcommands())?;
     }
+
     Ok(CommandOutcome::Continue)
 }
 
-fn list_installed(service: Arc<ModuleService>, out: &mut dyn Write) -> io::Result<()> {
-    // Clone service for both futures
-    let service_for_modules = Arc::clone(&service);
-    let service_for_runtime = Arc::clone(&service);
+fn available_subcommands() -> String {
+    MODULE_SUBCOMMANDS
+        .iter()
+        .map(|entry| entry.name)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
-    // Get installed modules
-    let modules_result = run_module_future(move || {
-        let service = Arc::clone(&service_for_modules);
-        async move { service.list_installed().await }
-    });
+fn dispatch_module(
+    canonical: &str,
+    ctx: &ModulesCommandCtx<'_>,
+    out: &mut dyn Write,
+    args: &[&str],
+) -> io::Result<()> {
+    match canonical {
+        "list" => handle_list(ctx, out, args),
+        "search" => handle_search(ctx, out, args),
+        "info" => handle_info(ctx, out, args),
+        "install" => handle_install(ctx, out, args),
+        "uninstall" => handle_uninstall(ctx, out, args),
+        "update" => handle_update(ctx, out, args),
+        "check-updates" => handle_check_updates(ctx, out, args),
+        "start" => handle_start(ctx, out, args),
+        "stop" => handle_stop(ctx, out, args),
+        "restart" => handle_restart(ctx, out, args),
+        "logs" => handle_logs(ctx, out, args),
+        other => {
+            warn!(
+                target = "cli::modules",
+                subcommand = other,
+                "missing module handler mapping"
+            );
+            writeln!(out, "Subcommand '{other}' ist derzeit nicht implementiert.")?;
+            Ok(())
+        }
+    }
+}
 
-    let modules = match modules_result {
+fn handle_list(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> io::Result<()> {
+    if !args.is_empty() {
+        writeln!(out, "'modules list' erwartet keine weiteren Argumente.")?;
+    }
+
+    let modules = match ctx.module_call(|service| async move { service.list_installed().await }) {
         Ok(modules) => modules,
         Err(err) => {
             render_service_error(
@@ -159,19 +404,14 @@ fn list_installed(service: Arc<ModuleService>, out: &mut dyn Write) -> io::Resul
         return Ok(());
     }
 
-    // Get runtime status for all modules
-    let runtime_result = run_runtime_future(move || {
-        let service = Arc::clone(&service_for_runtime);
-        async move { service.list_running().await }
-    });
-
-    let running_modules: HashMap<String, _> = match runtime_result {
-        Ok(infos) => infos
-            .into_iter()
-            .map(|info| (info.module_id.to_string(), info))
-            .collect(),
-        Err(_) => HashMap::new(), // If runtime query fails, just show modules without status
-    };
+    let runtime_infos: HashMap<_, _> =
+        match ctx.runtime_call(|service| async move { service.list_running().await }) {
+            Ok(infos) => infos
+                .into_iter()
+                .map(|info| (info.module_id.to_string(), info))
+                .collect(),
+            Err(_) => HashMap::new(),
+        };
 
     writeln!(out, "Installierte Module (mit Runtime-Status)")?;
     writeln!(out, "==========================================")?;
@@ -187,9 +427,7 @@ fn list_installed(service: Arc<ModuleService>, out: &mut dyn Write) -> io::Resul
 
     for module in modules {
         let module_id = module.manifest.id.clone();
-
-        // Check if module is running
-        if let Some(runtime_info) = running_modules.get(&module_id) {
+        if let Some(runtime_info) = runtime_infos.get(&module_id) {
             let duration = runtime_info
                 .started_at
                 .and_then(|started| started.elapsed().ok())
@@ -200,8 +438,14 @@ fn list_installed(service: Arc<ModuleService>, out: &mut dyn Write) -> io::Resul
                 module_id,
                 module.manifest.version.to_string(),
                 "Running".to_string(),
-                runtime_info.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string()),
-                runtime_info.port.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string()),
+                runtime_info
+                    .pid
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+                runtime_info
+                    .port
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
                 duration,
             ]);
         } else {
@@ -219,20 +463,16 @@ fn list_installed(service: Arc<ModuleService>, out: &mut dyn Write) -> io::Resul
     table.render(out, "  ")
 }
 
-fn search_registry(
-    service: Arc<ModuleService>,
-    pattern: Option<String>,
-    out: &mut dyn Write,
-) -> io::Result<()> {
+fn handle_search(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> io::Result<()> {
     use crate::domain::module::ModuleSearchQuery;
 
-    let result = run_module_future(move || {
-        let service = Arc::clone(&service);
-        let query = ModuleSearchQuery::new(pattern);
-        async move { service.search(query).await }
-    });
+    let pattern = args.get(0).map(|value| (*value).to_string());
+    let pattern_for_query = pattern.clone();
 
-    let modules = match result {
+    let modules = match ctx.module_call(|service| async move {
+        let query = ModuleSearchQuery::new(pattern_for_query);
+        service.search(query).await
+    }) {
         Ok(modules) => modules,
         Err(err) => {
             render_service_error(out, "Registry-Suche fehlgeschlagen", &err)?;
@@ -265,17 +505,13 @@ fn search_registry(
     table.render(out, "  ")
 }
 
-fn module_info(
-    service: Arc<ModuleService>,
-    out: &mut dyn Write,
-    target: Option<&str>,
-) -> io::Result<()> {
-    let Some(target) = target else {
+fn handle_info(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> io::Result<()> {
+    let Some(target) = args.first() else {
         writeln!(out, "Kommando: modules info <name[@version]>")?;
         return Ok(());
     };
 
-    let (module_id, version) = match parse_module_target(target, &[]) {
+    let (module_id, version) = match parse_module_target(target, &args[1..]) {
         Ok(tuple) => tuple,
         Err(err) => {
             writeln!(out, "{err}")?;
@@ -283,25 +519,25 @@ fn module_info(
         }
     };
 
-    let result = run_module_future(move || {
-        let service = Arc::clone(&service);
-        let module_id = module_id.clone();
-        let version = version.clone();
-        async move { service.manifest(&module_id, version.as_ref()).await }
-    });
+    let module_id_for_call = module_id.clone();
+    let version_for_call = version.clone();
 
-    match result {
-        Ok(manifest) => render_manifest(out, &manifest),
-        Err(err) => render_service_error(out, "Manifest konnte nicht geladen werden", &err),
-    }
+    let manifest = match ctx.module_call(|service| async move {
+        service
+            .manifest(&module_id_for_call, version_for_call.as_ref())
+            .await
+    }) {
+        Ok(manifest) => manifest,
+        Err(err) => {
+            render_service_error(out, "Manifest konnte nicht geladen werden", &err)?;
+            return Ok(());
+        }
+    };
+
+    render_manifest(out, &manifest)
 }
 
-fn install_module(
-    service: Arc<ModuleService>,
-    deps: &CliDependencies,
-    out: &mut dyn Write,
-    args: &[&str],
-) -> io::Result<()> {
+fn handle_install(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> io::Result<()> {
     if args.is_empty() {
         writeln!(out, "Kommando: modules install <name[@version]>")?;
         return Ok(());
@@ -319,16 +555,11 @@ fn install_module(
     let version_for_call = version.clone();
 
     let spinner = CliSpinner::start(format!("Lade Modul {} herunter", module_id));
-
-    let install_result = run_module_future(move || {
-        let service = Arc::clone(&service);
-        async move {
-            service
-                .install(&module_id_for_call, version_for_call.as_ref())
-                .await
-        }
+    let install_result = ctx.module_call(|service| async move {
+        service
+            .install(&module_id_for_call, version_for_call.as_ref())
+            .await
     });
-
     spinner.finish();
 
     match install_result {
@@ -346,15 +577,14 @@ fn install_module(
                 result.manifest.id, result.manifest.version, status_message, result.path
             )?;
 
-            let reported_version = version
+            let recorded_version = version
                 .clone()
                 .unwrap_or_else(|| ModuleVersion(result.manifest.version.clone()));
 
-            record_module_audit(
-                deps,
+            ctx.record_audit(
                 "module::install",
                 &module_id,
-                Some(&reported_version),
+                Some(&recorded_version),
                 AuditOutcome::Success,
                 AuditMetadata::default()
                     .insert("status", status_message)
@@ -364,8 +594,7 @@ fn install_module(
         Err(err) => {
             writeln!(out, "Download fehlgeschlagen.")?;
             render_service_error(out, "Installation fehlgeschlagen", &err)?;
-            record_module_audit(
-                deps,
+            ctx.record_audit(
                 "module::install",
                 &module_id,
                 version.as_ref(),
@@ -376,105 +605,29 @@ fn install_module(
             );
         }
     }
+
     Ok(())
 }
 
-struct CliSpinner {
-    sender: Option<mpsc::Sender<()>>,
-    handle: Option<thread::JoinHandle<()>>,
-}
-
-impl CliSpinner {
-    fn start(message: impl Into<String>) -> Self {
-        let message = message.into();
-        let (sender, receiver) = mpsc::channel();
-
-        let handle = thread::spawn(move || {
-            let frames = ['|', '/', '-', '\\'];
-            let mut index = 0;
-            let mut stdout = io::stdout();
-
-            loop {
-                match receiver.recv_timeout(Duration::from_millis(120)) {
-                    Ok(_) => {
-                        let width = message.len() + 2;
-                        let _ = write!(stdout, "\r{:<width$}\r", "", width = width);
-                        let _ = stdout.flush();
-                        break;
-                    }
-                    Err(mpsc::RecvTimeoutError::Timeout) => {
-                        let frame = frames[index % frames.len()];
-                        index = (index + 1) % frames.len();
-                        let _ = write!(stdout, "\r{} {}", message, frame);
-                        let _ = stdout.flush();
-                    }
-                    Err(mpsc::RecvTimeoutError::Disconnected) => {
-                        let width = message.len() + 2;
-                        let _ = write!(stdout, "\r{:<width$}\r", "", width = width);
-                        let _ = stdout.flush();
-                        break;
-                    }
-                }
-            }
-        });
-
-        Self {
-            sender: Some(sender),
-            handle: Some(handle),
-        }
-    }
-
-    fn finish(mut self) {
-        if let Some(sender) = self.sender.take() {
-            let _ = sender.send(());
-        }
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
-    }
-}
-
-impl Drop for CliSpinner {
-    fn drop(&mut self) {
-        if let Some(sender) = self.sender.take() {
-            let _ = sender.send(());
-        }
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
-    }
-}
-
-fn uninstall_module(
-    service: Arc<ModuleService>,
-    deps: &CliDependencies,
-    out: &mut dyn Write,
-    args: &[&str],
-) -> io::Result<()> {
+fn handle_uninstall(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> io::Result<()> {
     if args.len() != 1 {
         writeln!(out, "Kommando: modules uninstall <name>")?;
         return Ok(());
     }
 
-    let module_id = match ModuleId::new(args[0]) {
-        Ok(id) => id,
-        Err(err) => {
-            writeln!(out, "Ungültige Modul-ID '{}': {}", args[0], err)?;
-            return Ok(());
-        }
+    let module_id = match parse_module_id(out, args[0])? {
+        Some(id) => id,
+        None => return Ok(()),
     };
 
     let module_id_for_call = module_id.clone();
-    let result = run_module_future(move || {
-        let service = Arc::clone(&service);
-        async move { service.uninstall(&module_id_for_call).await }
-    });
+    let result =
+        ctx.module_call(|service| async move { service.uninstall(&module_id_for_call).await });
 
     match result {
         Ok(_) => {
             writeln!(out, "✓ Modul '{}' wurde entfernt.", module_id)?;
-            record_module_audit(
-                deps,
+            ctx.record_audit(
                 "module::uninstall",
                 &module_id,
                 None,
@@ -484,8 +637,7 @@ fn uninstall_module(
         }
         Err(err) => {
             render_service_error(out, "Deinstallation fehlgeschlagen", &err)?;
-            record_module_audit(
-                deps,
+            ctx.record_audit(
                 "module::uninstall",
                 &module_id,
                 None,
@@ -500,29 +652,21 @@ fn uninstall_module(
     Ok(())
 }
 
-fn update_modules(
-    service: Arc<ModuleService>,
-    deps: &CliDependencies,
-    out: &mut dyn Write,
-    args: &[&str],
-) -> io::Result<()> {
-    let fenrir_version_str = deps.config.app.version.clone();
+fn handle_update(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> io::Result<()> {
+    let fenrir_version = ctx.deps.config.app.version.clone();
 
     if let Some(module_name) = args.first() {
-        // Update specific module
-        let module_id = match ModuleId::new(*module_name) {
-            Ok(id) => id,
-            Err(err) => {
-                writeln!(out, "Ungültige Modul-ID: {}", err)?;
-                return Ok(());
-            }
+        let module_id = match parse_module_id(out, module_name)? {
+            Some(id) => id,
+            None => return Ok(()),
         };
 
-        let module_id_clone = module_id.clone();
-        let fenrir_ver = fenrir_version_str.clone();
-        let result = run_module_future(move || {
-            let service = Arc::clone(&service);
-            async move { service.update(&module_id_clone, Some(&fenrir_ver)).await }
+        let module_id_for_call = module_id.clone();
+        let fenrir_version_for_call = fenrir_version.clone();
+        let result = ctx.module_call(|service| async move {
+            service
+                .update(&module_id_for_call, Some(&fenrir_version_for_call))
+                .await
         });
 
         match result {
@@ -538,13 +682,11 @@ fn update_modules(
             }
         }
     } else {
-        // Update all modules
         writeln!(out, "Aktualisiere alle Module...")?;
 
-        let fenrir_ver = fenrir_version_str.clone();
-        let result = run_module_future(move || {
-            let service = Arc::clone(&service);
-            async move { service.update_all(Some(&fenrir_ver)).await }
+        let fenrir_version_for_call = fenrir_version.clone();
+        let result = ctx.module_call(|service| async move {
+            service.update_all(Some(&fenrir_version_for_call)).await
         });
 
         match result {
@@ -571,22 +713,22 @@ fn update_modules(
     Ok(())
 }
 
-fn check_updates(
-    service: Arc<ModuleService>,
-    deps: &CliDependencies,
+fn handle_check_updates(
+    ctx: &ModulesCommandCtx,
     out: &mut dyn Write,
+    args: &[&str],
 ) -> io::Result<()> {
-    let fenrir_version = deps.config.app.version.clone();
+    if !args.is_empty() {
+        writeln!(out, "'modules check-updates' erwartet keine Argumente.")?;
+    }
 
+    let fenrir_version = ctx.deps.config.app.version.clone();
     writeln!(out, "Prüfe Updates...")?;
 
-    let result = run_module_future(move || {
-        let service = Arc::clone(&service);
-        let fenrir_ver = fenrir_version.clone();
-        async move { service.check_updates(Some(&fenrir_ver)).await }
-    });
-
-    let updates = match result {
+    let fenrir_version_for_call = fenrir_version.clone();
+    let updates = match ctx.module_call(|service| async move {
+        service.check_updates(Some(&fenrir_version_for_call)).await
+    }) {
         Ok(updates) => updates,
         Err(err) => {
             render_service_error(out, "Update-Prüfung fehlgeschlagen", &err)?;
@@ -641,6 +783,231 @@ fn check_updates(
     }
 
     Ok(())
+}
+
+fn handle_start(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> io::Result<()> {
+    if args.len() != 1 {
+        writeln!(out, "Kommando: modules start <name>")?;
+        return Ok(());
+    }
+
+    let module_id = match parse_module_id(out, args[0])? {
+        Some(id) => id,
+        None => return Ok(()),
+    };
+
+    let module_id_for_call = module_id.clone();
+    let result = ctx.runtime_call(|service| async move {
+        use crate::domain::module::ModuleStartConfig;
+        let config = ModuleStartConfig {
+            module_id: module_id_for_call,
+            port: None,
+            env_vars: vec![],
+            auto_restart: false,
+        };
+        service.start(config).await
+    });
+
+    match result {
+        Ok(info) => {
+            writeln!(
+                out,
+                "✓ Modul '{}' gestartet (PID: {}, Port: {})",
+                module_id,
+                info.pid
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "?".to_string()),
+                info.port
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "-".to_string())
+            )?;
+            ctx.record_audit(
+                "module::start",
+                &module_id,
+                None,
+                AuditOutcome::Success,
+                AuditMetadata::default()
+                    .insert("pid", info.pid.map(|p| p.to_string()).unwrap_or_default())
+                    .insert("port", info.port.map(|p| p.to_string()).unwrap_or_default()),
+            );
+        }
+        Err(err) => {
+            render_runtime_error(out, "Start fehlgeschlagen", &err)?;
+            ctx.record_audit(
+                "module::start",
+                &module_id,
+                None,
+                AuditOutcome::Failure,
+                AuditMetadata::default()
+                    .insert("error_code", runtime_error_code(&err))
+                    .insert("error", err.to_string()),
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_stop(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> io::Result<()> {
+    if args.len() != 1 {
+        writeln!(out, "Kommando: modules stop <name>")?;
+        return Ok(());
+    }
+
+    let module_id = match parse_module_id(out, args[0])? {
+        Some(id) => id,
+        None => return Ok(()),
+    };
+
+    let module_id_for_call = module_id.clone();
+    let result = ctx.runtime_call(|service| async move { service.stop(&module_id_for_call).await });
+
+    match result {
+        Ok(_) => {
+            writeln!(out, "✓ Modul '{}' wurde gestoppt.", module_id)?;
+            ctx.record_audit(
+                "module::stop",
+                &module_id,
+                None,
+                AuditOutcome::Success,
+                AuditMetadata::default(),
+            );
+        }
+        Err(err) => {
+            render_runtime_error(out, "Stop fehlgeschlagen", &err)?;
+            ctx.record_audit(
+                "module::stop",
+                &module_id,
+                None,
+                AuditOutcome::Failure,
+                AuditMetadata::default()
+                    .insert("error_code", runtime_error_code(&err))
+                    .insert("error", err.to_string()),
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_restart(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> io::Result<()> {
+    if args.len() != 1 {
+        writeln!(out, "Kommando: modules restart <name>")?;
+        return Ok(());
+    }
+
+    let module_id = match parse_module_id(out, args[0])? {
+        Some(id) => id,
+        None => return Ok(()),
+    };
+
+    let module_id_for_call = module_id.clone();
+    let result =
+        ctx.runtime_call(|service| async move { service.restart(&module_id_for_call).await });
+
+    match result {
+        Ok(info) => {
+            writeln!(
+                out,
+                "✓ Modul '{}' wurde neu gestartet (PID: {}, Restart-Zähler: {})",
+                module_id,
+                info.pid
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "?".to_string()),
+                info.restart_count
+            )?;
+            ctx.record_audit(
+                "module::restart",
+                &module_id,
+                None,
+                AuditOutcome::Success,
+                AuditMetadata::default()
+                    .insert("pid", info.pid.map(|p| p.to_string()).unwrap_or_default())
+                    .insert("restart_count", info.restart_count.to_string()),
+            );
+        }
+        Err(err) => {
+            render_runtime_error(out, "Restart fehlgeschlagen", &err)?;
+            ctx.record_audit(
+                "module::restart",
+                &module_id,
+                None,
+                AuditOutcome::Failure,
+                AuditMetadata::default()
+                    .insert("error_code", runtime_error_code(&err))
+                    .insert("error", err.to_string()),
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_logs(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> io::Result<()> {
+    if args.is_empty() {
+        writeln!(out, "Kommando: modules logs <name> [--tail N]")?;
+        return Ok(());
+    }
+
+    let module_id = match parse_module_id(out, args[0])? {
+        Some(id) => id,
+        None => return Ok(()),
+    };
+
+    let mut tail = None;
+    let mut iter = args[1..].iter();
+    while let Some(flag) = iter.next() {
+        if flag == &"--tail" {
+            let Some(value) = iter.next() else {
+                writeln!(out, "--tail benötigt einen Wert")?;
+                return Ok(());
+            };
+            tail = Some(match value.parse::<usize>() {
+                Ok(n) => n,
+                Err(_) => {
+                    writeln!(out, "Ungültiger tail-Wert: {}", value)?;
+                    return Ok(());
+                }
+            });
+        } else {
+            writeln!(out, "Unbekannte Option {}", flag)?;
+            return Ok(());
+        }
+    }
+
+    let module_id_for_call = module_id.clone();
+    let result = ctx
+        .runtime_call(move |service| async move { service.logs(&module_id_for_call, tail).await });
+
+    match result {
+        Ok(lines) => {
+            writeln!(
+                out,
+                "Logs für Modul {} (Zeilen: {})",
+                module_id,
+                lines.len()
+            )?;
+            writeln!(out, "========================================")?;
+            for line in lines {
+                writeln!(out, "{}", line)?;
+            }
+        }
+        Err(err) => {
+            render_runtime_error(out, "Log-Abfrage fehlgeschlagen", &err)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_module_id(out: &mut dyn Write, raw: &str) -> io::Result<Option<ModuleId>> {
+    match ModuleId::new(raw) {
+        Ok(id) => Ok(Some(id)),
+        Err(err) => {
+            writeln!(out, "Ungültige Modul-ID '{}': {}", raw, err)?;
+            Ok(None)
+        }
+    }
 }
 
 fn render_manifest(out: &mut dyn Write, manifest: &ModuleManifest) -> io::Result<()> {
@@ -760,329 +1127,6 @@ fn module_error_message(err: &ModuleServiceError) -> String {
     }
 }
 
-fn record_module_audit(
-    deps: &CliDependencies,
-    action: &str,
-    module: &ModuleId,
-    version: Option<&ModuleVersion>,
-    outcome: AuditOutcome,
-    metadata: AuditMetadata,
-) {
-    let mut metadata = metadata.insert("transport", "cli").insert(
-        "command",
-        format!("modules {}", action.split("::").last().unwrap_or(action)),
-    );
-
-    if let Some(version) = version {
-        metadata = metadata.insert("version", version.to_string());
-    }
-
-    let target = format!("{}", module.as_str());
-    let event = AuditEvent::builder()
-        .actor(module_cli_actor())
-        .action(action)
-        .target(target)
-        .outcome(outcome)
-        .metadata(metadata)
-        .build();
-
-    match event {
-        Ok(event) => {
-            if let Err(err) = deps.services.record_audit(event) {
-                warn!(error = %err, "module audit append failed");
-            }
-        }
-        Err(err) => warn!(error = %err, "module audit build failed"),
-    }
-}
-
-fn module_cli_actor() -> AuditActor {
-    AuditActor::User {
-        user_id: format!("cli::{}", whoami::username()),
-        role: "operator".to_string(),
-    }
-}
-
-// ========================================================================
-// Module Runtime Commands
-// ========================================================================
-
-fn start_module(
-    service: Arc<ModuleService>,
-    deps: &CliDependencies,
-    out: &mut dyn Write,
-    args: &[&str],
-) -> io::Result<()> {
-    if args.len() != 1 {
-        writeln!(out, "Kommando: modules start <name>")?;
-        return Ok(());
-    }
-
-    let module_id = match ModuleId::new(args[0]) {
-        Ok(id) => id,
-        Err(err) => {
-            writeln!(out, "Ungültige Modul-ID '{}': {}", args[0], err)?;
-            return Ok(());
-        }
-    };
-
-    let module_id_clone = module_id.clone();
-    let result = run_runtime_future(move || {
-        let service = Arc::clone(&service);
-        async move {
-            use crate::domain::module::ModuleStartConfig;
-            let config = ModuleStartConfig {
-                module_id: module_id_clone,
-                port: None, // Port wird aus der Modul-Config gelesen
-                env_vars: vec![],
-                auto_restart: false,
-            };
-            service.start(config).await
-        }
-    });
-
-    match result {
-        Ok(info) => {
-            writeln!(
-                out,
-                "✓ Modul '{}' gestartet (PID: {}, Port: {})",
-                module_id,
-                info.pid.map(|p| p.to_string()).unwrap_or_else(|| "?".to_string()),
-                info.port.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string())
-            )?;
-            record_module_audit(
-                deps,
-                "module::start",
-                &module_id,
-                None,
-                AuditOutcome::Success,
-                AuditMetadata::default()
-                    .insert("pid", info.pid.map(|p| p.to_string()).unwrap_or_default())
-                    .insert("port", info.port.map(|p| p.to_string()).unwrap_or_default()),
-            );
-        }
-        Err(err) => {
-            render_runtime_error(out, "Start fehlgeschlagen", &err)?;
-            record_module_audit(
-                deps,
-                "module::start",
-                &module_id,
-                None,
-                AuditOutcome::Failure,
-                AuditMetadata::default()
-                    .insert("error_code", runtime_error_code(&err))
-                    .insert("error", err.to_string()),
-            );
-        }
-    }
-
-    Ok(())
-}
-
-fn stop_module(
-    service: Arc<ModuleService>,
-    deps: &CliDependencies,
-    out: &mut dyn Write,
-    args: &[&str],
-) -> io::Result<()> {
-    if args.len() != 1 {
-        writeln!(out, "Kommando: modules stop <name>")?;
-        return Ok(());
-    }
-
-    let module_id = match ModuleId::new(args[0]) {
-        Ok(id) => id,
-        Err(err) => {
-            writeln!(out, "Ungültige Modul-ID '{}': {}", args[0], err)?;
-            return Ok(());
-        }
-    };
-
-    let module_id_clone = module_id.clone();
-    let result = run_runtime_future(move || {
-        let service = Arc::clone(&service);
-        async move { service.stop(&module_id_clone).await }
-    });
-
-    match result {
-        Ok(_) => {
-            writeln!(out, "✓ Modul '{}' wurde gestoppt.", module_id)?;
-            record_module_audit(
-                deps,
-                "module::stop",
-                &module_id,
-                None,
-                AuditOutcome::Success,
-                AuditMetadata::default(),
-            );
-        }
-        Err(err) => {
-            render_runtime_error(out, "Stop fehlgeschlagen", &err)?;
-            record_module_audit(
-                deps,
-                "module::stop",
-                &module_id,
-                None,
-                AuditOutcome::Failure,
-                AuditMetadata::default()
-                    .insert("error_code", runtime_error_code(&err))
-                    .insert("error", err.to_string()),
-            );
-        }
-    }
-
-    Ok(())
-}
-
-fn restart_module(
-    service: Arc<ModuleService>,
-    deps: &CliDependencies,
-    out: &mut dyn Write,
-    args: &[&str],
-) -> io::Result<()> {
-    if args.len() != 1 {
-        writeln!(out, "Kommando: modules restart <name>")?;
-        return Ok(());
-    }
-
-    let module_id = match ModuleId::new(args[0]) {
-        Ok(id) => id,
-        Err(err) => {
-            writeln!(out, "Ungültige Modul-ID '{}': {}", args[0], err)?;
-            return Ok(());
-        }
-    };
-
-    let module_id_clone = module_id.clone();
-    let result = run_runtime_future(move || {
-        let service = Arc::clone(&service);
-        async move { service.restart(&module_id_clone).await }
-    });
-
-    match result {
-        Ok(info) => {
-            writeln!(
-                out,
-                "✓ Modul '{}' wurde neu gestartet (PID: {}, Restart-Zähler: {})",
-                module_id,
-                info.pid.map(|p| p.to_string()).unwrap_or_else(|| "?".to_string()),
-                info.restart_count
-            )?;
-            record_module_audit(
-                deps,
-                "module::restart",
-                &module_id,
-                None,
-                AuditOutcome::Success,
-                AuditMetadata::default()
-                    .insert("pid", info.pid.map(|p| p.to_string()).unwrap_or_default())
-                    .insert("restart_count", info.restart_count.to_string()),
-            );
-        }
-        Err(err) => {
-            render_runtime_error(out, "Restart fehlgeschlagen", &err)?;
-            record_module_audit(
-                deps,
-                "module::restart",
-                &module_id,
-                None,
-                AuditOutcome::Failure,
-                AuditMetadata::default()
-                    .insert("error_code", runtime_error_code(&err))
-                    .insert("error", err.to_string()),
-            );
-        }
-    }
-
-    Ok(())
-}
-
-fn module_logs(
-    service: Arc<ModuleService>,
-    out: &mut dyn Write,
-    args: &[&str],
-) -> io::Result<()> {
-    if args.is_empty() {
-        writeln!(out, "Kommando: modules logs <name> [--tail N]")?;
-        return Ok(());
-    }
-
-    let module_id = match ModuleId::new(args[0]) {
-        Ok(id) => id,
-        Err(err) => {
-            writeln!(out, "Ungültige Modul-ID '{}': {}", args[0], err)?;
-            return Ok(());
-        }
-    };
-
-    // Parse optional tail
-    let mut tail = None;
-    let mut iter = args[1..].iter();
-    while let Some(flag) = iter.next() {
-        if flag == &"--tail" {
-            let Some(value) = iter.next() else {
-                writeln!(out, "--tail benötigt einen Wert")?;
-                return Ok(());
-            };
-            tail = Some(match value.parse::<usize>() {
-                Ok(n) => n,
-                Err(_) => {
-                    writeln!(out, "Ungültiger tail-Wert: {}", value)?;
-                    return Ok(());
-                }
-            });
-        }
-    }
-
-    let module_id_clone = module_id.clone();
-    let result = run_runtime_future(move || {
-        let service = Arc::clone(&service);
-        async move { service.logs(&module_id_clone, tail).await }
-    });
-
-    match result {
-        Ok(lines) => {
-            writeln!(out, "Logs für Modul {} (Zeilen: {})", module_id, lines.len())?;
-            writeln!(out, "========================================")?;
-            for line in lines {
-                writeln!(out, "{}", line)?;
-            }
-        }
-        Err(err) => {
-            render_runtime_error(out, "Log-Abfrage fehlgeschlagen", &err)?;
-        }
-    }
-
-    Ok(())
-}
-
-// Helper to run runtime futures (similar to run_module_future)
-fn run_runtime_future<F, Fut, T>(factory: F) -> Result<T, ModuleRuntimeError>
-where
-    F: FnOnce() -> Fut + Send + 'static,
-    Fut: Future<Output = Result<T, ModuleRuntimeError>> + Send + 'static,
-    T: Send + 'static,
-{
-    if Handle::try_current().is_ok() {
-        return std::thread::spawn(move || {
-            Runtime::new()
-                .map_err(|err| {
-                    ModuleRuntimeError::InvalidState(format!("runtime init failed: {err}"))
-                })?
-                .block_on(factory())
-        })
-        .join()
-        .unwrap_or_else(|err| {
-            Err(ModuleRuntimeError::InvalidState(format!(
-                "blocking thread panicked: {err:?}"
-            )))
-        });
-    }
-    Runtime::new()
-        .map_err(|err| ModuleRuntimeError::InvalidState(format!("runtime init failed: {err}")))?
-        .block_on(factory())
-}
-
 fn render_runtime_error(
     out: &mut dyn Write,
     context: &str,
@@ -1132,5 +1176,78 @@ fn runtime_error_message(err: &ModuleRuntimeError) -> String {
         }
         ModuleRuntimeError::InvalidState(msg) => format!("Ungültiger Zustand: {}", msg),
         ModuleRuntimeError::Io(msg) => format!("I/O-Fehler: {}", msg),
+    }
+}
+
+struct CliSpinner {
+    sender: Option<mpsc::Sender<()>>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl CliSpinner {
+    fn start(message: impl Into<String>) -> Self {
+        let message = message.into();
+        let (sender, receiver) = mpsc::channel();
+
+        let handle = thread::spawn(move || {
+            let frames = ['|', '/', '-', '\\'];
+            let mut index = 0;
+            let mut stdout = io::stdout();
+
+            loop {
+                match receiver.recv_timeout(Duration::from_millis(120)) {
+                    Ok(_) => {
+                        let width = message.len() + 2;
+                        let _ = write!(stdout, "\r{:<width$}\r", "", width = width);
+                        let _ = stdout.flush();
+                        break;
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        let frame = frames[index % frames.len()];
+                        index = (index + 1) % frames.len();
+                        let _ = write!(stdout, "\r{} {}", message, frame);
+                        let _ = stdout.flush();
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        let width = message.len() + 2;
+                        let _ = write!(stdout, "\r{:<width$}\r", "", width = width);
+                        let _ = stdout.flush();
+                        break;
+                    }
+                }
+            }
+        });
+
+        Self {
+            sender: Some(sender),
+            handle: Some(handle),
+        }
+    }
+
+    fn finish(mut self) {
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.send(());
+        }
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for CliSpinner {
+    fn drop(&mut self) {
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.send(());
+        }
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn module_cli_actor() -> AuditActor {
+    AuditActor::User {
+        user_id: format!("cli::{}", whoami::username()),
+        role: "operator".to_string(),
     }
 }

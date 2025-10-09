@@ -2,7 +2,8 @@ use std::io::{self, Write};
 use std::str::FromStr;
 
 use crate::cli::commands::registry::{
-    CliDependencies, CommandEntry, CommandOutcome, CommandRegistry, ShellEnvironment,
+    CliDependencies, CommandArgument, CommandEntry, CommandOutcome, CommandRegistry, CommandShape,
+    CommandSubcommand, CompletionKind, ShellEnvironment,
 };
 use crate::cli::commands::table::Table;
 use crate::domain::user::{UserFilter, UserRole};
@@ -19,13 +20,35 @@ const DETAILS: &[&str] = &[
     "unlock <username>",
 ];
 
+const USER_LIST_OPTIONS: &[&str] = &["--role", "--search", "--include-locked"];
+const USER_CREATE_OPTIONS: &[&str] = &["--username", "--email", "--display-name", "--role"];
+
+const USER_NAME_ARGUMENT: CommandArgument = CommandArgument::required("username");
+const USER_LIST_ARGUMENT: CommandArgument = CommandArgument::optional("option")
+    .with_completion(CompletionKind::Static(USER_LIST_OPTIONS))
+    .variadic();
+const USER_CREATE_ARGUMENT: CommandArgument = CommandArgument::optional("option")
+    .with_completion(CompletionKind::Static(USER_CREATE_OPTIONS))
+    .variadic();
+
+const USER_SUBCOMMANDS: &[CommandSubcommand] = &[
+    CommandSubcommand::new("list", &[], &[USER_LIST_ARGUMENT], "Benutzer auflisten"),
+    CommandSubcommand::new("show", &[], &[USER_NAME_ARGUMENT], "Benutzer anzeigen"),
+    CommandSubcommand::new("create", &[], &[USER_CREATE_ARGUMENT], "Benutzer erstellen"),
+    CommandSubcommand::new("lock", &[], &[USER_NAME_ARGUMENT], "Benutzer sperren"),
+    CommandSubcommand::new("unlock", &[], &[USER_NAME_ARGUMENT], "Benutzer entsperren"),
+];
+
+const USER_SHAPE: CommandShape = CommandShape::new("user", &[], &[], USER_SUBCOMMANDS);
+
 pub fn command() -> CommandEntry {
-    CommandEntry::new(
+    CommandEntry::with_shape(
         "user",
         "Verwaltet Benutzer (listen, anlegen, sperren)",
         "user <aktion> [optionen]",
         DETAILS,
         handle,
+        USER_SHAPE,
     )
 }
 

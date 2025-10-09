@@ -1,5 +1,6 @@
 use crate::cli::commands::registry::{
-    CliDependencies, CommandEntry, CommandOutcome, CommandRegistry, ShellEnvironment,
+    CliDependencies, CommandArgument, CommandEntry, CommandOutcome, CommandRegistry, CommandShape,
+    CompletionKind, ShellEnvironment,
 };
 use crate::cli::commands::table::Table;
 use std::io::{self, Write};
@@ -9,13 +10,23 @@ const HELP_DETAILS: &[&str] = &[
     "help <befehl>   – zeigt Details, Usage und Optionen",
 ];
 
+const HELP_ARGUMENTS: &[CommandArgument] = &[CommandArgument {
+    name: "command",
+    optional: true,
+    variadic: false,
+    completion: CompletionKind::None,
+}];
+
+const HELP_SHAPE: CommandShape = CommandShape::new("help", &[], HELP_ARGUMENTS, &[]);
+
 pub fn command() -> CommandEntry {
-    CommandEntry::new(
+    CommandEntry::with_shape(
         "help",
         "Listet Befehle oder zeigt Details zu einem Befehl an",
         "help [befehl]",
         HELP_DETAILS,
         handle,
+        HELP_SHAPE,
     )
 }
 

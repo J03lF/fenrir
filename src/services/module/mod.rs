@@ -95,9 +95,9 @@ impl ModuleService {
     /// Uninstall a module from local storage
     pub async fn uninstall(&self, id: &ModuleId) -> ModuleResult<()> {
         if self.storage.load(id).await?.is_none() {
-            return Err(ModuleServiceError::Storage(ModuleStorageError::InvalidState(
-                format!("Module {} is not installed", id),
-            )));
+            return Err(ModuleServiceError::Storage(
+                ModuleStorageError::InvalidState(format!("Module {} is not installed", id)),
+            ));
         }
         self.storage.remove(id).await?;
         Ok(())
@@ -226,7 +226,10 @@ impl ModuleService {
 
         // Check if already running
         if let Ok(info) = self.runtime.status(&config.module_id).await {
-            if matches!(info.status, crate::domain::module::ModuleRuntimeStatus::Running) {
+            if matches!(
+                info.status,
+                crate::domain::module::ModuleRuntimeStatus::Running
+            ) {
                 return Err(ModuleRuntimeError::AlreadyRunning {
                     module_id: config.module_id.to_string(),
                 });

@@ -63,18 +63,17 @@ impl HttpModuleRegistry {
         }
 
         let base = Url::parse(&self.base_url).map_err(|err| {
-            ModuleRegistryError::Unavailable(format!(
-                "Invalid registry base URL: {}",
-                err
-            ))
+            ModuleRegistryError::Unavailable(format!("Invalid registry base URL: {}", err))
         })?;
 
         base.join(url)
             .map(|joined| joined.to_string())
-            .map_err(|err| ModuleRegistryError::Protocol(format!(
-                "Failed to resolve download URL '{}': {}",
-                url, err
-            )))
+            .map_err(|err| {
+                ModuleRegistryError::Protocol(format!(
+                    "Failed to resolve download URL '{}': {}",
+                    url, err
+                ))
+            })
     }
 }
 
@@ -229,14 +228,9 @@ impl ModuleRegistryPort for HttpModuleRegistry {
         manifest: &ModuleManifest,
     ) -> Result<ModuleBundle, ModuleRegistryError> {
         let download_url = self.resolve_url(&manifest.artifact.download_url)?;
-        let response = self
-            .client
-            .get(download_url)
-            .send()
-            .await
-            .map_err(|err| {
-                ModuleRegistryError::Unavailable(format!("Failed to download artifact: {}", err))
-            })?;
+        let response = self.client.get(download_url).send().await.map_err(|err| {
+            ModuleRegistryError::Unavailable(format!("Failed to download artifact: {}", err))
+        })?;
 
         if !response.status().is_success() {
             return Err(ModuleRegistryError::Unavailable(format!(

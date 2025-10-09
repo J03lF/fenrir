@@ -327,20 +327,18 @@ async fn extract_module_archive(
         let cursor = Cursor::new(bytes);
         let decoder = GzDecoder::new(cursor);
         let mut archive = Archive::new(decoder);
-        archive
-            .unpack(&destination)
-            .map_err(|err| ModuleStorageError::Io(format!(
+        archive.unpack(&destination).map_err(|err| {
+            ModuleStorageError::Io(format!(
                 "failed to unpack module archive into {}: {err}",
                 destination.display()
-            )))?;
+            ))
+        })?;
 
         flatten_module_root(&destination)?;
         Ok(())
     })
     .await
-    .map_err(|err| ModuleStorageError::Io(format!(
-        "archive extraction task failed: {err}"
-    )))??;
+    .map_err(|err| ModuleStorageError::Io(format!("archive extraction task failed: {err}")))??;
 
     Ok(())
 }

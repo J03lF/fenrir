@@ -7,7 +7,8 @@ use crate::config::{self, AppConfig};
 use crate::domain::db::DbEngine;
 use crate::infra::http::{HttpServer, HTTP_SERVICE_ID};
 use crate::infra::modules::{
-    registry::HttpModuleRegistry, Ed25519ModuleVerifier, FilesystemModuleStorage, ProcessModuleRuntime,
+    registry::HttpModuleRegistry, Ed25519ModuleVerifier, FilesystemModuleStorage,
+    ProcessModuleRuntime,
 };
 use crate::infra::storage::memory::{InMemoryTicketRepository, InMemoryUserRepository};
 use crate::infra::{db, logging, ssh, telemetry};

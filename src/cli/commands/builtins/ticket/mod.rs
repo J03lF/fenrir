@@ -2,7 +2,8 @@ use std::io::{self, Write};
 use std::str::FromStr;
 
 use crate::cli::commands::registry::{
-    CliDependencies, CommandEntry, CommandOutcome, CommandRegistry, ShellEnvironment,
+    CliDependencies, CommandArgument, CommandEntry, CommandOutcome, CommandRegistry, CommandShape,
+    CommandSubcommand, CompletionKind, ShellEnvironment,
 };
 use crate::cli::commands::table::Table;
 use crate::domain::ticket::{TicketFilter, TicketId, TicketPriority, TicketStatus};
@@ -20,13 +21,58 @@ const DETAILS: &[&str] = &[
     "status <ticket-id> <status>",
 ];
 
+const TICKET_LIST_OPTIONS: &[&str] = &["--status", "--reporter", "--assignee", "--tag", "--search"];
+const TICKET_CREATE_OPTIONS: &[&str] = &[
+    "--title",
+    "--description",
+    "--priority",
+    "--reporter",
+    "--assignee",
+    "--tag",
+];
+const TICKET_STATUS_VALUES: &[&str] = &["open", "in_progress", "resolved", "closed"];
+const TICKET_ASSIGN_SPECIAL: &[&str] = &["none"];
+
+const TICKET_ID_ARGUMENT: CommandArgument = CommandArgument::required("ticket-id");
+const TICKET_LIST_ARGUMENT: CommandArgument = CommandArgument::optional("option")
+    .with_completion(CompletionKind::Static(TICKET_LIST_OPTIONS))
+    .variadic();
+const TICKET_CREATE_ARGUMENT: CommandArgument = CommandArgument::optional("option")
+    .with_completion(CompletionKind::Static(TICKET_CREATE_OPTIONS))
+    .variadic();
+const TICKET_ASSIGN_ARGUMENT: CommandArgument = CommandArgument::required("assignee")
+    .with_completion(CompletionKind::Static(TICKET_ASSIGN_SPECIAL));
+const TICKET_STATUS_ARGUMENT: CommandArgument = CommandArgument::required("status")
+    .with_completion(CompletionKind::Static(TICKET_STATUS_VALUES));
+
+const TICKET_SUBCOMMANDS: &[CommandSubcommand] = &[
+    CommandSubcommand::new("list", &[], &[TICKET_LIST_ARGUMENT], "Tickets auflisten"),
+    CommandSubcommand::new("show", &[], &[TICKET_ID_ARGUMENT], "Ticket anzeigen"),
+    CommandSubcommand::new("create", &[], &[TICKET_CREATE_ARGUMENT], "Ticket erstellen"),
+    CommandSubcommand::new(
+        "assign",
+        &[],
+        &[TICKET_ID_ARGUMENT, TICKET_ASSIGN_ARGUMENT],
+        "Ticket zuweisen oder freigeben",
+    ),
+    CommandSubcommand::new(
+        "status",
+        &[],
+        &[TICKET_ID_ARGUMENT, TICKET_STATUS_ARGUMENT],
+        "Ticketstatus ändern",
+    ),
+];
+
+const TICKET_SHAPE: CommandShape = CommandShape::new("ticket", &[], &[], TICKET_SUBCOMMANDS);
+
 pub fn command() -> CommandEntry {
-    CommandEntry::new(
+    CommandEntry::with_shape(
         "ticket",
         "Arbeitet mit Tickets (listen, anlegen, aktualisieren)",
         "ticket <aktion> [optionen]",
         DETAILS,
         handle,
+        TICKET_SHAPE,
     )
 }
 

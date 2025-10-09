@@ -41,12 +41,19 @@ pub fn run_shell(config: Arc<AppConfig>, services: Arc<AppServices>) -> io::Resu
 
     let mut editor =
         Editor::<ContextualCompleter, DefaultHistory>::new().map_err(map_readline_error)?;
+    let shapes = registry.shapes();
     editor.set_helper(Some(ContextualCompleter::new(
-        registry.command_names(),
+        shapes.clone(),
         dependencies.clone(),
+        ShellEnvironment::Cli,
     )));
+    tracing::debug!(
+        target = "cli::shell",
+        commands = shapes.len(),
+        "rustyline helper registered"
+    );
     if let Some(helper) = editor.helper_mut() {
-        helper.update_commands(registry.command_names());
+        helper.update_catalog(registry.shapes());
     }
     let history_path = init_history(&mut editor);
     loop {

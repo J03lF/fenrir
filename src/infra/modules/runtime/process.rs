@@ -127,8 +127,9 @@ impl ProcessModuleRuntime {
             .collect();
 
         let state_file = self.state_dir.join(STATE_FILE_NAME);
-        let contents = serde_json::to_string_pretty(&states)
-            .map_err(|e| ModuleRuntimeError::InvalidState(format!("failed to serialize state: {}", e)))?;
+        let contents = serde_json::to_string_pretty(&states).map_err(|e| {
+            ModuleRuntimeError::InvalidState(format!("failed to serialize state: {}", e))
+        })?;
 
         fs::write(&state_file, contents)
             .await
@@ -162,21 +163,19 @@ impl ProcessModuleRuntime {
         let config_path = module_path.join("config.toml");
 
         match fs::read_to_string(&config_path).await {
-            Ok(content) => {
-                match toml::from_str::<ModuleConfigPort>(&content) {
-                    Ok(config) => {
-                        let port = config.server.and_then(|s| s.port);
-                        if let Some(p) = port {
-                            debug!(module_path = ?module_path, port = p, "read port from module config");
-                        }
-                        port
+            Ok(content) => match toml::from_str::<ModuleConfigPort>(&content) {
+                Ok(config) => {
+                    let port = config.server.and_then(|s| s.port);
+                    if let Some(p) = port {
+                        debug!(module_path = ?module_path, port = p, "read port from module config");
                     }
-                    Err(e) => {
-                        debug!(error = %e, "failed to parse module config.toml");
-                        None
-                    }
+                    port
                 }
-            }
+                Err(e) => {
+                    debug!(error = %e, "failed to parse module config.toml");
+                    None
+                }
+            },
             Err(_) => {
                 debug!(config_path = ?config_path, "no config.toml found in module");
                 None
@@ -194,11 +193,12 @@ impl ProcessModuleRuntime {
             // Try SIGTERM first
             if let Err(e) = kill(Pid::from_raw(pid as i32), Signal::SIGTERM) {
                 warn!("SIGTERM failed: {}, trying SIGKILL", e);
-                kill(Pid::from_raw(pid as i32), Signal::SIGKILL)
-                    .map_err(|e| ModuleRuntimeError::StopFailed {
+                kill(Pid::from_raw(pid as i32), Signal::SIGKILL).map_err(|e| {
+                    ModuleRuntimeError::StopFailed {
                         module_id: "unknown".to_string(),
                         reason: format!("failed to kill process: {}", e),
-                    })?;
+                    }
+                })?;
             }
 
             // Wait a bit for process to exit
@@ -253,9 +253,9 @@ impl ModuleRuntimePort for ProcessModuleRuntime {
 
         // Setup log file
         let log_dir = self.state_dir.join("logs");
-        fs::create_dir_all(&log_dir)
-            .await
-            .map_err(|e| ModuleRuntimeError::Io(format!("failed to create log directory: {}", e)))?;
+        fs::create_dir_all(&log_dir).await.map_err(|e| {
+            ModuleRuntimeError::Io(format!("failed to create log directory: {}", e))
+        })?;
 
         let log_file = log_dir.join(format!("{}.log", module_id_str));
         let log_file_handle = std::fs::OpenOptions::new()
@@ -334,11 +334,12 @@ impl ModuleRuntimePort for ProcessModuleRuntime {
 
         let pid = {
             let mut modules = self.running_modules.write().await;
-            let state = modules.remove(&module_id_str).ok_or_else(|| {
-                ModuleRuntimeError::NotRunning {
-                    module_id: module_id_str.clone(),
-                }
-            })?;
+            let state =
+                modules
+                    .remove(&module_id_str)
+                    .ok_or_else(|| ModuleRuntimeError::NotRunning {
+                        module_id: module_id_str.clone(),
+                    })?;
 
             state.pid
         };
@@ -360,11 +361,11 @@ impl ModuleRuntimePort for ProcessModuleRuntime {
         let modules = self.running_modules.read().await;
         let module_id_str = module_id.to_string();
 
-        let state = modules.get(&module_id_str).ok_or_else(|| {
-            ModuleRuntimeError::NotRunning {
+        let state = modules
+            .get(&module_id_str)
+            .ok_or_else(|| ModuleRuntimeError::NotRunning {
                 module_id: module_id_str.clone(),
-            }
-        })?;
+            })?;
 
         // Check if process is still alive
         let status = if self.is_process_alive(state.pid) {
@@ -417,11 +418,12 @@ impl ModuleRuntimePort for ProcessModuleRuntime {
             let modules = self.running_modules.read().await;
             let module_id_str = module_id.to_string();
 
-            let state = modules.get(&module_id_str).ok_or_else(|| {
-                ModuleRuntimeError::NotRunning {
-                    module_id: module_id_str.clone(),
-                }
-            })?;
+            let state =
+                modules
+                    .get(&module_id_str)
+                    .ok_or_else(|| ModuleRuntimeError::NotRunning {
+                        module_id: module_id_str.clone(),
+                    })?;
 
             (state.port, state.restart_count + 1)
         };
@@ -454,11 +456,11 @@ impl ModuleRuntimePort for ProcessModuleRuntime {
         let modules = self.running_modules.read().await;
         let module_id_str = module_id.to_string();
 
-        let state = modules.get(&module_id_str).ok_or_else(|| {
-            ModuleRuntimeError::NotRunning {
+        let state = modules
+            .get(&module_id_str)
+            .ok_or_else(|| ModuleRuntimeError::NotRunning {
                 module_id: module_id_str.clone(),
-            }
-        })?;
+            })?;
 
         let contents = fs::read_to_string(&state.log_file)
             .await

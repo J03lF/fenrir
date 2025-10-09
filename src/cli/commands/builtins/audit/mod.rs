@@ -5,7 +5,7 @@ use time::OffsetDateTime;
 
 use crate::audit::{AuditActor, AuditEvent, AuditOutcome};
 use crate::cli::commands::registry::{
-    CliDependencies, CommandEntry, CommandOutcome, CommandRegistry, ShellEnvironment,
+    CliDependencies, CommandEntry, CommandOutcome, CommandRegistry, CommandShape, ShellEnvironment,
 };
 
 const DETAILS: &[&str] = &[
@@ -16,13 +16,16 @@ const DETAILS: &[&str] = &[
     "audit --actor system       – nur Systemereignisse anzeigen",
 ];
 
+const AUDIT_SHAPE: CommandShape = CommandShape::basic("audit");
+
 pub fn command() -> CommandEntry {
-    CommandEntry::new(
+    CommandEntry::with_shape(
         "audit",
         "Listet aktuelle Audit-Events (nur lesend)",
         "audit [--limit <n>] [--action <code>] [--outcome <status>] [--actor <id>]",
         DETAILS,
         handle,
+        AUDIT_SHAPE,
     )
 }
 

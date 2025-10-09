@@ -222,6 +222,7 @@ pub trait ModuleStoragePort: Send + Sync {
         &self,
         bundle: ModuleBundle,
     ) -> Result<ModuleInstallResult, ModuleStorageError>;
+    async fn remove(&self, id: &ModuleId) -> Result<(), ModuleStorageError>;
 }
 
 #[async_trait]

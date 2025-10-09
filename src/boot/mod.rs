@@ -6,7 +6,7 @@ use crate::config::{self, AppConfig};
 use crate::domain::db::DbEngine;
 use crate::infra::http::{HttpServer, HTTP_SERVICE_ID};
 use crate::infra::modules::{
-    Ed25519ModuleVerifier, FilesystemModuleRegistry, FilesystemModuleStorage,
+    registry::HttpModuleRegistry, Ed25519ModuleVerifier, FilesystemModuleStorage,
 };
 use crate::infra::storage::memory::{InMemoryTicketRepository, InMemoryUserRepository};
 use crate::infra::{db, logging, ssh, telemetry};
@@ -164,7 +164,7 @@ pub fn boot() -> Result<BootContext> {
         Arc::new(InMemoryAuditLog::new(audit_capacity));
 
     let module_registry: Arc<dyn crate::domain::module::ModuleRegistryPort> = Arc::new(
-        FilesystemModuleRegistry::new(&cfg.modules.registry)
+        HttpModuleRegistry::new(&cfg.modules.registry)
             .map_err(|err| anyhow!("module registry init failed: {err}"))?,
     );
     let module_storage: Arc<dyn crate::domain::module::ModuleStoragePort> = Arc::new(

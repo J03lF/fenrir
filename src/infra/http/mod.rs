@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{anyhow, Context, Result};
 use arc_swap::ArcSwap;
@@ -13,7 +13,7 @@ use axum::response::{
     sse::{Event, KeepAlive, Sse},
     Html, IntoResponse, Response,
 };
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::Json;
 use axum::Router;
 use http_body_util::BodyExt;
@@ -44,6 +44,11 @@ use tracing::{debug, info, warn};
 
 use crate::audit::{AuditActor, AuditEvent, AuditMetadata, AuditOutcome};
 use crate::config::AppConfig;
+use crate::domain::module::{
+    InstalledModule, ModuleError, ModuleId, ModuleInstallResult, ModuleInstallStatus,
+    ModuleManifest, ModuleRegistryError, ModuleSearchQuery, ModuleServiceError,
+    ModuleStorageError, ModuleVersion,
+};
 use crate::infra::{logging, telemetry};
 use crate::security::auth::{AuthError, ControlPlaneAuthorizer, Role};
 use crate::services::scheduler::ScheduledJobSnapshot;
@@ -661,6 +666,61 @@ struct ServiceActionProblem {
     body: ServiceActionErrorBody,
 }
 
+#[derive(Deserialize)]
+struct ModuleSearchQueryParams {
+    pattern: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ModuleInstallRequest {
+    module_id: String,
+    version: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ModuleUpdateRequest {
+    module_id: Option<String>,
+    fenrir_version: Option<String>,
+}
+
+#[derive(Serialize)]
+struct InstalledModuleView {
+    manifest: ModuleManifest,
+    installed_at: Option<String>,
+    path: String,
+}
+
+#[derive(Serialize)]
+struct InstalledModulesResponse {
+    modules: Vec<InstalledModuleView>,
+}
+
+#[derive(Serialize)]
+struct RegistryModuleView {
+    id: String,
+    version: String,
+    title: Option<String>,
+    description: Option<String>,
+    tags: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct RegistryModulesResponse {
+    modules: Vec<RegistryModuleView>,
+}
+
+#[derive(Serialize)]
+struct ModuleInstallResponse {
+    status: &'static str,
+    manifest: ModuleManifest,
+    path: String,
+}
+
+#[derive(Serialize)]
+struct ModuleUpdateResponse {
+    results: Vec<ModuleInstallResponse>,
+}
+
 enum ServiceActionKind {
     Start,
     Stop,
@@ -771,7 +831,254 @@ fn snapshot_to_state_event(snapshot: ServiceSnapshot) -> ServiceStateEvent {
             .tags
             .iter()
             .map(|tag| tag.as_str())
-            .collect(),
+        .collect(),
+    }
+}
+
+fn module_service_unavailable() -> ServiceActionProblem {
+    ServiceActionProblem::new(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "module_service_unavailable",
+        "Modul-Service nicht verfügbar",
+    )
+}
+
+fn system_time_to_rfc3339(time: SystemTime) -> Option<String> {
+    OffsetDateTime::from(time).format(&Rfc3339).ok()
+}
+
+fn installed_module_to_view(installed: InstalledModule) -> InstalledModuleView {
+    InstalledModuleView {
+        manifest: installed.manifest,
+        installed_at: system_time_to_rfc3339(installed.installed_at),
+        path: installed.path,
+    }
+}
+
+fn module_install_status_label(status: ModuleInstallStatus) -> &'static str {
+    match status {
+        ModuleInstallStatus::Installed => "installed",
+        ModuleInstallStatus::Updated => "updated",
+        ModuleInstallStatus::AlreadyCurrent => "already_current",
+    }
+}
+
+fn map_install_result(result: ModuleInstallResult) -> ModuleInstallResponse {
+    ModuleInstallResponse {
+        status: module_install_status_label(result.status),
+        manifest: result.manifest,
+        path: result.path,
+    }
+}
+
+fn module_error_problem(err: ModuleServiceError) -> ServiceActionProblem {
+    match err {
+        ModuleServiceError::Registry(inner) => match inner {
+            ModuleRegistryError::Unavailable(msg) => ServiceActionProblem::new(
+                StatusCode::BAD_GATEWAY,
+                "registry_unavailable",
+                msg,
+            ),
+            ModuleRegistryError::NotFound { module } => ServiceActionProblem::new(
+                StatusCode::NOT_FOUND,
+                "module_not_found",
+                format!("Modul '{}' wurde nicht gefunden", module),
+            ),
+            ModuleRegistryError::Protocol(msg) => ServiceActionProblem::new(
+                StatusCode::BAD_GATEWAY,
+                "registry_protocol_error",
+                msg,
+            ),
+        },
+        ModuleServiceError::Storage(inner) => match inner {
+            ModuleStorageError::Unavailable(msg) | ModuleStorageError::Io(msg) => {
+                ServiceActionProblem::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "module_storage_error",
+                    msg,
+                )
+            }
+            ModuleStorageError::InvalidState(msg) => ServiceActionProblem::new(
+                StatusCode::CONFLICT,
+                "module_invalid_state",
+                msg,
+            ),
+        },
+        ModuleServiceError::Verification(inner) => ServiceActionProblem::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "module_verification_error",
+            inner.to_string(),
+        ),
+    }
+}
+
+fn module_validation_problem(code: &'static str, err: ModuleError) -> ServiceActionProblem {
+    match err {
+        ModuleError::Validation(msg) =>
+            ServiceActionProblem::new(StatusCode::BAD_REQUEST, code, msg),
+    }
+}
+
+async fn list_installed_modules(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(problem) = authorize(&state.auth, &headers, Role::Viewer) {
+        return problem.into_response();
+    }
+
+    let Some(service) = state.services.module_service() else {
+        return module_service_unavailable().into_response();
+    };
+
+    match service.list_installed().await {
+        Ok(modules) => {
+            let views = modules
+                .into_iter()
+                .map(installed_module_to_view)
+                .collect();
+            (StatusCode::OK, Json(InstalledModulesResponse { modules: views })).into_response()
+        }
+        Err(err) => module_error_problem(err).into_response(),
+    }
+}
+
+async fn list_available_modules(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Query(query): Query<ModuleSearchQueryParams>,
+) -> Response {
+    if let Err(problem) = authorize(&state.auth, &headers, Role::Viewer) {
+        return problem.into_response();
+    }
+
+    let Some(service) = state.services.module_service() else {
+        return module_service_unavailable().into_response();
+    };
+
+    let search_query = ModuleSearchQuery::new(query.pattern.clone());
+
+    match service.search(search_query).await {
+        Ok(entries) => {
+            let modules = entries
+                .into_iter()
+                .map(|entry| RegistryModuleView {
+                    id: entry.id.to_string(),
+                    version: entry.version.to_string(),
+                    title: entry.title,
+                    description: entry.description,
+                    tags: entry.tags,
+                })
+                .collect();
+            (StatusCode::OK, Json(RegistryModulesResponse { modules })).into_response()
+        }
+        Err(err) => module_error_problem(err).into_response(),
+    }
+}
+
+async fn install_module_version(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Json(payload): Json<ModuleInstallRequest>,
+) -> Response {
+    if let Err(problem) = authorize(&state.auth, &headers, Role::Operator) {
+        return problem.into_response();
+    }
+
+    let Some(service) = state.services.module_service() else {
+        return module_service_unavailable().into_response();
+    };
+
+    let module_id = match ModuleId::new(payload.module_id.trim()) {
+        Ok(id) => id,
+        Err(err) => return module_validation_problem("invalid_module_id", err).into_response(),
+    };
+
+    let maybe_version = match payload.version.as_deref() {
+        Some(raw) => match ModuleVersion::parse(raw) {
+            Ok(version) => Some(version),
+            Err(err) => {
+                return module_validation_problem("invalid_module_version", err).into_response()
+            }
+        },
+        None => None,
+    };
+
+    match service
+        .install(&module_id, maybe_version.as_ref())
+        .await
+    {
+        Ok(result) => (StatusCode::OK, Json(map_install_result(result))).into_response(),
+        Err(err) => module_error_problem(err).into_response(),
+    }
+}
+
+async fn update_module_versions(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Json(payload): Json<ModuleUpdateRequest>,
+) -> Response {
+    if let Err(problem) = authorize(&state.auth, &headers, Role::Operator) {
+        return problem.into_response();
+    }
+
+    let Some(service) = state.services.module_service() else {
+        return module_service_unavailable().into_response();
+    };
+
+    let fenrir_version_owned = payload
+        .fenrir_version
+        .clone()
+        .or_else(|| Some(state.info.app_version.clone()));
+    let fenrir_version = fenrir_version_owned.as_deref();
+
+    let mut results = Vec::new();
+
+    if let Some(module_id_raw) = payload.module_id.as_deref() {
+        let module_id = match ModuleId::new(module_id_raw.trim()) {
+            Ok(id) => id,
+            Err(err) => {
+                return module_validation_problem("invalid_module_id", err).into_response()
+            }
+        };
+
+        match service.update(&module_id, fenrir_version).await {
+            Ok(result) => results.push(map_install_result(result)),
+            Err(err) => return module_error_problem(err).into_response(),
+        }
+    } else {
+        match service.update_all(fenrir_version).await {
+            Ok(items) => {
+                results.extend(items.into_iter().map(map_install_result));
+            }
+            Err(err) => return module_error_problem(err).into_response(),
+        }
+    }
+
+    (StatusCode::OK, Json(ModuleUpdateResponse { results })).into_response()
+}
+
+async fn uninstall_module_version(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    if let Err(problem) = authorize(&state.auth, &headers, Role::Operator) {
+        return problem.into_response();
+    }
+
+    let Some(service) = state.services.module_service() else {
+        return module_service_unavailable().into_response();
+    };
+
+    let module_id = match ModuleId::new(id.trim()) {
+        Ok(id) => id,
+        Err(err) => return module_validation_problem("invalid_module_id", err).into_response(),
+    };
+
+    match service.uninstall(&module_id).await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(err) => module_error_problem(err).into_response(),
     }
 }
 
@@ -793,6 +1100,11 @@ fn build_router(state: HttpState) -> Router {
         .route("/metrics", get(metrics_snapshot))
         .route("/audit", get(list_audit_events))
         .route("/events/stream", get(audit_events_stream))
+        .route("/modules/installed", get(list_installed_modules))
+        .route("/modules/available", get(list_available_modules))
+        .route("/modules/install", post(install_module_version))
+        .route("/modules/update", post(update_module_versions))
+        .route("/modules/:id", delete(uninstall_module_version))
         .with_state(state)
 }
 

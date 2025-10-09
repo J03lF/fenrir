@@ -1,15 +1,18 @@
+use std::io::Cursor;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
 use async_trait::async_trait;
-use tokio::fs;
-use tokio::io::AsyncWriteExt;
+use flate2::read::GzDecoder;
+use tar::Archive;
+use tokio::{fs, task};
 
 use crate::config::ModuleStorageSection;
 use crate::domain::module::{
     InstalledModule, ModuleBundle, ModuleId, ModuleInstallResult, ModuleInstallStatus,
     ModuleManifest, ModuleStorageError, ModuleStoragePort,
 };
+use tracing::warn;
 
 #[derive(Debug, Clone)]
 pub struct FilesystemModuleStorage {
@@ -51,21 +54,25 @@ impl FilesystemModuleStorage {
         self.install_dir.join(id.as_str())
     }
 
+    fn metadata_dir(&self, id: &ModuleId) -> PathBuf {
+        self.module_dir(id).join(".fenrir-meta")
+    }
+
     fn manifest_path(&self, id: &ModuleId) -> PathBuf {
-        self.module_dir(id).join("manifest.json")
+        self.metadata_dir(id).join("manifest.json")
     }
 
     fn archive_path(&self, id: &ModuleId, manifest: &ModuleManifest) -> PathBuf {
         let file_name = artifact_file_name(manifest);
-        self.module_dir(id).join(file_name)
+        self.metadata_dir(id).join(file_name)
     }
 
     fn signature_path(&self, id: &ModuleId) -> PathBuf {
-        self.module_dir(id).join("signature.bin")
+        self.metadata_dir(id).join("signature.bin")
     }
 
     fn checksum_path(&self, id: &ModuleId) -> PathBuf {
-        self.module_dir(id).join("checksum.bin")
+        self.metadata_dir(id).join("checksum.bin")
     }
 
     async fn read_installed(
@@ -130,21 +137,34 @@ impl ModuleStoragePort for FilesystemModuleStorage {
             {
                 continue;
             }
-            let module_id = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .ok_or_else(|| {
-                    ModuleStorageError::InvalidState(format!(
-                        "module directory {} not valid UTF-8",
-                        path.display()
-                    ))
-                })?;
-            let module_id = ModuleId::new(module_id).map_err(|err| {
-                ModuleStorageError::InvalidState(format!(
-                    "invalid module id in storage {}: {err}",
-                    path.display()
-                ))
-            })?;
+            let Some(module_name) = path.file_name().and_then(|name| name.to_str()) else {
+                warn!(
+                    path = %path.display(),
+                    "Skipping module entry with non-UTF8 name"
+                );
+                continue;
+            };
+
+            if module_name.starts_with('.') {
+                warn!(
+                    path = %path.display(),
+                    name = module_name,
+                    "Skipping hidden module entry"
+                );
+                continue;
+            }
+
+            let module_id = match ModuleId::new(module_name) {
+                Ok(id) => id,
+                Err(err) => {
+                    warn!(
+                        path = %path.display(),
+                        error = %err,
+                        "Skipping module entry with invalid identifier"
+                    );
+                    continue;
+                }
+            };
             if let Some(installed) = self.read_installed(&module_id).await? {
                 entries.push(installed);
             }
@@ -177,10 +197,30 @@ impl ModuleStoragePort for FilesystemModuleStorage {
             }
         }
         let module_dir = self.module_dir(&id);
+
+        if module_dir.exists() {
+            fs::remove_dir_all(&module_dir).await.map_err(|err| {
+                ModuleStorageError::Io(format!(
+                    "cannot clean existing module directory {}: {err}",
+                    module_dir.display()
+                ))
+            })?;
+        }
+
         fs::create_dir_all(&module_dir).await.map_err(|err| {
             ModuleStorageError::Io(format!(
                 "cannot prepare module directory {}: {err}",
                 module_dir.display()
+            ))
+        })?;
+
+        extract_module_archive(&module_dir, &bundle.archive).await?;
+
+        let metadata_dir = self.metadata_dir(&id);
+        fs::create_dir_all(&metadata_dir).await.map_err(|err| {
+            ModuleStorageError::Io(format!(
+                "cannot prepare metadata directory {}: {err}",
+                metadata_dir.display()
             ))
         })?;
 
@@ -201,24 +241,14 @@ impl ModuleStoragePort for FilesystemModuleStorage {
             })?;
 
         let artifact_path = self.archive_path(&id, &bundle.manifest);
-        let mut file = fs::File::create(&artifact_path).await.map_err(|err| {
-            ModuleStorageError::Io(format!(
-                "cannot create artifact {}: {err}",
-                artifact_path.display()
-            ))
-        })?;
-        file.write_all(&bundle.archive).await.map_err(|err| {
-            ModuleStorageError::Io(format!(
-                "cannot write artifact {}: {err}",
-                artifact_path.display()
-            ))
-        })?;
-        file.flush().await.map_err(|err| {
-            ModuleStorageError::Io(format!(
-                "cannot flush artifact {}: {err}",
-                artifact_path.display()
-            ))
-        })?;
+        fs::write(&artifact_path, &bundle.archive)
+            .await
+            .map_err(|err| {
+                ModuleStorageError::Io(format!(
+                    "cannot write artifact {}: {err}",
+                    artifact_path.display()
+                ))
+            })?;
 
         fs::write(self.signature_path(&id), &bundle.signature)
             .await
@@ -249,6 +279,18 @@ impl ModuleStoragePort for FilesystemModuleStorage {
             path: module_dir.to_string_lossy().to_string(),
         })
     }
+
+    async fn remove(&self, id: &ModuleId) -> Result<(), ModuleStorageError> {
+        let module_dir = self.module_dir(id);
+        match fs::remove_dir_all(&module_dir).await {
+            Ok(_) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(ModuleStorageError::Io(format!(
+                "cannot remove module directory {}: {err}",
+                module_dir.display()
+            ))),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -272,4 +314,95 @@ fn artifact_file_name(manifest: &ModuleManifest) -> String {
         .filter(|segment| !segment.is_empty())
         .map(|segment| segment.to_string())
         .unwrap_or_else(|| format!("{}-{}.module", manifest.id, manifest.version))
+}
+
+async fn extract_module_archive(
+    destination: &std::path::Path,
+    archive_bytes: &[u8],
+) -> Result<(), ModuleStorageError> {
+    let bytes = archive_bytes.to_vec();
+    let destination = destination.to_path_buf();
+
+    task::spawn_blocking(move || -> Result<(), ModuleStorageError> {
+        let cursor = Cursor::new(bytes);
+        let decoder = GzDecoder::new(cursor);
+        let mut archive = Archive::new(decoder);
+        archive
+            .unpack(&destination)
+            .map_err(|err| ModuleStorageError::Io(format!(
+                "failed to unpack module archive into {}: {err}",
+                destination.display()
+            )))?;
+
+        flatten_module_root(&destination)?;
+        Ok(())
+    })
+    .await
+    .map_err(|err| ModuleStorageError::Io(format!(
+        "archive extraction task failed: {err}"
+    )))??;
+
+    Ok(())
+}
+
+fn flatten_module_root(destination: &std::path::Path) -> Result<(), ModuleStorageError> {
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(destination).map_err(|err| {
+        ModuleStorageError::Io(format!(
+            "cannot list extracted contents of {}: {err}",
+            destination.display()
+        ))
+    })? {
+        let entry = entry.map_err(|err| {
+            ModuleStorageError::Io(format!(
+                "cannot access extracted entry in {}: {err}",
+                destination.display()
+            ))
+        })?;
+        entries.push(entry);
+    }
+
+    if entries.len() == 1 {
+        let entry = entries.pop().unwrap();
+        let file_type = entry.file_type().map_err(|err| {
+            ModuleStorageError::Io(format!(
+                "cannot inspect extracted entry {}: {err}",
+                entry.path().display()
+            ))
+        })?;
+
+        if file_type.is_dir() {
+            let inner = entry.path();
+            for child in std::fs::read_dir(&inner).map_err(|err| {
+                ModuleStorageError::Io(format!(
+                    "cannot read nested module directory {}: {err}",
+                    inner.display()
+                ))
+            })? {
+                let child = child.map_err(|err| {
+                    ModuleStorageError::Io(format!(
+                        "cannot access nested entry in {}: {err}",
+                        inner.display()
+                    ))
+                })?;
+                let target = destination.join(child.file_name());
+                std::fs::rename(child.path(), &target).map_err(|err| {
+                    ModuleStorageError::Io(format!(
+                        "cannot relocate module entry {} to {}: {err}",
+                        child.path().display(),
+                        target.display()
+                    ))
+                })?;
+            }
+
+            std::fs::remove_dir_all(&inner).map_err(|err| {
+                ModuleStorageError::Io(format!(
+                    "cannot remove nested module directory {}: {err}",
+                    inner.display()
+                ))
+            })?;
+        }
+    }
+
+    Ok(())
 }

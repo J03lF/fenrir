@@ -1,0 +1,23 @@
+2025-10-09T06:56:30.887211Z  INFO main ThreadId(01) fenrir::infra::logging: dateilogging initialisiert log_path=logs/app.log
+2025-10-09T06:56:30.887314Z  INFO main ThreadId(01) fenrir::infra::logging: db-logdatei vorbereitet log_path=logs/db.log
+2025-10-09T06:56:30.887472Z  INFO main ThreadId(01) fenrir::boot: core services registered in registry
+2025-10-09T06:56:30.887662Z  INFO main ThreadId(01) fenrir::boot: scheduler service started
+2025-10-09T06:56:30.887976Z  INFO tokio-runtime-worker ThreadId(11) fenrir::services::scheduler: scheduler heartbeat loop started
+2025-10-09T06:56:30.889085Z  INFO                 main ThreadId(01) fenrir::boot: user and ticket services initialised
+2025-10-09T06:56:30.889101Z  INFO                 main ThreadId(01) fenrir::boot: boot complete app=fenrir version=0.1.3
+2025-10-09T06:56:30.889150Z  INFO                 main ThreadId(01) fenrir::boot: transport initialisation triggered
+2025-10-09T06:56:30.889173Z  INFO tokio-runtime-worker ThreadId(14) fenrir::boot: ssh server task spawned
+2025-10-09T06:56:30.889521Z  INFO tokio-runtime-worker ThreadId(14) fenrir::infra::ssh: starting SSH server host=127.0.0.1 port=2222
+2025-10-09T06:56:30.889743Z  INFO tokio-runtime-worker ThreadId(11) fenrir::infra::http: HTTP server task spawned
+2025-10-09T06:56:38.492735Z  INFO tokio-runtime-worker ThreadId(03) thrussh::server::encrypted: pty-req: unknown pty code 42
+2025-10-09T06:56:39.044908Z  INFO tokio-runtime-worker ThreadId(03) fenrir::cli::commands::builtins::modules: modules command invoked command="modules"
+2025-10-09T06:57:30.244958Z  INFO tokio-runtime-worker ThreadId(02) fenrir::cli::commands::builtins::modules: modules command invoked command="modules"
+2025-10-09T06:57:36.314975Z  INFO tokio-runtime-worker ThreadId(05) fenrir::cli::commands::builtins::modules: modules command invoked command="modules"
+2025-10-09T06:57:36.317692Z  WARN ThreadId(52) fenrir::infra::modules::storage: Skipping module entry with invalid identifier path=/Users/jfurocket/Documents/personal/modules/.cache error=validation error: module id may only contain [a-z0-9-_]
+2025-10-09T06:57:36.317789Z  WARN ThreadId(52) fenrir::infra::modules::storage: Skipping module entry with invalid identifier path=/Users/jfurocket/Documents/personal/modules/.idea error=validation error: module id may only contain [a-z0-9-_]
+2025-10-09T06:58:24.774681Z  INFO tokio-runtime-worker ThreadId(05) fenrir::cli::commands::builtins::modules: modules command invoked command="modules"
+2025-10-09T06:58:24.778048Z  WARN ThreadId(68) fenrir::infra::modules::storage: Skipping module entry with invalid identifier path=/Users/jfurocket/Documents/personal/modules/.cache error=validation error: module id may only contain [a-z0-9-_]
+2025-10-09T06:58:24.778221Z  WARN ThreadId(68) fenrir::infra::modules::storage: Skipping module entry with invalid identifier path=/Users/jfurocket/Documents/personal/modules/.idea error=validation error: module id may only contain [a-z0-9-_]
+2025-10-09T06:58:32.092460Z  INFO tokio-runtime-worker ThreadId(05) fenrir::cli::commands::builtins::modules: modules command invoked command="modules"
+2025-10-09T06:59:42.334365Z  INFO tokio-runtime-worker ThreadId(07) fenrir::services::scheduler: scheduler heartbeat stopped
+2025-10-09T06:59:42.335205Z  INFO tokio-runtime-worker ThreadId(07) fenrir::services::scheduler: scheduler service dropped and resources cleaned up

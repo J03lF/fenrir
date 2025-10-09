@@ -1,7 +1,0 @@
-2025-10-08T08:59:28Z INSERT users id=9dd2953d-8490-47c7-9a02-70c4ca7ef9e7 username=user_95e53fc200ca4a5b893519dc31fd0dc5 roles=[Admin]
-2025-10-08T08:59:28Z SELECT users filter=UserFilter { role: None, search: Some("user_95e53fc200ca4a5b893519dc31fd0dc5"), include_locked: true }
-2025-10-08T08:59:28Z SELECT user by username=user_95e53fc200ca4a5b893519dc31fd0dc5
-2025-10-08T08:59:28Z INSERT tickets id=76b18f98-03b6-4eea-8c32-32de80913971 status=open priority=high reporter=9dd2953d-8490-47c7-9a02-70c4ca7ef9e7 assignee=None
-2025-10-08T08:59:28Z SELECT user by username=user_95e53fc200ca4a5b893519dc31fd0dc5
-2025-10-08T08:59:28Z SELECT tickets filter=TicketFilter { status: None, reporter: Some(UserId(9dd2953d-8490-47c7-9a02-70c4ca7ef9e7)), assignee: None, tags: [], search: None }
-2025-10-08T08:59:28Z SELECT users filter=UserFilter { role: None, search: None, include_locked: false }

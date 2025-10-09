@@ -12,6 +12,10 @@ struct Args {
     /// Start interactive CLI shell
     #[arg(long)]
     cli: bool,
+
+    /// Execute a single command and exit
+    #[arg(long)]
+    command: Option<String>,
 }
 
 #[tokio::main]
@@ -39,6 +43,29 @@ async fn main() {
             std::process::exit(1);
         }
     };
+
+    // Old plugin init removed - modules are now managed via module service
+
+    if let Some(command) = args.command {
+        let mut out = std::io::stdout();
+        let registry = fenrir::cli::commands::builtins::build_registry();
+        let deps = fenrir::cli::commands::registry::CliDependencies::new(
+            Arc::clone(&ctx.config),
+            Arc::clone(&ctx.services),
+        );
+        let env = fenrir::cli::commands::registry::ShellEnvironment::Cli;
+        let mut cmd_args: Vec<&str> = command.split_whitespace().collect();
+        let cmd_name = cmd_args.remove(0);
+
+        match registry.execute(cmd_name, &cmd_args, &deps, &mut out, env) {
+            Ok(_) => std::process::exit(0),
+            Err(e) => {
+                eprintln!("Command execution failed: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
     println!(
         "{} v{} started",
         ctx.config.app.name, ctx.config.app.version

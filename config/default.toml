@@ -65,15 +65,15 @@ enabled = true
 prompt_theme = "default"
 
 [modules.registry]
-endpoint = "file://modules/registry"
-index_file = "index.json"
+url = "http://localhost:3001"
 allow_offline = true
+auth_token = "env:FENRIR_REGISTRY_TOKEN"
 
 [modules.storage]
-install_dir = "var/modules/install"
-cache_dir = "var/modules/cache"
+install_dir = "/Users/jfurocket/Documents/personal/modules"
+cache_dir = "/Users/jfurocket/Documents/personal/modules/.cache"
 
 [modules.trust]
 require_signature = true
-allowed_signers = ["fenrir-core"]
+allowed_signers = ["fenrir-core", "Fenrir Team"]
 keyring_path = "config/modules/keyring.json"

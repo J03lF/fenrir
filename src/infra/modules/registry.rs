@@ -1,157 +1,133 @@
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
-
 use async_trait::async_trait;
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use semver::Version;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
+use reqwest::Url;
+use semver::{Version, VersionReq};
 use serde::Deserialize;
-use tokio::fs;
+use sha2::Digest;
+use std::time::Duration;
 
 use crate::config::ModuleRegistrySection;
 use crate::domain::module::{
-    ModuleBundle, ModuleId, ModuleManifest, ModuleRegistryError, ModuleRegistryPort,
-    ModuleSearchQuery, ModuleSummary, ModuleVersion,
+    ChecksumAlgorithm, ModuleArtifactDescriptor, ModuleBundle, ModuleChecksum, ModuleId,
+    ModuleManifest, ModuleRegistryError, ModuleRegistryPort, ModuleSearchQuery,
+    ModuleSignatureDescriptor, ModuleSummary, ModuleVersion, SignatureAlgorithm,
 };
 
+const DEFAULT_CONTENT_TYPE: &str = "application/gzip";
+const USER_AGENT_VALUE: &str = "fenrir-runtime/registry-client";
+
 #[derive(Debug, Clone)]
-pub struct FilesystemModuleRegistry {
-    root: PathBuf,
-    index_file: String,
-    allow_offline: bool,
+pub struct HttpModuleRegistry {
+    base_url: String,
+    client: reqwest::Client,
 }
 
-impl FilesystemModuleRegistry {
+impl HttpModuleRegistry {
     pub fn new(config: &ModuleRegistrySection) -> Result<Self, ModuleRegistryInitError> {
-        let root = resolve_endpoint(&config.endpoint)?;
-        let canonical_root = if root.exists() {
-            std::fs::canonicalize(&root).map_err(|err| ModuleRegistryInitError::Io {
-                path: root.clone(),
-                source: err,
-            })?
-        } else {
-            root
-        };
-        Ok(Self {
-            root: canonical_root,
-            index_file: config.index_file.clone(),
-            allow_offline: config.allow_offline,
-        })
-    }
-
-    fn index_path(&self) -> PathBuf {
-        self.root.join(&self.index_file)
-    }
-
-    async fn load_index(&self) -> Result<RegistryIndex, ModuleRegistryError> {
-        let path = self.index_path();
-        match fs::read(&path).await {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|err| {
-                ModuleRegistryError::Protocol(format!(
-                    "index {} invalid JSON: {err}",
-                    path.display()
-                ))
-            }),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound && self.allow_offline => {
-                Ok(RegistryIndex {
-                    modules: Vec::new(),
-                })
-            }
-            Err(err) => Err(ModuleRegistryError::Unavailable(format!(
-                "index {} not accessible: {err}",
-                path.display()
-            ))),
-        }
-    }
-
-    fn manifest_path(&self, module: &ModuleId, version: &ModuleVersion) -> PathBuf {
-        self.root
-            .join(module.as_str())
-            .join(version.as_semver().to_string())
-            .join("manifest.json")
-    }
-
-    async fn read_manifest(&self, path: &Path) -> Result<ModuleManifest, ModuleRegistryError> {
-        let bytes = fs::read(path).await.map_err(|err| match err.kind() {
-            std::io::ErrorKind::NotFound => ModuleRegistryError::NotFound {
-                module: path.display().to_string(),
-            },
-            _ => ModuleRegistryError::Unavailable(format!(
-                "manifest {} inaccessible: {err}",
-                path.display()
-            )),
-        })?;
-        serde_json::from_slice(&bytes).map_err(|err| {
-            ModuleRegistryError::Protocol(format!(
-                "manifest {} invalid JSON: {err}",
-                path.display()
-            ))
-        })
-    }
-
-    fn resolve_artifact_path(
-        &self,
-        manifest: &ModuleManifest,
-    ) -> Result<PathBuf, ModuleRegistryError> {
-        let raw = manifest.artifact.download_url.trim();
-        if raw.is_empty() {
-            return Err(ModuleRegistryError::Protocol(
-                "artifact download_url must not be empty".to_string(),
+        if config.url.trim().is_empty() {
+            return Err(ModuleRegistryInitError::InvalidConfig(
+                "modules.registry.url must not be empty".to_string(),
             ));
         }
-        if let Some(path) = raw.strip_prefix("file://") {
-            Ok(PathBuf::from(path))
-        } else if raw.starts_with("http://") || raw.starts_with("https://") {
-            Err(ModuleRegistryError::Protocol(
-                "http(s) registry endpoints are not implemented".to_string(),
-            ))
-        } else {
-            Ok(self.root.join(raw))
+
+        let base_url = config.url.trim_end_matches('/').to_string();
+        let mut headers = HeaderMap::new();
+        headers.insert(USER_AGENT, HeaderValue::from_static(USER_AGENT_VALUE));
+
+        if let Some(ref raw_token) = config.auth_token {
+            let token = resolve_secret(raw_token)?;
+            if !token.is_empty() {
+                let value = HeaderValue::from_str(&format!("Bearer {}", token)).map_err(|_| {
+                    ModuleRegistryInitError::InvalidConfig(
+                        "modules.registry.auth_token contains invalid characters".to_string(),
+                    )
+                })?;
+                headers.insert(AUTHORIZATION, value);
+            }
         }
+
+        let client = reqwest::Client::builder()
+            .default_headers(headers)
+            .timeout(Duration::from_secs(30))
+            .build()
+            .map_err(|err| ModuleRegistryInitError::InvalidConfig(err.to_string()))?;
+
+        Ok(Self { base_url, client })
+    }
+
+    fn resolve_url(&self, url: &str) -> Result<String, ModuleRegistryError> {
+        if url.starts_with("http://") || url.starts_with("https://") {
+            return Ok(url.to_string());
+        }
+
+        let base = Url::parse(&self.base_url).map_err(|err| {
+            ModuleRegistryError::Unavailable(format!(
+                "Invalid registry base URL: {}",
+                err
+            ))
+        })?;
+
+        base.join(url)
+            .map(|joined| joined.to_string())
+            .map_err(|err| ModuleRegistryError::Protocol(format!(
+                "Failed to resolve download URL '{}': {}",
+                url, err
+            )))
     }
 }
 
 #[async_trait]
-impl ModuleRegistryPort for FilesystemModuleRegistry {
+impl ModuleRegistryPort for HttpModuleRegistry {
     async fn search(
         &self,
         query: ModuleSearchQuery,
     ) -> Result<Vec<ModuleSummary>, ModuleRegistryError> {
-        let index = self.load_index().await?;
-        let mut summaries = Vec::new();
-        let pattern = query.pattern.as_ref().map(|p| p.to_ascii_lowercase());
-        for entry in index.modules {
-            let module_id = ModuleId::new(&entry.id).map_err(|err| {
-                ModuleRegistryError::Protocol(format!(
-                    "invalid module id `{}` in index: {err}",
-                    entry.id
-                ))
-            })?;
-            let version = ModuleVersion::parse(&entry.version).map_err(|err| {
-                ModuleRegistryError::Protocol(format!(
-                    "invalid version `{}` for module {}: {err}",
-                    entry.version, entry.id
-                ))
-            })?;
-            if let Some(pattern) = pattern.as_ref() {
-                if !entry.id.to_ascii_lowercase().contains(pattern)
-                    && !entry
-                        .title
-                        .as_ref()
-                        .map(|title| title.to_ascii_lowercase().contains(pattern))
-                        .unwrap_or(false)
-                {
-                    continue;
-                }
-            }
-            summaries.push(ModuleSummary {
-                id: module_id,
-                version,
-                title: entry.title,
-                description: entry.description,
-                tags: entry.tags.unwrap_or_default(),
-            });
+        let base = self.base_url.trim_end_matches('/');
+        let url = if let Some(ref pattern) = query.pattern {
+            format!(
+                "{}/api/modules/search?q={}",
+                base,
+                urlencoding::encode(pattern)
+            )
+        } else {
+            format!("{}/api/modules", base)
+        };
+
+        let response = self.client.get(&url).send().await.map_err(|err| {
+            ModuleRegistryError::Unavailable(format!("Failed to query registry: {}", err))
+        })?;
+
+        if !response.status().is_success() {
+            return Err(ModuleRegistryError::Unavailable(format!(
+                "Registry returned status: {}",
+                response.status()
+            )));
         }
-        summaries.sort_by(|a, b| a.id.cmp(&b.id));
+
+        let modules: Vec<RegistryModule> = response.json().await.map_err(|err| {
+            ModuleRegistryError::Protocol(format!("Failed to parse registry response: {}", err))
+        })?;
+
+        let summaries = modules
+            .into_iter()
+            .filter_map(|module| {
+                let id = ModuleId::new(&module.module.id).ok()?;
+                let latest = module
+                    .latest_version
+                    .or_else(|| module.versions.first().map(|v| v.version.clone()))?;
+                let version = ModuleVersion::parse(latest).ok()?;
+                Some(ModuleSummary {
+                    id,
+                    version,
+                    title: Some(module.module.name),
+                    description: module.module.description,
+                    tags: vec![],
+                })
+            })
+            .collect();
+
         Ok(summaries)
     }
 
@@ -160,110 +136,217 @@ impl ModuleRegistryPort for FilesystemModuleRegistry {
         id: &ModuleId,
         version: Option<&ModuleVersion>,
     ) -> Result<ModuleManifest, ModuleRegistryError> {
-        let chosen_version = match version {
-            Some(version) => version.clone(),
-            None => {
-                let index = self.load_index().await?;
-                let mut versions: BTreeMap<Version, String> = BTreeMap::new();
-                for entry in index.modules {
-                    if entry.id == id.as_str() {
-                        let version = ModuleVersion::parse(&entry.version).map_err(|err| {
-                            ModuleRegistryError::Protocol(format!(
-                                "invalid version `{}` for module {}: {err}",
-                                entry.version, entry.id
-                            ))
-                        })?;
-                        versions.insert(version.as_semver().clone(), entry.version);
-                    }
-                }
-                let latest = versions
-                    .iter()
-                    .last()
-                    .map(|(version, raw)| (version.clone(), raw.clone()))
-                    .ok_or_else(|| ModuleRegistryError::NotFound {
-                        module: id.to_string(),
-                    })?;
-                ModuleVersion(latest.0)
-            }
+        let base = self.base_url.trim_end_matches('/');
+        let url = format!("{}/api/modules/{}", base, urlencoding::encode(id.as_str()));
+
+        let response = self.client.get(&url).send().await.map_err(|err| {
+            ModuleRegistryError::Unavailable(format!("Failed to fetch module: {}", err))
+        })?;
+
+        if response.status().as_u16() == 404 {
+            return Err(ModuleRegistryError::NotFound {
+                module: id.to_string(),
+            });
+        }
+
+        if !response.status().is_success() {
+            return Err(ModuleRegistryError::Unavailable(format!(
+                "Registry returned status: {}",
+                response.status()
+            )));
+        }
+
+        let module: RegistryModule = response.json().await.map_err(|err| {
+            ModuleRegistryError::Protocol(format!("Failed to parse module payload: {}", err))
+        })?;
+
+        let target_version = if let Some(requested) = version {
+            module
+                .versions
+                .iter()
+                .find(|ver| ver.version == requested.to_string())
+                .ok_or_else(|| ModuleRegistryError::NotFound {
+                    module: format!("{} v{}", id, requested),
+                })?
+        } else {
+            module.versions.first().ok_or_else(|| {
+                ModuleRegistryError::Protocol(format!("Module {} has no published versions", id))
+            })?
         };
-        let path = self.manifest_path(id, &chosen_version);
-        self.read_manifest(&path).await
+
+        let parsed_version = Version::parse(&target_version.version).map_err(|err| {
+            ModuleRegistryError::Protocol(format!("Invalid version string: {}", err))
+        })?;
+
+        let fenrir_req = parse_fenrir_version_req(
+            target_version.fenrir_min_version.as_deref(),
+            target_version.fenrir_max_version.as_deref(),
+        );
+
+        let authors = module
+            .module
+            .author
+            .as_ref()
+            .map(|author| vec![author.clone()])
+            .unwrap_or_default();
+
+        let signature = ModuleSignatureDescriptor {
+            algorithm: SignatureAlgorithm::Ed25519,
+            key_id: module
+                .module
+                .author
+                .clone()
+                .unwrap_or_else(|| "module-registry".to_string()),
+            signature: target_version.signature.clone().unwrap_or_default(),
+        };
+
+        Ok(ModuleManifest {
+            id: module.module.id.clone(),
+            version: parsed_version,
+            title: Some(module.module.name.clone()),
+            description: module.module.description.clone(),
+            fenrir_version: fenrir_req,
+            authors,
+            license: None,
+            artifact: ModuleArtifactDescriptor {
+                download_url: target_version.download_url.clone(),
+                checksum: ModuleChecksum {
+                    algorithm: ChecksumAlgorithm::Sha256,
+                    hash: target_version.checksum.clone(),
+                },
+                content_type: Some(DEFAULT_CONTENT_TYPE.to_string()),
+                size_bytes: None,
+            },
+            signature,
+            tags: vec![],
+            published_at: (target_version.released_at >= 0)
+                .then_some(target_version.released_at as u64),
+        })
     }
 
     async fn download(
         &self,
         manifest: &ModuleManifest,
     ) -> Result<ModuleBundle, ModuleRegistryError> {
-        let artifact_path = self.resolve_artifact_path(manifest)?;
-        let archive = fs::read(&artifact_path).await.map_err(|err| {
-            ModuleRegistryError::Unavailable(format!(
-                "artifact {} not accessible: {err}",
-                artifact_path.display()
-            ))
-        })?;
-        let signature_bytes =
-            BASE64
-                .decode(manifest.signature.signature.trim())
-                .map_err(|err| {
-                    ModuleRegistryError::Protocol(format!(
-                        "signature for module {} invalid base64: {err}",
-                        manifest.id
-                    ))
-                })?;
-        let checksum_bytes =
-            hex::decode(manifest.artifact.checksum.hash.trim()).map_err(|err| {
-                ModuleRegistryError::Protocol(format!(
-                    "checksum for module {} invalid hex: {err}",
-                    manifest.id
-                ))
+        let download_url = self.resolve_url(&manifest.artifact.download_url)?;
+        let response = self
+            .client
+            .get(download_url)
+            .send()
+            .await
+            .map_err(|err| {
+                ModuleRegistryError::Unavailable(format!("Failed to download artifact: {}", err))
             })?;
+
+        if !response.status().is_success() {
+            return Err(ModuleRegistryError::Unavailable(format!(
+                "Download failed with status: {}",
+                response.status()
+            )));
+        }
+
+        let archive = response.bytes().await.map_err(|err| {
+            ModuleRegistryError::Unavailable(format!("Failed to read artifact: {}", err))
+        })?;
+
+        let expected_checksum = hex::decode(&manifest.artifact.checksum.hash).map_err(|err| {
+            ModuleRegistryError::Protocol(format!("Invalid checksum encoding: {}", err))
+        })?;
+
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(&archive);
+        let actual_checksum = hasher.finalize();
+
+        if actual_checksum.as_slice() != expected_checksum.as_slice() {
+            return Err(ModuleRegistryError::Protocol(
+                "Downloaded artifact checksum mismatch".to_string(),
+            ));
+        }
+
+        let signature_bytes = if manifest.signature.signature.is_empty() {
+            Vec::new()
+        } else {
+            BASE64
+                .decode(manifest.signature.signature.as_bytes())
+                .map_err(|err| {
+                    ModuleRegistryError::Protocol(format!("Invalid signature encoding: {}", err))
+                })?
+        };
+
         Ok(ModuleBundle {
             manifest: manifest.clone(),
-            archive,
+            archive: archive.to_vec(),
             signature: signature_bytes,
-            checksum: checksum_bytes,
+            checksum: expected_checksum,
         })
     }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum ModuleRegistryInitError {
-    #[error("module registry path {path} inaccessible: {source}")]
-    Io {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("module registry endpoint {0} is not supported")]
-    UnsupportedEndpoint(String),
+    #[error("Configuration error: {0}")]
+    InvalidConfig(String),
 }
 
-fn resolve_endpoint(endpoint: &str) -> Result<PathBuf, ModuleRegistryInitError> {
-    if let Some(path) = endpoint.strip_prefix("file://") {
-        Ok(PathBuf::from(path))
-    } else if endpoint.contains("://") {
-        Err(ModuleRegistryInitError::UnsupportedEndpoint(
-            endpoint.to_string(),
-        ))
-    } else {
-        Ok(PathBuf::from(endpoint))
+#[derive(Debug, Deserialize)]
+struct RegistryModule {
+    module: ModuleInfo,
+    versions: Vec<VersionInfo>,
+    latest_version: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModuleInfo {
+    id: String,
+    name: String,
+    description: Option<String>,
+    author: Option<String>,
+    #[allow(dead_code)]
+    github_url: Option<String>,
+    #[allow(dead_code)]
+    created_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct VersionInfo {
+    version: String,
+    fenrir_min_version: Option<String>,
+    fenrir_max_version: Option<String>,
+    download_url: String,
+    checksum: String,
+    #[allow(dead_code)]
+    checksum_algorithm: String,
+    signature: Option<String>,
+    #[allow(dead_code)]
+    release_notes: Option<String>,
+    released_at: i64,
+}
+
+fn parse_fenrir_version_req(min: Option<&str>, max: Option<&str>) -> Option<VersionReq> {
+    match (min, max) {
+        (Some(min_v), Some(max_v)) => {
+            let req_str = format!(">={}, <{}", min_v, max_v);
+            VersionReq::parse(&req_str).ok()
+        }
+        (Some(min_v), None) => VersionReq::parse(&format!(">={}", min_v)).ok(),
+        (None, Some(max_v)) => VersionReq::parse(&format!("<{}", max_v)).ok(),
+        (None, None) => None,
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct RegistryIndex {
-    #[serde(default)]
-    modules: Vec<RegistryIndexEntry>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RegistryIndexEntry {
-    id: String,
-    version: String,
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(default)]
-    tags: Option<Vec<String>>,
+fn resolve_secret(raw: &str) -> Result<String, ModuleRegistryInitError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(String::new());
+    }
+    if let Some(env) = trimmed.strip_prefix("env:") {
+        std::env::var(env.trim()).map_err(|_| {
+            ModuleRegistryInitError::InvalidConfig(format!(
+                "Environment variable {} referenced in modules.registry.auth_token is not set",
+                env.trim()
+            ))
+        })
+    } else {
+        Ok(trimmed.to_string())
+    }
 }

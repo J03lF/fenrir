@@ -151,11 +151,11 @@ pub struct ModulesSection {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ModuleRegistrySection {
-    pub endpoint: String,
-    #[serde(default = "default_registry_index")]
-    pub index_file: String,
+    pub url: String,
     #[serde(default)]
     pub allow_offline: bool,
+    #[serde(default)]
+    pub auth_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -173,10 +173,6 @@ pub struct ModuleTrustSection {
     pub allowed_signers: Vec<String>,
     #[serde(default)]
     pub keyring_path: Option<String>,
-}
-
-fn default_registry_index() -> String {
-    "index.json".to_string()
 }
 
 fn default_require_signature() -> bool {
@@ -386,9 +382,9 @@ pub fn validate(cfg: &AppConfig) -> Result<(), ConfigError> {
     validate_ssh_tls(&cfg.server.ssh)?;
     cfg.security.http.validate()?;
 
-    if cfg.modules.registry.endpoint.trim().is_empty() {
+    if cfg.modules.registry.url.trim().is_empty() {
         return Err(ConfigError::Invalid(
-            "modules.registry.endpoint must not be empty",
+            "modules.registry.url must not be empty",
         ));
     }
     if cfg.modules.storage.install_dir.trim().is_empty() {

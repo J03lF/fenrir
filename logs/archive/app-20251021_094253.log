@@ -1,0 +1,13 @@
+2025-10-21T09:42:23.403055Z  INFO main ThreadId(01) fenrir::infra::logging: dateilogging initialisiert log_path=logs/app.log
+2025-10-21T09:42:23.403148Z  INFO main ThreadId(01) fenrir::infra::logging: db-logdatei vorbereitet log_path=logs/db.log
+2025-10-21T09:42:23.403321Z  INFO main ThreadId(01) fenrir::boot: core services registered in registry
+2025-10-21T09:42:23.403593Z  INFO main ThreadId(01) fenrir::boot: scheduler service started
+2025-10-21T09:42:23.403877Z  INFO tokio-runtime-worker ThreadId(08) fenrir::services::scheduler: scheduler heartbeat loop started
+2025-10-21T09:42:23.407778Z  INFO                 main ThreadId(01) fenrir::boot: user and ticket services initialised
+2025-10-21T09:42:23.407795Z  INFO                 main ThreadId(01) fenrir::boot: boot complete app=fenrir version=0.1.4
+2025-10-21T09:42:23.407844Z  INFO                 main ThreadId(01) fenrir::boot: transport initialisation triggered
+2025-10-21T09:42:23.407867Z  INFO tokio-runtime-worker ThreadId(13) fenrir::boot: ssh server task spawned
+2025-10-21T09:42:23.408288Z  INFO tokio-runtime-worker ThreadId(13) fenrir::infra::ssh: starting SSH server host=127.0.0.1 port=2222
+2025-10-21T09:42:23.408486Z  INFO tokio-runtime-worker ThreadId(14) fenrir::infra::http: HTTP server task spawned
+2025-10-21T09:42:49.516274Z  INFO tokio-runtime-worker ThreadId(06) fenrir::services::scheduler: scheduler heartbeat stopped
+2025-10-21T09:42:49.516347Z  INFO tokio-runtime-worker ThreadId(06) fenrir::services::scheduler: scheduler service dropped and resources cleaned up

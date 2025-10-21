@@ -19,6 +19,9 @@ use crate::services::db_shell::DbShellSession;
 use crate::services::{AppServices, ServiceStatus};
 
 const HISTORY_MAX: usize = 200;
+const COMPLETION_DISPLAY_WIDTH: usize = 80;
+const COMPLETION_PADDING: usize = 2;
+const COMPLETION_MAX_VISIBLE: usize = 24;
 
 #[derive(Clone)]
 struct Handler {
@@ -229,7 +232,7 @@ impl Handler {
                     if !self.services.db_shell.is_enabled() {
                         let _ = writeln!(
                             &mut writer,
-                            "DB-Shell ist deaktiviert. Nutze 'services start db-shell'."
+                            "DB-Shell ist deaktiviert. Nutze 'start service db-shell'."
                         );
                         Handler::send_prompt(session, channel, self.current_prompt());
                         return true;
@@ -416,17 +419,20 @@ impl Handler {
         let remainder = self.buffer[self.cursor..].to_string();
         let prefix = self.buffer[start..self.cursor].to_string();
         let mut updated_buffer = false;
+        let mut suggestions_shown = false;
 
         let command_completion = start == 0
             && self.cursor == prefix.len()
             && !prefix.is_empty()
             && self.registry.get(prefix.as_str()).is_some();
+        let should_append_space = command_completion && remainder.is_empty();
 
-        if command_completion {
-            if !self.buffer.ends_with(' ') {
-                self.buffer.push(' ');
-                self.cursor = self.buffer.len();
-                updated_buffer = true;
+        if suggestions.len() > 1 && !suggestions_shown {
+            if let Some(first) = suggestions.first() {
+                if prefix.as_str() != first.as_str() {
+                    self.show_suggestions(&suggestions, channel, session);
+                    suggestions_shown = true;
+                }
             }
         }
 
@@ -443,15 +449,19 @@ impl Handler {
                         self.buffer.push_str(&remainder);
                         self.render_buffer(session, channel);
                         return;
+                    } else if !should_append_space {
+                        session.data(channel, CryptoVec::from_slice(b"\x07"));
+                        return;
                     }
+                } else if !should_append_space {
+                    session.data(channel, CryptoVec::from_slice(b"\x07"));
+                    return;
                 }
-                session.data(channel, CryptoVec::from_slice(b"\x07"));
-                return;
             }
             self.buffer = before.clone();
             self.buffer.push_str(completion);
             self.cursor = self.buffer.len();
-            if remainder.is_empty() {
+            if should_append_space {
                 self.buffer.push(' ');
                 self.cursor += 1;
             }
@@ -483,7 +493,7 @@ impl Handler {
             }
         }
 
-        if suggestions.len() > 1 {
+        if suggestions.len() > 1 && !updated_buffer && !suggestions_shown {
             self.show_suggestions(&suggestions, channel, session);
         }
 
@@ -497,21 +507,69 @@ impl Handler {
 
     fn show_suggestions(&self, suggestions: &[String], channel: ChannelId, session: &mut Session) {
         session.data(channel, CryptoVec::from_slice(b"\r\n"));
-        self.print_suggestions_raw(suggestions, channel, session);
+        self.print_suggestions_compact(suggestions, channel, session);
     }
 
-    fn print_suggestions_raw(
+    fn print_suggestions_compact(
         &self,
         suggestions: &[String],
         channel: ChannelId,
         session: &mut Session,
     ) {
-        let mut seen = HashSet::new();
-        let mut writer = SessionWriter::new(session, channel);
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut entries: Vec<&str> = Vec::new();
         for entry in suggestions {
+            let entry = entry.as_str();
             if seen.insert(entry) {
-                let _ = writeln!(&mut writer, "{entry}");
+                entries.push(entry);
             }
+        }
+
+        if entries.is_empty() {
+            return;
+        }
+
+        let total = entries.len();
+        let hidden = total.saturating_sub(COMPLETION_MAX_VISIBLE);
+        if hidden > 0 {
+            entries.truncate(COMPLETION_MAX_VISIBLE);
+        }
+
+        let max_len = entries.iter().map(|entry| entry.len()).max().unwrap_or(0);
+        let mut column_width = max_len.saturating_add(COMPLETION_PADDING);
+        if column_width == 0 {
+            column_width = COMPLETION_PADDING;
+        }
+        column_width = column_width.min(COMPLETION_DISPLAY_WIDTH);
+        let mut columns = COMPLETION_DISPLAY_WIDTH / column_width;
+        if columns == 0 {
+            columns = 1;
+        }
+        columns = columns.min(entries.len());
+
+        let mut writer = SessionWriter::new(session, channel);
+        for chunk in entries.chunks(columns) {
+            for (index, entry) in chunk.iter().enumerate() {
+                if columns == 1 || index + 1 == chunk.len() {
+                    let _ = write!(&mut writer, "{entry}");
+                } else {
+                    let _ = write!(
+                        &mut writer,
+                        "{entry:<width$}",
+                        entry = entry,
+                        width = column_width,
+                    );
+                }
+            }
+            let _ = writeln!(&mut writer);
+        }
+
+        if hidden > 0 {
+            let suffix = if hidden == 1 { "" } else { "s" };
+            let _ = writeln!(
+                &mut writer,
+                "... {hidden} more suggestion{suffix} hidden (press TAB to cycle)."
+            );
         }
     }
 

@@ -1,28 +1,42 @@
 use super::registry::CommandRegistry;
 
+pub mod assign;
 pub mod audit;
+pub mod create;
 pub mod db_shell;
 pub mod exit;
 pub mod help;
+pub mod lock;
 pub mod log;
 pub mod modules;
 pub mod services;
+pub mod show;
+pub mod status;
 pub mod ticket;
+pub mod unlock;
 pub mod user;
 
 pub fn register_builtins(registry: &mut CommandRegistry) {
     registry.register(help::command());
     registry.register(audit::command());
     registry.register(db_shell::command());
-    registry.register(services::command());
     registry.register(services::list_command());
     registry.register(services::start_command());
     registry.register(services::stop_command());
     registry.register(services::restart_command());
     registry.register(log::command());
-    registry.register(modules::command());
-    registry.register(user::command());
-    registry.register(ticket::command());
+    registry.register(modules::search_command());
+    registry.register(modules::install_command());
+    registry.register(modules::uninstall_command());
+    registry.register(modules::update_command());
+    registry.register(modules::check_command());
+    registry.register(modules::logs_command());
+    registry.register(assign::command());
+    registry.register(create::command());
+    registry.register(status::command());
+    registry.register(lock::command());
+    registry.register(unlock::command());
+    registry.register(show::command());
     registry.register(exit::command());
 }
 

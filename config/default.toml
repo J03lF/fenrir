@@ -69,6 +69,12 @@ url = "http://localhost:3001"
 allow_offline = true
 auth_token = "env:FENRIR_REGISTRY_TOKEN"
 
+[modules.registry.tls]
+# ca_cert_path = "config/certs/registry-ca.pem"
+# client_cert_path = "config/certs/fenrir-client.crt"
+# client_key_path = "config/certs/fenrir-client.key"
+accept_invalid_certs = false
+
 [modules.storage]
 install_dir = "/Users/jfurocket/Documents/personal/modules"
 cache_dir = "/Users/jfurocket/Documents/personal/modules/.cache"

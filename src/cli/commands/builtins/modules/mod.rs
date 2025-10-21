@@ -23,17 +23,17 @@ use crate::services::ModuleService;
 use crate::utils;
 
 const DETAILS: &[&str] = &[
-    "modules list                     – zeigt alle Module mit Runtime-Status",
-    "modules search [pattern]         – durchsucht Registry",
-    "modules info <name[@version]>    – zeigt Manifest-Informationen",
-    "modules install <name[@version]> – installiert/aktualisiert Modul",
-    "modules uninstall <name>         – entfernt ein installiertes Modul",
-    "modules update [name]            – aktualisiert Modul(e)",
-    "modules check-updates            – prüft verfügbare Updates",
-    "modules start <name>             – startet ein installiertes Modul",
-    "modules stop <name>              – stoppt ein laufendes Modul",
-    "modules restart <name>           – startet ein laufendes Modul neu",
-    "modules logs <name> [--tail N]   – zeigt Logs eines laufenden Moduls",
+    "list modules                    – zeigt alle Module mit Runtime-Status",
+    "search modules [pattern]        – durchsucht Registry",
+    "show module <name[@version]>    – zeigt Manifest-Informationen",
+    "install module <name[@version]> – installiert/aktualisiert Modul",
+    "uninstall module <name>         – entfernt ein installiertes Modul",
+    "update module [name]            – aktualisiert Modul(e)",
+    "check modules                   – prüft verfügbare Updates",
+    "start module <name>             – startet ein installiertes Modul",
+    "stop module <name>              – stoppt ein laufendes Modul",
+    "restart module <name>           – startet ein laufendes Modul neu",
+    "logs module <name> [--tail N]   – zeigt Logs eines laufenden Moduls",
 ];
 
 const MODULE_ALIASES: &[&str] = &["module"];
@@ -58,6 +58,110 @@ const MODULE_LOG_TAIL_ARGUMENT: CommandArgument = CommandArgument {
     variadic: false,
     completion: CompletionKind::Static(&["--tail"]),
 };
+
+const MODULE_RESOURCE_OPTIONS: &[&str] = &["module", "modules"];
+const MODULE_RESOURCE_ARGUMENT: CommandArgument = CommandArgument::required("resource")
+    .with_completion(CompletionKind::Static(MODULE_RESOURCE_OPTIONS));
+const MODULE_PATTERN_ARGUMENT: CommandArgument = CommandArgument::optional("pattern");
+
+const SEARCH_ARGUMENTS: &[CommandArgument] = &[MODULE_RESOURCE_ARGUMENT, MODULE_PATTERN_ARGUMENT];
+const SEARCH_SHAPE: CommandShape = CommandShape::new("search", &[], SEARCH_ARGUMENTS, &[]);
+
+const INSTALL_ARGUMENTS: &[CommandArgument] = &[MODULE_RESOURCE_ARGUMENT, MODULE_ID_ARGUMENT];
+const INSTALL_SHAPE: CommandShape =
+    CommandShape::new("install", &["import"], INSTALL_ARGUMENTS, &[]);
+
+const UNINSTALL_ARGUMENTS: &[CommandArgument] = &[MODULE_RESOURCE_ARGUMENT, MODULE_ID_ARGUMENT];
+const UNINSTALL_SHAPE: CommandShape =
+    CommandShape::new("uninstall", &["remove"], UNINSTALL_ARGUMENTS, &[]);
+
+const UPDATE_ARGUMENTS: &[CommandArgument] =
+    &[MODULE_RESOURCE_ARGUMENT, MODULE_OPTIONAL_ID_ARGUMENT];
+const UPDATE_SHAPE: CommandShape = CommandShape::new("update", &["upgrade"], UPDATE_ARGUMENTS, &[]);
+
+const CHECK_ARGUMENTS: &[CommandArgument] = &[MODULE_RESOURCE_ARGUMENT];
+const CHECK_SHAPE: CommandShape = CommandShape::new("check", &[], CHECK_ARGUMENTS, &[]);
+
+const LOGS_ARGUMENTS: &[CommandArgument] = &[
+    MODULE_RESOURCE_ARGUMENT,
+    MODULE_ID_ARGUMENT,
+    MODULE_LOG_TAIL_ARGUMENT,
+];
+const LOGS_SHAPE: CommandShape = CommandShape::new("logs", &["tail"], LOGS_ARGUMENTS, &[]);
+
+const SEARCH_DETAILS: &[&str] = &["search modules [pattern] – durchsucht die Modul-Registry"];
+const INSTALL_DETAILS: &[&str] =
+    &["install module <name[@version]> – installiert oder aktualisiert"];
+const UNINSTALL_DETAILS: &[&str] = &["uninstall module <name> – entfernt ein Modul"];
+const UPDATE_DETAILS: &[&str] = &["update module [name] – aktualisiert ein Modul oder alle Module"];
+const CHECK_DETAILS: &[&str] = &["check modules – prüft verfügbare Modul-Updates"];
+const LOGS_DETAILS: &[&str] = &["logs module <name> [--tail N] – zeigt Laufzeit-Logs"];
+
+pub fn search_command() -> CommandEntry {
+    CommandEntry::with_shape(
+        "search",
+        "Durchsucht signierte Module in der Registry",
+        "search modules [pattern]",
+        SEARCH_DETAILS,
+        handle_search_command,
+        SEARCH_SHAPE,
+    )
+}
+
+pub fn install_command() -> CommandEntry {
+    CommandEntry::with_shape(
+        "install",
+        "Installiert oder aktualisiert Module",
+        "install module <name[@version]>",
+        INSTALL_DETAILS,
+        handle_install_command,
+        INSTALL_SHAPE,
+    )
+}
+
+pub fn uninstall_command() -> CommandEntry {
+    CommandEntry::with_shape(
+        "uninstall",
+        "Entfernt installierte Module",
+        "uninstall module <name>",
+        UNINSTALL_DETAILS,
+        handle_uninstall_command,
+        UNINSTALL_SHAPE,
+    )
+}
+
+pub fn update_command() -> CommandEntry {
+    CommandEntry::with_shape(
+        "update",
+        "Aktualisiert Module auf die neueste Version",
+        "update module [name]",
+        UPDATE_DETAILS,
+        handle_update_command,
+        UPDATE_SHAPE,
+    )
+}
+
+pub fn check_command() -> CommandEntry {
+    CommandEntry::with_shape(
+        "check",
+        "Prüft verfügbare Modul-Updates",
+        "check modules",
+        CHECK_DETAILS,
+        handle_check_command,
+        CHECK_SHAPE,
+    )
+}
+
+pub fn logs_command() -> CommandEntry {
+    CommandEntry::with_shape(
+        "logs",
+        "Zeigt Laufzeit-Logs eines Moduls",
+        "logs module <name> [--tail N]",
+        LOGS_DETAILS,
+        handle_logs_command,
+        LOGS_SHAPE,
+    )
+}
 
 const MODULE_SUBCOMMANDS: &[CommandSubcommand] = &[
     CommandSubcommand::new("list", &[], &[], "Installierte Module auflisten"),
@@ -125,7 +229,10 @@ pub(crate) fn resolve_module_subcommand(alias: &str) -> Option<&'static str> {
         .map(|entry| entry.name)
 }
 
-fn complete_module_ids(deps: &CliDependencies, _ctx: &CompletionContext<'_>) -> Vec<String> {
+pub(crate) fn complete_module_ids(
+    deps: &CliDependencies,
+    _ctx: &CompletionContext<'_>,
+) -> Vec<String> {
     let Some(service) = deps.services.module_service() else {
         return Vec::new();
     };
@@ -221,6 +328,122 @@ where
         let service = Arc::clone(&service);
         factory(service)
     })
+}
+
+fn module_tail<'a>(args: &'a [&'a str], out: &mut dyn Write, usage: &str) -> Option<&'a [&'a str]> {
+    let Some((resource, tail)) = args.split_first() else {
+        let _ = writeln!(out, "Nutzung: {usage}");
+        return None;
+    };
+
+    if resource.eq_ignore_ascii_case("module") || resource.eq_ignore_ascii_case("modules") {
+        Some(tail)
+    } else {
+        let _ = writeln!(out, "Unbekannte Ressource: {resource}");
+        let _ = writeln!(out, "Nutzung: {usage}");
+        None
+    }
+}
+
+pub(crate) fn run_module_command(
+    deps: &CliDependencies,
+    action: &str,
+    args: &[&str],
+    out: &mut dyn Write,
+) -> io::Result<()> {
+    let Some(service) = deps.services.module_service() else {
+        writeln!(
+            out,
+            "Modul-Service nicht verfügbar – bitte Boot-Logs prüfen."
+        )?;
+        return Ok(());
+    };
+    let ctx = ModulesCommandCtx::new(deps, Arc::clone(&service));
+    dispatch_module(action, &ctx, out, args)
+}
+
+fn handle_search_command(
+    deps: &CliDependencies,
+    args: &[&str],
+    _registry: &CommandRegistry,
+    out: &mut dyn Write,
+    _env: ShellEnvironment,
+) -> io::Result<CommandOutcome> {
+    let Some(tail) = module_tail(args, out, "search modules [pattern]") else {
+        return Ok(CommandOutcome::Continue);
+    };
+    run_module_command(deps, "search", tail, out)?;
+    Ok(CommandOutcome::Continue)
+}
+
+fn handle_install_command(
+    deps: &CliDependencies,
+    args: &[&str],
+    _registry: &CommandRegistry,
+    out: &mut dyn Write,
+    _env: ShellEnvironment,
+) -> io::Result<CommandOutcome> {
+    let Some(tail) = module_tail(args, out, "install module <name[@version]>") else {
+        return Ok(CommandOutcome::Continue);
+    };
+    run_module_command(deps, "install", tail, out)?;
+    Ok(CommandOutcome::Continue)
+}
+
+fn handle_uninstall_command(
+    deps: &CliDependencies,
+    args: &[&str],
+    _registry: &CommandRegistry,
+    out: &mut dyn Write,
+    _env: ShellEnvironment,
+) -> io::Result<CommandOutcome> {
+    let Some(tail) = module_tail(args, out, "uninstall module <name>") else {
+        return Ok(CommandOutcome::Continue);
+    };
+    run_module_command(deps, "uninstall", tail, out)?;
+    Ok(CommandOutcome::Continue)
+}
+
+fn handle_update_command(
+    deps: &CliDependencies,
+    args: &[&str],
+    _registry: &CommandRegistry,
+    out: &mut dyn Write,
+    _env: ShellEnvironment,
+) -> io::Result<CommandOutcome> {
+    let Some(tail) = module_tail(args, out, "update module [name]") else {
+        return Ok(CommandOutcome::Continue);
+    };
+    run_module_command(deps, "update", tail, out)?;
+    Ok(CommandOutcome::Continue)
+}
+
+fn handle_check_command(
+    deps: &CliDependencies,
+    args: &[&str],
+    _registry: &CommandRegistry,
+    out: &mut dyn Write,
+    _env: ShellEnvironment,
+) -> io::Result<CommandOutcome> {
+    let Some(tail) = module_tail(args, out, "check modules") else {
+        return Ok(CommandOutcome::Continue);
+    };
+    run_module_command(deps, "check-updates", tail, out)?;
+    Ok(CommandOutcome::Continue)
+}
+
+fn handle_logs_command(
+    deps: &CliDependencies,
+    args: &[&str],
+    _registry: &CommandRegistry,
+    out: &mut dyn Write,
+    _env: ShellEnvironment,
+) -> io::Result<CommandOutcome> {
+    let Some(tail) = module_tail(args, out, "logs module <name> [--tail N]") else {
+        return Ok(CommandOutcome::Continue);
+    };
+    run_module_command(deps, "logs", tail, out)?;
+    Ok(CommandOutcome::Continue)
 }
 
 struct ModulesCommandCtx<'a> {
@@ -382,7 +605,7 @@ fn dispatch_module(
 
 fn handle_list(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> io::Result<()> {
     if !args.is_empty() {
-        writeln!(out, "'modules list' erwartet keine weiteren Argumente.")?;
+        writeln!(out, "'list modules' erwartet keine weiteren Argumente.")?;
     }
 
     let modules = match ctx.module_call(|service| async move { service.list_installed().await }) {
@@ -507,7 +730,7 @@ fn handle_search(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) ->
 
 fn handle_info(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> io::Result<()> {
     let Some(target) = args.first() else {
-        writeln!(out, "Kommando: modules info <name[@version]>")?;
+        writeln!(out, "Kommando: show module <name[@version]>")?;
         return Ok(());
     };
 
@@ -539,7 +762,7 @@ fn handle_info(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> i
 
 fn handle_install(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> io::Result<()> {
     if args.is_empty() {
-        writeln!(out, "Kommando: modules install <name[@version]>")?;
+        writeln!(out, "Kommando: install module <name[@version]>")?;
         return Ok(());
     }
 
@@ -611,7 +834,7 @@ fn handle_install(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -
 
 fn handle_uninstall(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> io::Result<()> {
     if args.len() != 1 {
-        writeln!(out, "Kommando: modules uninstall <name>")?;
+        writeln!(out, "Kommando: uninstall module <name>")?;
         return Ok(());
     }
 
@@ -719,7 +942,7 @@ fn handle_check_updates(
     args: &[&str],
 ) -> io::Result<()> {
     if !args.is_empty() {
-        writeln!(out, "'modules check-updates' erwartet keine Argumente.")?;
+        writeln!(out, "'check modules' erwartet keine Argumente.")?;
     }
 
     let fenrir_version = ctx.deps.config.app.version.clone();
@@ -777,7 +1000,7 @@ fn handle_check_updates(
         writeln!(out)?;
         writeln!(
             out,
-            "💡 {} Update(s) verfügbar. Nutze 'modules update' zum Aktualisieren.",
+            "💡 {} Update(s) verfügbar. Nutze 'update module' zum Aktualisieren.",
             available_updates
         )?;
     }
@@ -787,7 +1010,7 @@ fn handle_check_updates(
 
 fn handle_start(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> io::Result<()> {
     if args.len() != 1 {
-        writeln!(out, "Kommando: modules start <name>")?;
+        writeln!(out, "Kommando: start module <name>")?;
         return Ok(());
     }
 
@@ -850,7 +1073,7 @@ fn handle_start(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> 
 
 fn handle_stop(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> io::Result<()> {
     if args.len() != 1 {
-        writeln!(out, "Kommando: modules stop <name>")?;
+        writeln!(out, "Kommando: stop module <name>")?;
         return Ok(());
     }
 
@@ -892,7 +1115,7 @@ fn handle_stop(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> i
 
 fn handle_restart(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> io::Result<()> {
     if args.len() != 1 {
-        writeln!(out, "Kommando: modules restart <name>")?;
+        writeln!(out, "Kommando: restart module <name>")?;
         return Ok(());
     }
 
@@ -945,7 +1168,7 @@ fn handle_restart(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -
 
 fn handle_logs(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> io::Result<()> {
     if args.is_empty() {
-        writeln!(out, "Kommando: modules logs <name> [--tail N]")?;
+        writeln!(out, "Kommando: logs module <name> [--tail N]")?;
         return Ok(());
     }
 

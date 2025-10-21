@@ -2,10 +2,11 @@ use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
-use reqwest::Url;
+use reqwest::{Certificate, Identity, Url};
 use semver::{Version, VersionReq};
 use serde::Deserialize;
 use sha2::Digest;
+use std::fs;
 use std::time::Duration;
 
 use crate::config::ModuleRegistrySection;
@@ -48,9 +49,79 @@ impl HttpModuleRegistry {
             }
         }
 
-        let client = reqwest::Client::builder()
+        let mut client_builder = reqwest::Client::builder()
             .default_headers(headers)
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(30));
+
+        if let Some(ca_path) = resolve_optional_path(
+            &config.tls.ca_cert_path,
+            "modules.registry.tls.ca_cert_path",
+        )? {
+            let pem = fs::read(&ca_path).map_err(|err| {
+                ModuleRegistryInitError::InvalidConfig(format!(
+                    "Failed to read {}: {}",
+                    ca_path, err
+                ))
+            })?;
+            let cert = Certificate::from_pem(&pem).map_err(|err| {
+                ModuleRegistryInitError::InvalidConfig(format!(
+                    "modules.registry.tls.ca_cert_path is not valid PEM: {}",
+                    err
+                ))
+            })?;
+            client_builder = client_builder.add_root_certificate(cert);
+        }
+
+        let client_cert = resolve_optional_path(
+            &config.tls.client_cert_path,
+            "modules.registry.tls.client_cert_path",
+        )?;
+        let client_key = resolve_optional_path(
+            &config.tls.client_key_path,
+            "modules.registry.tls.client_key_path",
+        )?;
+
+        if client_cert.is_some() ^ client_key.is_some() {
+            return Err(ModuleRegistryInitError::InvalidConfig(
+                "modules.registry.tls.client_cert_path and client_key_path must be provided together"
+                    .to_string(),
+            ));
+        }
+
+        if let (Some(cert_path), Some(key_path)) = (client_cert.as_ref(), client_key.as_ref()) {
+            let cert_pem = fs::read(cert_path).map_err(|err| {
+                ModuleRegistryInitError::InvalidConfig(format!(
+                    "Failed to read client certificate {}: {}",
+                    cert_path, err
+                ))
+            })?;
+            let key_pem = fs::read(key_path).map_err(|err| {
+                ModuleRegistryInitError::InvalidConfig(format!(
+                    "Failed to read client key {}: {}",
+                    key_path, err
+                ))
+            })?;
+            let mut identity_pem = Vec::with_capacity(cert_pem.len() + key_pem.len() + 1);
+            identity_pem.extend_from_slice(&cert_pem);
+            if !identity_pem.ends_with(b"\n") {
+                identity_pem.push(b'\n');
+            }
+            identity_pem.extend_from_slice(&key_pem);
+
+            let identity = Identity::from_pem(&identity_pem).map_err(|err| {
+                ModuleRegistryInitError::InvalidConfig(format!(
+                    "modules.registry.tls.client_cert_path/client_key_path could not be combined into a valid identity: {}",
+                    err
+                ))
+            })?;
+            client_builder = client_builder.identity(identity);
+        }
+
+        if config.tls.accept_invalid_certs {
+            client_builder = client_builder.danger_accept_invalid_certs(true);
+        }
+
+        let client = client_builder
             .build()
             .map_err(|err| ModuleRegistryInitError::InvalidConfig(err.to_string()))?;
 
@@ -342,5 +413,24 @@ fn resolve_secret(raw: &str) -> Result<String, ModuleRegistryInitError> {
         })
     } else {
         Ok(trimmed.to_string())
+    }
+}
+
+fn resolve_optional_path(
+    raw: &Option<String>,
+    field: &str,
+) -> Result<Option<String>, ModuleRegistryInitError> {
+    if let Some(value) = raw {
+        let resolved = resolve_secret(value)?;
+        let trimmed = resolved.trim();
+        if trimmed.is_empty() {
+            return Err(ModuleRegistryInitError::InvalidConfig(format!(
+                "{} must not resolve to an empty value",
+                field
+            )));
+        }
+        Ok(Some(trimmed.to_string()))
+    } else {
+        Ok(None)
     }
 }

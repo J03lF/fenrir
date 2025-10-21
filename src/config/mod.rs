@@ -156,6 +156,8 @@ pub struct ModuleRegistrySection {
     pub allow_offline: bool,
     #[serde(default)]
     pub auth_token: Option<String>,
+    #[serde(default)]
+    pub tls: ModuleRegistryTlsSection,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -163,6 +165,15 @@ pub struct ModuleStorageSection {
     pub install_dir: String,
     #[serde(default)]
     pub cache_dir: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ModuleRegistryTlsSection {
+    pub ca_cert_path: Option<String>,
+    pub client_cert_path: Option<String>,
+    pub client_key_path: Option<String>,
+    #[serde(default)]
+    pub accept_invalid_certs: bool,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -387,6 +398,7 @@ pub fn validate(cfg: &AppConfig) -> Result<(), ConfigError> {
             "modules.registry.url must not be empty",
         ));
     }
+    validate_module_registry_tls(&cfg.modules.registry)?;
     if cfg.modules.storage.install_dir.trim().is_empty() {
         return Err(ConfigError::Invalid(
             "modules.storage.install_dir must not be empty",
@@ -488,6 +500,36 @@ fn validate_ssh_tls(ssh: &SshConfig) -> Result<(), ConfigError> {
             "server.ssh.tls.allowed_ciphers darf keine leeren Einträge enthalten",
         ));
     }
+    Ok(())
+}
+
+fn validate_module_registry_tls(cfg: &ModuleRegistrySection) -> Result<(), ConfigError> {
+    let tls = &cfg.tls;
+
+    if let Some(ca) = tls.ca_cert_path.as_ref() {
+        if ca.trim().is_empty() {
+            return Err(ConfigError::Invalid(
+                "modules.registry.tls.ca_cert_path darf nicht leer sein",
+            ));
+        }
+    }
+
+    match (tls.client_cert_path.as_ref(), tls.client_key_path.as_ref()) {
+        (Some(cert), Some(key)) => {
+            if cert.trim().is_empty() || key.trim().is_empty() {
+                return Err(ConfigError::Invalid(
+                    "modules.registry.tls.client_cert_path und client_key_path dürfen nicht leer sein",
+                ));
+            }
+        }
+        (None, None) => {}
+        _ => {
+            return Err(ConfigError::Invalid(
+                "modules.registry.tls.client_cert_path und client_key_path müssen gemeinsam gesetzt werden",
+            ));
+        }
+    }
+
     Ok(())
 }
 

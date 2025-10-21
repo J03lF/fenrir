@@ -67,7 +67,7 @@ async fn user_and_ticket_commands_work_end_to_end() {
     let email = format!("{}@example.com", username);
 
     let user_args = [
-        "create",
+        "user",
         "--username",
         username.as_str(),
         "--email",
@@ -75,12 +75,12 @@ async fn user_and_ticket_commands_work_end_to_end() {
         "--role",
         "admin",
     ];
-    let (outcome, output) = run_command(&registry, &deps, "user", &user_args);
+    let (outcome, output) = run_command(&registry, &deps, "create", &user_args);
     assert!(matches!(outcome, CommandOutcome::Continue));
     assert!(output.contains("Benutzer"), "unexpected output: {output}");
 
-    let list_args = ["list", "--search", username.as_str(), "--include-locked"];
-    let (_, list_output) = run_command(&registry, &deps, "user", &list_args);
+    let list_args = ["users", "--search", username.as_str(), "--include-locked"];
+    let (_, list_output) = run_command(&registry, &deps, "list", &list_args);
     assert!(
         list_output.contains(&username),
         "user not listed: {list_output}"
@@ -92,7 +92,7 @@ async fn user_and_ticket_commands_work_end_to_end() {
 
     let title = format!("Ticket {}", Uuid::new_v4().simple());
     let ticket_args = [
-        "create",
+        "ticket",
         "--title",
         title.as_str(),
         "--description",
@@ -104,7 +104,7 @@ async fn user_and_ticket_commands_work_end_to_end() {
         "--tag",
         "cli",
     ];
-    let (ticket_outcome, ticket_output) = run_command(&registry, &deps, "ticket", &ticket_args);
+    let (ticket_outcome, ticket_output) = run_command(&registry, &deps, "create", &ticket_args);
     assert!(matches!(ticket_outcome, CommandOutcome::Continue));
     assert!(
         ticket_output.contains("Ticket"),
@@ -115,8 +115,8 @@ async fn user_and_ticket_commands_work_end_to_end() {
         .find_map(|part| Uuid::parse_str(part).ok())
         .expect("ticket id not found");
 
-    let list_ticket_args = ["list", "--reporter", username.as_str()];
-    let (_, list_ticket_output) = run_command(&registry, &deps, "ticket", &list_ticket_args);
+    let list_ticket_args = ["tickets", "--reporter", username.as_str()];
+    let (_, list_ticket_output) = run_command(&registry, &deps, "list", &list_ticket_args);
     assert!(
         list_ticket_output.contains(&ticket_id.to_string()),
         "ticket id not listed: {list_ticket_output}"
@@ -126,28 +126,24 @@ async fn user_and_ticket_commands_work_end_to_end() {
         "reporter missing in ticket list: {list_ticket_output}"
     );
 
-    let (_, modules_output) = run_command(&registry, &deps, "modules", &[]);
+    let (_, services_output) = run_command(&registry, &deps, "list", &["services"]);
     assert!(
-        modules_output.contains("User Service"),
-        "modules output missing user service: {modules_output}"
+        services_output.contains("User Service"),
+        "services output missing user service: {services_output}"
     );
     assert!(
-        modules_output.contains("Ticket Service"),
-        "modules output missing ticket service: {modules_output}"
+        services_output.contains("Ticket Service"),
+        "services output missing ticket service: {services_output}"
     );
 }
 
 #[test]
-fn modules_command_exposes_subcommands_for_completion() {
+fn module_commands_are_registered() {
     let registry = builtins::build_registry();
-    let shapes = registry.shapes();
-    let modules_shape = shapes
-        .into_iter()
-        .find(|shape| shape.name == "modules")
-        .expect("modules command shape");
-
-    assert!(
-        !modules_shape.subcommands.is_empty(),
-        "modules shape must expose subcommands for completion",
-    );
+    for name in ["search", "install", "uninstall", "update", "check", "logs"] {
+        assert!(
+            registry.get(name).is_some(),
+            "command '{name}' should be registered"
+        );
+    }
 }

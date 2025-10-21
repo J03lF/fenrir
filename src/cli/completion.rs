@@ -141,34 +141,7 @@ impl ContextualCompleter {
             "completion request"
         );
         if state.tokens.is_empty() {
-            if !state.prefix.is_empty() {
-                if let Some(shape) = self.find_shape(state.prefix) {
-                    if !shape.subcommands.is_empty() {
-                        debug!(
-                            target = "cli::completion",
-                            command = shape.name,
-                            "direct match for prefix without tokens"
-                        );
-                        return self.subcommand_matches(shape, "");
-                    }
-                }
-            }
-
-            let matches = self.command_matches(state.prefix);
-            if matches.len() == 1 {
-                if let Some(shape) = self.find_shape(matches[0].as_str()) {
-                    if !shape.subcommands.is_empty() {
-                        debug!(
-                            target = "cli::completion",
-                            command = shape.name,
-                            "single global match with subcommands"
-                        );
-                        return self.subcommand_matches(shape, "");
-                    }
-                }
-            }
-
-            return matches;
+            return self.command_matches(state.prefix);
         }
 
         let command_token = state.tokens[0];
@@ -359,18 +332,25 @@ impl ContextualCompleter {
         }
 
         let mut guard = self.cycle_state.lock().expect("cycle state mutex poisoned");
-        let suggestions = suggestions;
+        let mut suggestions = suggestions;
 
         if let Some(existing) = guard.as_mut() {
             if existing.matches_base(state) {
                 if existing.suggestions != suggestions {
                     existing.suggestions = suggestions.clone();
                     existing.index = 0;
-                    return vec![existing.current().to_string()];
                 }
+                return vec![existing.current().to_string()];
             }
 
             if existing.matches_current(state) {
+                if state.prefix == existing.current() && existing.suggestions != suggestions {
+                    suggestions = existing.suggestions.clone();
+                } else if existing.suggestions != suggestions {
+                    existing.suggestions = suggestions.clone();
+                    existing.index = 0;
+                }
+
                 if !existing.suggestions.is_empty() {
                     existing.index = (existing.index + 1) % existing.suggestions.len();
                     return vec![existing.current().to_string()];
@@ -378,7 +358,10 @@ impl ContextualCompleter {
             }
         }
 
-        let cycle = CycleState::new(state, suggestions);
+        let mut cycle = CycleState::new(state, suggestions);
+        if cycle.suggestions.len() > 1 && state.prefix == cycle.current() {
+            cycle.index = (cycle.index + 1) % cycle.suggestions.len();
+        }
         let first = cycle.current().to_string();
         *guard = Some(cycle);
         vec![first]
@@ -540,8 +523,9 @@ mod tests {
     use crate::config::{
         AppConfig, AppSection, AuditSection, CliSection, DbConnectionSettings, DbConnections,
         DbPoolSettings, DbSection, HttpConfig, HttpSecuritySection, HttpTlsConfig, JwtConfig,
-        KdfConfig, ModuleRegistrySection, ModuleStorageSection, ModuleTrustSection, ModulesSection,
-        SecuritySection, ServerSection, SshConfig, SshTlsConfig, TelemetrySection,
+        KdfConfig, ModuleRegistrySection, ModuleRegistryTlsSection, ModuleStorageSection,
+        ModuleTrustSection, ModulesSection, SecuritySection, ServerSection, SshConfig,
+        SshTlsConfig, TelemetrySection,
     };
     use crate::domain::db::{
         DbAdminPort, DbEngine, DbExecutionResult, DbResult, DbTable, DbTableSchema,
@@ -645,6 +629,7 @@ mod tests {
                     url: "http://localhost:3001".to_string(),
                     allow_offline: true,
                     auth_token: None,
+                    tls: ModuleRegistryTlsSection::default(),
                 },
                 storage: ModuleStorageSection {
                     install_dir: "tmp/test-modules".to_string(),
@@ -685,50 +670,104 @@ mod tests {
 
     #[test]
     fn parse_state_after_command_space_identifies_subcommand_slot() {
-        let line = "modules ";
+        let line = "search ";
         let state = parse_state(line, line.len());
 
-        assert_eq!(state.tokens, vec!["modules"]);
+        assert_eq!(state.tokens, vec!["search"]);
         assert_eq!(state.prefix, "");
         assert_eq!(state.active_index, 1);
     }
 
     #[test]
     fn parse_state_without_trailing_space_keeps_prefix() {
-        let line = "modules lo";
+        let line = "search mo";
         let state = parse_state(line, line.len());
 
-        assert_eq!(state.tokens, vec!["modules"]);
-        assert_eq!(state.prefix, "lo");
+        assert_eq!(state.tokens, vec!["search"]);
+        assert_eq!(state.prefix, "mo");
         assert_eq!(state.token_start, line.len() - 2);
     }
 
     #[test]
-    fn suggestions_for_modules_command_prefer_subcommands() {
+    fn suggestions_for_search_command_stays_at_root_until_space() {
         let dependencies = test_dependencies();
         let registry = builtins::build_registry();
         let shapes = registry.shapes();
         let completer = ContextualCompleter::new(shapes, dependencies, ShellEnvironment::Cli);
 
-        let modules_entry = registry.get("modules").expect("modules command registered");
-        let mut expected = std::collections::BTreeSet::new();
-        for sub in modules_entry.shape.subcommands {
-            expected.insert(sub.name.to_string());
-            for alias in sub.aliases {
-                expected.insert((*alias).to_string());
-            }
-        }
+        let (_, suggestions) = completer.suggestions_for("search", "search".len());
+        assert_eq!(suggestions, vec!["search".to_string()]);
+    }
 
-        let (_, suggestions) = completer.suggestions_for("modules", "modules".len());
+    #[test]
+    fn search_command_suggests_module_resource() {
+        let dependencies = test_dependencies();
+        let registry = builtins::build_registry();
+        let shapes = registry.shapes();
+        let completer = ContextualCompleter::new(shapes, dependencies, ShellEnvironment::Cli);
+
+        let (_, suggestions) = completer.suggestions_for("search ", "search ".len());
+        assert_eq!(suggestions, vec!["modules".to_string()]);
+    }
+
+    #[test]
+    fn cycles_command_alias_before_subcommands() {
+        let dependencies = test_dependencies();
+        let registry = builtins::build_registry();
+        let shapes = registry.shapes();
+        let completer = ContextualCompleter::new(shapes, dependencies, ShellEnvironment::Cli);
+
+        let (_, suggestions) = completer.suggestions_for("import", "import".len());
         assert!(
-            !suggestions.is_empty(),
-            "expected suggestions for modules command"
+            suggestions.contains(&"import".to_string()),
+            "expected alias to be suggested"
         );
-        for suggestion in &suggestions {
-            assert!(
-                expected.contains(suggestion),
-                "unexpected suggestion '{suggestion}' for modules command",
-            );
-        }
+        assert!(
+            suggestions.contains(&"install".to_string()),
+            "expected canonical command to be suggested"
+        );
+
+        let (_, cycle) = completer.cycle_suggestions("import", "import".len());
+        assert_eq!(
+            cycle.first().map(|s| s.as_str()),
+            Some("install"),
+            "expected cycling to advance to canonical command before subcommands"
+        );
+    }
+
+    #[test]
+    fn cycles_short_prefix_through_commands_before_subcommands() {
+        let dependencies = test_dependencies();
+        let registry = builtins::build_registry();
+        let shapes = registry.shapes();
+        let completer = ContextualCompleter::new(shapes, dependencies, ShellEnvironment::Cli);
+
+        let mut line = "s".to_string();
+        let mut pos = line.len();
+
+        let (_, first) = completer.cycle_suggestions(&line, pos);
+        let next = first.first().expect("first suggestion").to_string();
+        assert_eq!(next, "services");
+
+        line = next;
+        pos = line.len();
+
+        let (_, second) = completer.cycle_suggestions(&line, pos);
+        let next = second.first().expect("second suggestion").to_string();
+        assert_eq!(next, "service");
+
+        line = next;
+        pos = line.len();
+
+        let (_, third) = completer.cycle_suggestions(&line, pos);
+        let next = third.first().expect("third suggestion").to_string();
+        assert_eq!(next, "svc");
+
+        line = next;
+        pos = line.len();
+
+        let (_, fourth) = completer.cycle_suggestions(&line, pos);
+        let next = fourth.first().expect("fourth suggestion").to_string();
+        assert_eq!(next, "start");
     }
 }

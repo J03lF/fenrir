@@ -45,7 +45,7 @@ fn handle(
     if !service.is_enabled() {
         writeln!(
             out,
-            "DB-Shell ist derzeit deaktiviert. Nutze 'services start db-shell', um sie wieder zu aktivieren."
+            "DB-Shell ist derzeit deaktiviert. Nutze 'start service db-shell', um sie wieder zu aktivieren."
         )?;
         return Ok(CommandOutcome::Continue);
     }

@@ -1,7 +1,8 @@
+use super::{modules, ticket, user};
 use crate::audit::{AuditActor, AuditEvent, AuditMetadata, AuditOutcome};
 use crate::cli::commands::registry::{
     CliDependencies, CommandArgument, CommandEntry, CommandOutcome, CommandRegistry, CommandShape,
-    CommandSubcommand, CompletionContext, CompletionKind, ShellEnvironment,
+    CompletionContext, CompletionKind, ShellEnvironment,
 };
 use crate::cli::commands::table::Table;
 use crate::services::scheduler::ScheduledJobSnapshot;
@@ -13,9 +14,6 @@ use std::io::{self, Write};
 use tracing::warn;
 
 const TRANSPORT: &str = "cli";
-const COLOR_DIM: &str = "\x1b[38;5;244m";
-const COLOR_ACCENT: &str = "\x1b[38;5;214m";
-const COLOR_RESET: &str = "\x1b[0m";
 
 enum ServiceCliAction {
     Start,
@@ -33,81 +31,41 @@ impl ServiceCliAction {
     }
 }
 
-const DETAILS: &[&str] = &[
-    "list – zeigt alle registrierten Services mit Status und Hinweis",
-    "jobs – listet Scheduler-Jobs mit Intervall",
-    "start <id> – startet einen steuerbaren Service (veraltet, nutze 'start service <id>')",
-    "stop <id|--all> [--force] – veraltet, nutze 'stop service <id|--all>'",
-    "restart <id|--all> [--force] – veraltet, nutze 'restart service <id|--all>'",
-];
+const SERVICE_RESOURCE_OPTIONS: &[&str] = &["service", "services", "module", "modules"];
+const LIST_RESOURCE_OPTIONS: &[&str] = &["services", "jobs", "modules", "users", "tickets"];
+const SERVICE_TARGET_GLOBAL_OPTIONS: &[&str] = &["--all", "-a", "all"];
+const SERVICE_FORCE_OPTIONS: &[&str] = &["--force", "-f"];
 
 const START_DETAILS: &[&str] = &[
-    "start service <id> – startet einen steuerbaren Service",
-    "start service --all – startet alle nicht-core Services",
+    "start service <id|--all> – startet einen steuerbaren Service",
+    "start module <name> – startet ein installiertes Modul",
 ];
 
 const STOP_DETAILS: &[&str] = &[
-    "stop service <id> [--force] – stoppt einen Service",
-    "stop service --all [--force] – stoppt alle nicht-core Services",
+    "stop service <id|--all> [--force] – stoppt einen Service",
+    "stop module <name> – stoppt ein Modul",
 ];
 
 const RESTART_DETAILS: &[&str] = &[
-    "restart service <id> [--force] – startet Service neu",
-    "restart service --all [--force] – Neustart aller nicht-core Services",
+    "restart service <id|--all> [--force] – Neustart von Services",
+    "restart module <name> – startet ein Modul neu",
 ];
 
 const LIST_DETAILS: &[&str] = &[
     "list services – zeigt registrierte Services",
     "list jobs – listet Scheduler-Jobs",
-    "list modules – zeigt verfügbare Module (in Vorbereitung)",
+    "list modules – zeigt installierte Module (mit Runtime)",
+    "list users [--role <rolle>] [--search <term>] [--include-locked]",
+    "list tickets [--status <liste>] [--reporter <user>] [--assignee <user>]",
 ];
-
-const SERVICES_ALIASES: &[&str] = &["service", "svc"];
-const SERVICE_RESOURCE_OPTIONS: &[&str] = &["service", "services", "module", "modules"];
-const SERVICE_TARGET_GLOBAL_OPTIONS: &[&str] = &["--all", "-a", "all"];
-const SERVICE_FORCE_OPTIONS: &[&str] = &["--force", "-f"];
-const LIST_RESOURCE_OPTIONS: &[&str] = &["services", "jobs", "modules"];
 
 const SERVICE_RESOURCE_ARGUMENT: CommandArgument = CommandArgument::required("resource")
     .with_completion(CompletionKind::Static(SERVICE_RESOURCE_OPTIONS));
 const SERVICE_TARGET_ARGUMENT: CommandArgument = CommandArgument::required("target")
-    .with_completion(CompletionKind::Dynamic(complete_service_targets));
+    .with_completion(CompletionKind::Dynamic(complete_action_targets));
 const SERVICE_FORCE_ARGUMENT: CommandArgument = CommandArgument::optional("flag")
-    .with_completion(CompletionKind::Static(SERVICE_FORCE_OPTIONS))
+    .with_completion(CompletionKind::Dynamic(complete_force_flags))
     .variadic();
-const SERVICE_LIST_ARGUMENT: CommandArgument = CommandArgument::optional("resource")
-    .with_completion(CompletionKind::Static(LIST_RESOURCE_OPTIONS));
-
-const SERVICES_SUBCOMMANDS: &[CommandSubcommand] = &[
-    CommandSubcommand::new(
-        "list",
-        &[],
-        &[SERVICE_LIST_ARGUMENT],
-        "Services oder Jobs anzeigen",
-    ),
-    CommandSubcommand::new("jobs", &[], &[], "Scheduler-Jobs anzeigen"),
-    CommandSubcommand::new(
-        "start",
-        &[],
-        &[SERVICE_TARGET_ARGUMENT],
-        "Service starten (Legacy-Pfad)",
-    ),
-    CommandSubcommand::new(
-        "stop",
-        &[],
-        &[SERVICE_TARGET_ARGUMENT, SERVICE_FORCE_ARGUMENT],
-        "Service stoppen (Legacy-Pfad)",
-    ),
-    CommandSubcommand::new(
-        "restart",
-        &[],
-        &[SERVICE_TARGET_ARGUMENT, SERVICE_FORCE_ARGUMENT],
-        "Service neu starten (Legacy-Pfad)",
-    ),
-];
-
-const SERVICES_SHAPE: CommandShape =
-    CommandShape::new("services", SERVICES_ALIASES, &[], SERVICES_SUBCOMMANDS);
 
 const START_ARGUMENTS: &[CommandArgument] = &[SERVICE_RESOURCE_ARGUMENT, SERVICE_TARGET_ARGUMENT];
 const START_SHAPE: CommandShape = CommandShape::new("start", &[], START_ARGUMENTS, &[]);
@@ -126,25 +84,20 @@ const RESTART_ARGUMENTS: &[CommandArgument] = &[
 ];
 const RESTART_SHAPE: CommandShape = CommandShape::new("restart", &[], RESTART_ARGUMENTS, &[]);
 
-const LIST_ARGUMENTS: &[CommandArgument] = &[SERVICE_LIST_ARGUMENT];
+const LIST_ARGUMENTS: &[CommandArgument] = &[
+    CommandArgument::optional("resource")
+        .with_completion(CompletionKind::Static(LIST_RESOURCE_OPTIONS)),
+    CommandArgument::optional("option")
+        .with_completion(CompletionKind::Dynamic(complete_list_options))
+        .variadic(),
+];
 const LIST_SHAPE: CommandShape = CommandShape::new("list", &[], LIST_ARGUMENTS, &[]);
-
-pub fn command() -> CommandEntry {
-    CommandEntry::with_shape(
-        "services",
-        "Zeigt den Status registrierter Applikationsservices",
-        "services [list|jobs|start|stop|restart]",
-        DETAILS,
-        handle,
-        SERVICES_SHAPE,
-    )
-}
 
 pub fn start_command() -> CommandEntry {
     CommandEntry::with_shape(
         "start",
-        "Startet Ressourcen wie Services",
-        "start service <id|--all>",
+        "Startet Services oder Module",
+        "start <service|module> <ziel>",
         START_DETAILS,
         handle_start,
         START_SHAPE,
@@ -154,8 +107,8 @@ pub fn start_command() -> CommandEntry {
 pub fn stop_command() -> CommandEntry {
     CommandEntry::with_shape(
         "stop",
-        "Stoppt Ressourcen kontrolliert",
-        "stop service <id|--all> [--force]",
+        "Stoppt Services oder Module kontrolliert",
+        "stop <service|module> <ziel> [--force]",
         STOP_DETAILS,
         handle_stop,
         STOP_SHAPE,
@@ -165,8 +118,8 @@ pub fn stop_command() -> CommandEntry {
 pub fn restart_command() -> CommandEntry {
     CommandEntry::with_shape(
         "restart",
-        "Startet Ressourcen neu",
-        "restart service <id|--all> [--force]",
+        "Startet Services oder Module neu",
+        "restart <service|module> <ziel> [--force]",
         RESTART_DETAILS,
         handle_restart,
         RESTART_SHAPE,
@@ -176,48 +129,12 @@ pub fn restart_command() -> CommandEntry {
 pub fn list_command() -> CommandEntry {
     CommandEntry::with_shape(
         "list",
-        "Listet Ressourcen (Services, Jobs, Module)",
-        "list <services|jobs|modules>",
+        "Listet Ressourcen (Services, Jobs, Module, Users, Tickets)",
+        "list <services|jobs|modules|users|tickets> [optionen]",
         LIST_DETAILS,
         handle_list,
         LIST_SHAPE,
     )
-}
-
-fn handle(
-    deps: &CliDependencies,
-    args: &[&str],
-    _registry: &CommandRegistry,
-    out: &mut dyn Write,
-    _env: ShellEnvironment,
-) -> io::Result<CommandOutcome> {
-    let (action, rest) = if let Some((first, rest)) = args.split_first() {
-        (*first, rest)
-    } else {
-        ("list", &[][..])
-    };
-
-    match action {
-        "list" => list_services(deps, out)?,
-        "jobs" => list_jobs(deps, out)?,
-        "start" => {
-            warn_deprecated(out, "services start", "start service <id>")?;
-            start_service(deps, rest, out)?;
-        }
-        "stop" => {
-            warn_deprecated(out, "services stop", "stop service <id>")?;
-            stop_service(deps, rest, out)?;
-        }
-        "restart" => {
-            warn_deprecated(out, "services restart", "restart service <id>")?;
-            restart_service(deps, rest, out)?;
-        }
-        other => {
-            writeln!(out, "unbekannte Aktion: {other}")?;
-            writeln!(out, "verfügbar: services [list|jobs|start|stop|restart]")?;
-        }
-    }
-    Ok(CommandOutcome::Continue)
 }
 
 fn handle_start(
@@ -260,17 +177,42 @@ fn handle_list(
     out: &mut dyn Write,
     _env: ShellEnvironment,
 ) -> io::Result<CommandOutcome> {
-    if args.is_empty() {
-        list_services(deps, out)?;
-        return Ok(CommandOutcome::Continue);
-    }
-    match args[0] {
-        "services" | "service" => list_services(deps, out)?,
-        "jobs" | "job" => list_jobs(deps, out)?,
-        "modules" | "module" => module_placeholder(out, "list")?,
+    let (resource, rest) = match args.split_first() {
+        Some((value, tail)) => (*value, tail),
+        None => ("services", &[][..]),
+    };
+
+    match resource.to_ascii_lowercase().as_str() {
+        "services" | "service" => {
+            if !rest.is_empty() {
+                writeln!(
+                    out,
+                    "Hinweis: 'list services' erwartet keine weiteren Argumente."
+                )?;
+            }
+            list_services(deps, out)?;
+        }
+        "jobs" | "job" => {
+            if !rest.is_empty() {
+                writeln!(
+                    out,
+                    "Hinweis: 'list jobs' erwartet keine weiteren Argumente."
+                )?;
+            }
+            list_jobs(deps, out)?;
+        }
+        "modules" | "module" => {
+            modules::run_module_command(deps, "list", rest, out)?;
+        }
+        "users" | "user" => {
+            user::list_users(&deps.services.user, rest, out)?;
+        }
+        "tickets" | "ticket" => {
+            ticket::list_tickets(&deps.services.ticket, &deps.services.user, rest, out)?;
+        }
         other => {
             writeln!(out, "unbekannte Ressource: {other}")?;
-            writeln!(out, "verfügbar: list services|jobs|modules")?;
+            writeln!(out, "verfügbar: list services|jobs|modules|users|tickets")?;
         }
     }
     Ok(CommandOutcome::Continue)
@@ -377,47 +319,72 @@ fn service_id_suggestions(deps: &CliDependencies) -> Vec<String> {
     ids
 }
 
-fn complete_service_targets(deps: &CliDependencies, ctx: &CompletionContext<'_>) -> Vec<String> {
+fn complete_action_targets(deps: &CliDependencies, ctx: &CompletionContext<'_>) -> Vec<String> {
     let Some(command) = ctx.tokens.first().copied() else {
         return Vec::new();
     };
 
-    let mut expects_service_targets = false;
-
-    match command {
-        "start" | "stop" | "restart" => {
-            if let Some(resource) = ctx.tokens.get(1) {
-                if matches!(*resource, "service" | "services") {
-                    expects_service_targets = true;
-                }
-            }
-        }
-        "services" | "service" => {
-            if let Some(action) = ctx.tokens.get(1) {
-                if matches!(*action, "start" | "stop" | "restart") {
-                    expects_service_targets = true;
-                }
-            }
-        }
-        _ => {}
-    }
-
-    if !expects_service_targets {
+    if !matches!(command, "start" | "stop" | "restart") {
         return Vec::new();
     }
 
-    let mut suggestions: Vec<String> = SERVICE_TARGET_GLOBAL_OPTIONS
-        .iter()
-        .map(|value| (*value).to_string())
-        .collect();
+    let Some(resource) = ctx.tokens.get(1).copied() else {
+        return Vec::new();
+    };
 
-    for id in service_id_suggestions(deps) {
-        if !suggestions.iter().any(|candidate| candidate == &id) {
-            suggestions.push(id);
+    if matches!(resource, "service" | "services") {
+        let mut suggestions: Vec<String> = SERVICE_TARGET_GLOBAL_OPTIONS
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect();
+
+        for id in service_id_suggestions(deps) {
+            if !suggestions.iter().any(|candidate| candidate == &id) {
+                suggestions.push(id);
+            }
         }
+
+        return suggestions;
     }
 
-    suggestions
+    if matches!(resource, "module" | "modules") {
+        return modules::complete_module_ids(deps, ctx);
+    }
+
+    Vec::new()
+}
+
+fn complete_force_flags(_deps: &CliDependencies, ctx: &CompletionContext<'_>) -> Vec<String> {
+    let Some(resource) = ctx.tokens.get(1).copied() else {
+        return Vec::new();
+    };
+
+    if matches!(resource, "service" | "services") {
+        return SERVICE_FORCE_OPTIONS
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect();
+    }
+
+    Vec::new()
+}
+
+fn complete_list_options(_deps: &CliDependencies, ctx: &CompletionContext<'_>) -> Vec<String> {
+    let Some(resource) = ctx.tokens.get(1).copied() else {
+        return Vec::new();
+    };
+
+    match resource {
+        "users" | "user" => user::USER_LIST_OPTIONS
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect(),
+        "tickets" | "ticket" => ticket::TICKET_LIST_OPTIONS
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 fn route_service_action(
@@ -426,14 +393,8 @@ fn route_service_action(
     args: &[&str],
     out: &mut dyn Write,
 ) -> io::Result<()> {
-    let usage = match action {
-        ServiceCliAction::Start => "start service <id|--all>",
-        ServiceCliAction::Stop => "stop service <id|--all> [--force]",
-        ServiceCliAction::Restart => "restart service <id|--all> [--force]",
-    };
-
     if args.is_empty() {
-        writeln!(out, "Nutzung: {usage}")?;
+        render_action_usage(out, action)?;
         return Ok(());
     }
 
@@ -446,7 +407,14 @@ fn route_service_action(
                 ServiceCliAction::Restart => restart_service(deps, tail, out),
             }
         }
-        "module" | "modules" => module_placeholder(out, action.verb()),
+        "module" | "modules" => {
+            let tail = if args.len() > 1 { &args[1..] } else { &[] };
+            if tail.is_empty() {
+                render_action_usage(out, action)
+            } else {
+                modules::run_module_command(deps, action.verb(), tail, out)
+            }
+        }
         other => {
             writeln!(out, "unbekannte Ressource: {other}")?;
             writeln!(out, "gültig: service | module")
@@ -454,14 +422,22 @@ fn route_service_action(
     }
 }
 
-fn module_placeholder(out: &mut dyn Write, action: &str) -> io::Result<()> {
-    writeln!(
-        out,
-        "{dim}[Info]{reset} modules {action} steht noch aus – Distribution-Workflow folgt.",
-        dim = COLOR_DIM,
-        reset = COLOR_RESET,
-        action = action
-    )
+fn render_action_usage(out: &mut dyn Write, action: ServiceCliAction) -> io::Result<()> {
+    match action {
+        ServiceCliAction::Start => writeln!(
+            out,
+            "Nutzung: start service <id|--all> | start module <name>"
+        )?,
+        ServiceCliAction::Stop => writeln!(
+            out,
+            "Nutzung: stop service <id|--all> [--force] | stop module <name>"
+        )?,
+        ServiceCliAction::Restart => writeln!(
+            out,
+            "Nutzung: restart service <id|--all> [--force] | restart module <name>"
+        )?,
+    }
+    Ok(())
 }
 
 fn start_service(deps: &CliDependencies, args: &[&str], out: &mut dyn Write) -> io::Result<()> {
@@ -474,7 +450,10 @@ fn start_service(deps: &CliDependencies, args: &[&str], out: &mut dyn Write) -> 
         return Ok(());
     }
     let Some(id) = args.first() else {
-        writeln!(out, "fehlende Service-ID. Nutzung: services start <id>")?;
+        writeln!(
+            out,
+            "fehlende Service-ID. Nutzung: start service <id|--all>"
+        )?;
         return Ok(());
     };
     let result = deps.services.start_service(id);
@@ -500,7 +479,7 @@ fn stop_service(deps: &CliDependencies, args: &[&str], out: &mut dyn Write) -> i
         } else {
             writeln!(
                 out,
-                "fehlende Service-ID. Nutzung: services stop <id|--all> [--force]"
+                "fehlende Service-ID. Nutzung: stop service <id|--all> [--force]"
             )?;
         }
         return Ok(());
@@ -537,7 +516,7 @@ fn restart_service(deps: &CliDependencies, args: &[&str], out: &mut dyn Write) -
         } else {
             writeln!(
                 out,
-                "fehlende Service-ID. Nutzung: services restart <id|--all> [--force]"
+                "fehlende Service-ID. Nutzung: restart service <id|--all> [--force]"
             )?;
         }
         return Ok(());
@@ -589,18 +568,6 @@ fn render_control_error(
     Ok(())
 }
 
-fn warn_deprecated(out: &mut dyn Write, legacy: &str, modern: &str) -> io::Result<()> {
-    writeln!(
-        out,
-        "{dim}[Hinweis]{reset} '{legacy}' wird entfernt – nutze {accent}{modern}{reset}.",
-        dim = COLOR_DIM,
-        accent = COLOR_ACCENT,
-        reset = COLOR_RESET,
-        legacy = legacy,
-        modern = modern
-    )
-}
-
 fn render_bulk_results(
     deps: &CliDependencies,
     out: &mut dyn Write,
@@ -612,7 +579,7 @@ fn render_bulk_results(
         writeln!(out, "Keine steuerbaren Services gefunden.")?;
         return Ok(());
     }
-    writeln!(out, "Ergebnisse für services {action} --all:")?;
+    writeln!(out, "Ergebnisse für {action} service --all:")?;
     let mut success = 0usize;
     let mut failures = Vec::new();
     for report in reports {
@@ -694,7 +661,7 @@ fn base_metadata(action: &str, force: bool) -> AuditMetadata {
     let host = whoami::fallible::hostname().unwrap_or_else(|_| "unknown-host".to_string());
     AuditMetadata::default()
         .insert("transport", TRANSPORT)
-        .insert("command", format!("services {action}"))
+        .insert("command", format!("{action} service"))
         .insert("force", if force { "true" } else { "false" })
         .insert("host", host)
 }

@@ -20,8 +20,9 @@ const DETAILS: &[&str] = &[
     "unlock <username>",
 ];
 
-const USER_LIST_OPTIONS: &[&str] = &["--role", "--search", "--include-locked"];
-const USER_CREATE_OPTIONS: &[&str] = &["--username", "--email", "--display-name", "--role"];
+pub(crate) const USER_LIST_OPTIONS: &[&str] = &["--role", "--search", "--include-locked"];
+pub(crate) const USER_CREATE_OPTIONS: &[&str] =
+    &["--username", "--email", "--display-name", "--role"];
 
 const USER_NAME_ARGUMENT: CommandArgument = CommandArgument::required("username");
 const USER_LIST_ARGUMENT: CommandArgument = CommandArgument::optional("option")
@@ -89,7 +90,11 @@ fn handle(
     Ok(CommandOutcome::Continue)
 }
 
-fn list_users(service: &UserService, args: &[&str], out: &mut dyn Write) -> io::Result<()> {
+pub(crate) fn list_users(
+    service: &UserService,
+    args: &[&str],
+    out: &mut dyn Write,
+) -> io::Result<()> {
     let mut filter = UserFilter::default();
     let mut idx = 0;
     while idx < args.len() {
@@ -154,11 +159,15 @@ fn list_users(service: &UserService, args: &[&str], out: &mut dyn Write) -> io::
     Ok(())
 }
 
-fn show_user(service: &UserService, args: &[&str], out: &mut dyn Write) -> io::Result<()> {
+pub(crate) fn show_user(
+    service: &UserService,
+    args: &[&str],
+    out: &mut dyn Write,
+) -> io::Result<()> {
     let username = match args.first() {
         Some(username) => *username,
         None => {
-            writeln!(out, "Nutzung: user show <username>")?;
+            writeln!(out, "Nutzung: show user <username>")?;
             return Ok(());
         }
     };
@@ -198,7 +207,11 @@ fn show_user(service: &UserService, args: &[&str], out: &mut dyn Write) -> io::R
     Ok(())
 }
 
-fn create_user(service: &UserService, args: &[&str], out: &mut dyn Write) -> io::Result<()> {
+pub(crate) fn create_user(
+    service: &UserService,
+    args: &[&str],
+    out: &mut dyn Write,
+) -> io::Result<()> {
     let mut username: Option<&str> = None;
     let mut email: Option<&str> = None;
     let mut display_name: Option<String> = None;
@@ -242,7 +255,10 @@ fn create_user(service: &UserService, args: &[&str], out: &mut dyn Write) -> io:
     }
 
     if username.is_none() || email.is_none() {
-        writeln!(out, "Nutzung: user create --username <name> --email <adresse> [--display-name <name>] [--role <rolle> ...]")?;
+        writeln!(
+            out,
+            "Nutzung: create user --username <name> --email <adresse> [--display-name <name>] [--role <rolle> ...]"
+        )?;
         return Ok(());
     }
     if roles.is_empty() {
@@ -265,7 +281,7 @@ fn create_user(service: &UserService, args: &[&str], out: &mut dyn Write) -> io:
     Ok(())
 }
 
-fn set_lock_state(
+pub(crate) fn set_lock_state(
     service: &UserService,
     args: &[&str],
     locked: bool,
@@ -276,7 +292,7 @@ fn set_lock_state(
         None => {
             writeln!(
                 out,
-                "Nutzung: user {} <username>",
+                "Nutzung: {} user <username>",
                 if locked { "lock" } else { "unlock" }
             )?;
             return Ok(());

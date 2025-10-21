@@ -21,8 +21,9 @@ const DETAILS: &[&str] = &[
     "status <ticket-id> <status>",
 ];
 
-const TICKET_LIST_OPTIONS: &[&str] = &["--status", "--reporter", "--assignee", "--tag", "--search"];
-const TICKET_CREATE_OPTIONS: &[&str] = &[
+pub(crate) const TICKET_LIST_OPTIONS: &[&str] =
+    &["--status", "--reporter", "--assignee", "--tag", "--search"];
+pub(crate) const TICKET_CREATE_OPTIONS: &[&str] = &[
     "--title",
     "--description",
     "--priority",
@@ -30,8 +31,8 @@ const TICKET_CREATE_OPTIONS: &[&str] = &[
     "--assignee",
     "--tag",
 ];
-const TICKET_STATUS_VALUES: &[&str] = &["open", "in_progress", "resolved", "closed"];
-const TICKET_ASSIGN_SPECIAL: &[&str] = &["none"];
+pub(crate) const TICKET_STATUS_VALUES: &[&str] = &["open", "in_progress", "resolved", "closed"];
+pub(crate) const TICKET_ASSIGN_SPECIAL: &[&str] = &["none"];
 
 const TICKET_ID_ARGUMENT: CommandArgument = CommandArgument::required("ticket-id");
 const TICKET_LIST_ARGUMENT: CommandArgument = CommandArgument::optional("option")
@@ -131,7 +132,7 @@ fn handle(
     Ok(CommandOutcome::Continue)
 }
 
-fn list_tickets(
+pub(crate) fn list_tickets(
     service: &TicketService,
     users: &UserService,
     args: &[&str],
@@ -254,7 +255,7 @@ fn list_tickets(
     table.render(out, "  ")
 }
 
-fn create_ticket(
+pub(crate) fn create_ticket(
     service: &TicketService,
     users: &UserService,
     args: &[&str],
@@ -313,7 +314,7 @@ fn create_ticket(
     }
 
     if title.is_none() || description.is_none() || reporter.is_none() {
-        writeln!(out, "Nutzung: ticket create --title <titel> --description <text> --reporter <username> [--priority <prio>] [--assignee <username>] [--tag <tag> ...]")?;
+        writeln!(out, "Nutzung: create ticket --title <titel> --description <text> --reporter <username> [--priority <prio>] [--assignee <username>] [--tag <tag> ...]")?;
         return Ok(());
     }
 
@@ -363,14 +364,14 @@ fn create_ticket(
     Ok(())
 }
 
-fn update_assignment(
+pub(crate) fn update_assignment(
     service: &TicketService,
     users: &UserService,
     args: &[&str],
     out: &mut dyn Write,
 ) -> io::Result<()> {
     if args.len() < 2 {
-        writeln!(out, "Nutzung: ticket assign <ticket-id> <username|none>")?;
+        writeln!(out, "Nutzung: assign ticket <ticket-id> <username|none>")?;
         return Ok(());
     }
     let ticket_id = match TicketId::from_str(args[0]) {
@@ -406,9 +407,13 @@ fn update_assignment(
     Ok(())
 }
 
-fn update_status(service: &TicketService, args: &[&str], out: &mut dyn Write) -> io::Result<()> {
+pub(crate) fn update_status(
+    service: &TicketService,
+    args: &[&str],
+    out: &mut dyn Write,
+) -> io::Result<()> {
     if args.len() < 2 {
-        writeln!(out, "Nutzung: ticket status <ticket-id> <status>")?;
+        writeln!(out, "Nutzung: status ticket <ticket-id> <status>")?;
         return Ok(());
     }
     let ticket_id = match TicketId::from_str(args[0]) {
@@ -439,7 +444,7 @@ fn update_status(service: &TicketService, args: &[&str], out: &mut dyn Write) ->
     Ok(())
 }
 
-fn show_ticket(
+pub(crate) fn show_ticket(
     service: &TicketService,
     users: &UserService,
     args: &[&str],
@@ -454,7 +459,7 @@ fn show_ticket(
             }
         },
         None => {
-            writeln!(out, "Nutzung: ticket show <ticket-id>")?;
+            writeln!(out, "Nutzung: show ticket <ticket-id>")?;
             return Ok(());
         }
     };

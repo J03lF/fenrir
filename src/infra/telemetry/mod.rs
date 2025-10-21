@@ -1,8 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::env;
+use std::fs;
 #[cfg(target_os = "linux")]
-use std::fs::{self, File};
+use std::fs::File;
 #[cfg(target_os = "linux")]
 use std::io::{BufRead, BufReader};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -16,10 +19,20 @@ use std::mem;
 
 use crate::config::AppConfig;
 use crate::services::{ServiceRegistry, ServiceSnapshot, ServiceStatus, ServiceTag};
+use serde::{Deserialize, Serialize};
+use serde_json;
+use time::OffsetDateTime;
 
 static TELEMETRY: OnceLock<TelemetryState> = OnceLock::new();
 static SERVICE_METRICS_ATTACHED: AtomicBool = AtomicBool::new(false);
 static SYSTEM_METRICS_STARTED: AtomicBool = AtomicBool::new(false);
+
+const HISTORY_FILENAME: &str = "fenrir-telemetry-history.json";
+const HISTORY_RETENTION_SECS: u64 = 24 * 60 * 60; // 24h
+const HISTORY_PERSIST_INTERVAL_SECS: u64 = 30;
+const HISTORY_MAX_SAMPLES: usize = 200_000;
+const PROCESS_HISTORY_PREFIX: &str = "process.";
+const HISTORY_VERSION: u8 = 1;
 
 struct TelemetryState {
     ready: AtomicBool,
@@ -29,10 +42,22 @@ struct TelemetryState {
     health_enabled: AtomicBool,
     metrics: Mutex<HashMap<String, u64>>,
     readiness_probes: Mutex<Vec<Probe>>, // lazily evaluated health probes
+    history: Mutex<VecDeque<MetricHistorySample>>,
+    history_path: PathBuf,
+    history_retention: Duration,
+    history_persist_interval: Duration,
+    last_persist: Mutex<Instant>,
 }
 
 impl TelemetryState {
     fn new(config: TelemetryConfig) -> Self {
+        let history_path = telemetry_history_path();
+        let history_retention = Duration::from_secs(HISTORY_RETENTION_SECS);
+        let history_persist_interval = Duration::from_secs(HISTORY_PERSIST_INTERVAL_SECS);
+        let history = load_history_from_disk(&history_path, history_retention);
+        let initial_persist = Instant::now()
+            .checked_sub(history_persist_interval)
+            .unwrap_or_else(Instant::now);
         Self {
             ready: AtomicBool::new(false),
             live: AtomicBool::new(true),
@@ -41,8 +66,176 @@ impl TelemetryState {
             health_enabled: AtomicBool::new(config.health_enabled),
             metrics: Mutex::new(HashMap::new()),
             readiness_probes: Mutex::new(Vec::new()),
+            history: Mutex::new(history),
+            history_path,
+            history_retention,
+            history_persist_interval,
+            last_persist: Mutex::new(initial_persist),
         }
     }
+
+    fn push_history(&self, metrics: &HashMap<String, u64>) {
+        let filtered = filter_history_metrics(metrics);
+        if filtered.is_empty() {
+            return;
+        }
+        let sample = MetricHistorySample {
+            timestamp_ms: now_ms(),
+            metrics: filtered,
+        };
+        let mut snapshot: Option<Vec<MetricHistorySample>> = None;
+        if let Ok(mut history) = self.history.lock() {
+            history.push_back(sample);
+            self.trim_history(&mut history);
+            if self.should_persist() {
+                snapshot = Some(history.iter().cloned().collect());
+            }
+        }
+        if let Some(samples) = snapshot {
+            self.persist_history(samples);
+        }
+    }
+
+    fn history(&self, range: Duration) -> Vec<MetricHistoryPoint> {
+        let cutoff = now_ms().saturating_sub(duration_to_millis(range));
+        if let Ok(history) = self.history.lock() {
+            history
+                .iter()
+                .filter(|sample| sample.timestamp_ms >= cutoff)
+                .cloned()
+                .map(MetricHistoryPoint::from)
+                .collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn trim_history(&self, history: &mut VecDeque<MetricHistorySample>) {
+        let cutoff = now_ms().saturating_sub(duration_to_millis(self.history_retention));
+        while let Some(front) = history.front() {
+            if front.timestamp_ms < cutoff {
+                history.pop_front();
+            } else {
+                break;
+            }
+        }
+        while history.len() > HISTORY_MAX_SAMPLES {
+            history.pop_front();
+        }
+    }
+
+    fn should_persist(&self) -> bool {
+        if let Ok(mut guard) = self.last_persist.lock() {
+            if guard.elapsed() >= self.history_persist_interval {
+                *guard = Instant::now();
+                return true;
+            }
+        }
+        false
+    }
+
+    fn persist_history(&self, samples: Vec<MetricHistorySample>) {
+        let payload = HistoryFile {
+            version: HISTORY_VERSION,
+            samples,
+        };
+        match serde_json::to_vec(&payload) {
+            Ok(data) => {
+                if let Err(err) = fs::write(&self.history_path, data) {
+                    tracing::debug!(error = %err, path = ?self.history_path, "telemetrie-history konnte nicht geschrieben werden");
+                }
+            }
+            Err(err) => {
+                tracing::debug!(error = %err, "telemetrie-history konnte nicht serialisiert werden");
+            }
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct MetricHistorySample {
+    timestamp_ms: i64,
+    metrics: HashMap<String, u64>,
+}
+
+#[derive(Clone)]
+pub struct MetricHistoryPoint {
+    pub timestamp_ms: i64,
+    pub metrics: HashMap<String, u64>,
+}
+
+impl From<MetricHistorySample> for MetricHistoryPoint {
+    fn from(sample: MetricHistorySample) -> Self {
+        Self {
+            timestamp_ms: sample.timestamp_ms,
+            metrics: sample.metrics,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct HistoryFile {
+    version: u8,
+    samples: Vec<MetricHistorySample>,
+}
+
+fn telemetry_history_path() -> PathBuf {
+    env::temp_dir().join(HISTORY_FILENAME)
+}
+
+fn load_history_from_disk(path: &PathBuf, retention: Duration) -> VecDeque<MetricHistorySample> {
+    match fs::read(path) {
+        Ok(bytes) => match serde_json::from_slice::<HistoryFile>(&bytes) {
+            Ok(file) => {
+                let mut samples = file.samples;
+                samples.sort_by_key(|sample| sample.timestamp_ms);
+                let cutoff = now_ms().saturating_sub(duration_to_millis(retention));
+                samples.retain(|sample| sample.timestamp_ms >= cutoff);
+                if samples.len() > HISTORY_MAX_SAMPLES {
+                    let start = samples.len().saturating_sub(HISTORY_MAX_SAMPLES);
+                    samples = samples.split_off(start);
+                }
+                VecDeque::from(samples)
+            }
+            Err(err) => {
+                tracing::debug!(error = %err, path = ?path, "telemetrie-history konnte nicht geparst werden");
+                VecDeque::new()
+            }
+        },
+        Err(err) => {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                tracing::debug!(error = %err, path = ?path, "telemetrie-history konnte nicht gelesen werden");
+            }
+            VecDeque::new()
+        }
+    }
+}
+
+fn filter_history_metrics(metrics: &HashMap<String, u64>) -> HashMap<String, u64> {
+    metrics
+        .iter()
+        .filter_map(|(key, value)| {
+            if key.starts_with(PROCESS_HISTORY_PREFIX) {
+                Some((key.clone(), *value))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn duration_to_millis(duration: Duration) -> i64 {
+    let millis = duration.as_millis();
+    if millis > i64::MAX as u128 {
+        i64::MAX
+    } else {
+        millis as i64
+    }
+}
+
+fn now_ms() -> i64 {
+    let now = OffsetDateTime::now_utc();
+    (now.unix_timestamp_nanos() / 1_000_000) as i64
 }
 
 struct Probe {
@@ -166,6 +359,17 @@ pub fn set_counter(name: &str, value: u64) {
         }
         if let Ok(mut metrics) = state.metrics.lock() {
             metrics.insert(name.to_string(), value);
+        }
+    }
+}
+
+fn record_process_history_sample() {
+    if let Some(state) = TELEMETRY.get() {
+        if !state.metrics_enabled.load(Ordering::Acquire) {
+            return;
+        }
+        if let Ok(metrics) = state.metrics.lock() {
+            state.push_history(&metrics);
         }
     }
 }
@@ -300,6 +504,13 @@ pub fn snapshot() -> Option<TelemetrySnapshot> {
     })
 }
 
+pub fn history(range: Duration) -> Vec<MetricHistoryPoint> {
+    TELEMETRY
+        .get()
+        .map(|state| state.history(range))
+        .unwrap_or_default()
+}
+
 #[derive(Clone, Debug)]
 pub struct TelemetrySnapshot {
     pub ready: bool,
@@ -344,6 +555,7 @@ impl ProcessMetricsSampler {
             tracing::debug!(error = %err, "prozess io sample fehlgeschlagen");
         }
 
+        record_process_history_sample();
         Ok(())
     }
 

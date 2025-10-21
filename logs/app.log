@@ -1,14 +1,11 @@
-2025-10-21T13:46:19.492571Z  INFO main ThreadId(01) fenrir::infra::logging: dateilogging initialisiert log_path=logs/app.log
-2025-10-21T13:46:19.492742Z  INFO main ThreadId(01) fenrir::infra::logging: db-logdatei vorbereitet log_path=logs/db.log
-2025-10-21T13:46:19.492950Z  INFO main ThreadId(01) fenrir::boot: core services registered in registry
-2025-10-21T13:46:19.493738Z  INFO main ThreadId(01) fenrir::boot: scheduler service started
-2025-10-21T13:46:19.493867Z  INFO tokio-runtime-worker ThreadId(14) fenrir::services::scheduler: scheduler heartbeat loop started
-2025-10-21T13:46:19.500989Z  INFO                 main ThreadId(01) fenrir::boot: user and ticket services initialised
-2025-10-21T13:46:19.501011Z  INFO                 main ThreadId(01) fenrir::boot: boot complete app=fenrir version=0.1.4
-2025-10-21T13:46:19.501078Z  INFO                 main ThreadId(01) fenrir::boot: transport initialisation triggered
-2025-10-21T13:46:19.501100Z  INFO tokio-runtime-worker ThreadId(14) fenrir::boot: ssh server task spawned
-2025-10-21T13:46:19.501485Z  INFO tokio-runtime-worker ThreadId(14) fenrir::infra::ssh: starting SSH server host=127.0.0.1 port=2222
-2025-10-21T13:46:19.501783Z  INFO tokio-runtime-worker ThreadId(13) fenrir::infra::http: HTTP server task spawned
-2025-10-21T13:46:28.400019Z  INFO tokio-runtime-worker ThreadId(09) thrussh::server::encrypted: pty-req: unknown pty code 42
-2025-10-21T13:46:31.398458Z  WARN ThreadId(17) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
-2025-10-21T13:47:01.018079Z  WARN ThreadId(81) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-10-21T16:13:48.102259Z  INFO main ThreadId(01) fenrir::infra::logging: dateilogging initialisiert log_path=logs/app.log
+2025-10-21T16:13:48.102480Z  INFO main ThreadId(01) fenrir::infra::logging: db-logdatei vorbereitet log_path=logs/db.log
+2025-10-21T16:13:48.102741Z  INFO main ThreadId(01) fenrir::boot: core services registered in registry
+2025-10-21T16:13:48.103199Z  INFO main ThreadId(01) fenrir::boot: scheduler service started
+2025-10-21T16:13:48.103406Z  INFO tokio-runtime-worker ThreadId(13) fenrir::services::scheduler: scheduler heartbeat loop started
+2025-10-21T16:13:48.109000Z  INFO                 main ThreadId(01) fenrir::boot: user and ticket services initialised
+2025-10-21T16:13:48.109051Z  INFO                 main ThreadId(01) fenrir::boot: boot complete app=fenrir version=0.1.4
+2025-10-21T16:13:48.109134Z  INFO                 main ThreadId(01) fenrir::boot: transport initialisation triggered
+2025-10-21T16:13:48.109150Z  INFO tokio-runtime-worker ThreadId(13) fenrir::boot: ssh server task spawned
+2025-10-21T16:13:48.109508Z  INFO tokio-runtime-worker ThreadId(13) fenrir::infra::ssh: starting SSH server host=127.0.0.1 port=2222
+2025-10-21T16:13:48.109696Z  INFO tokio-runtime-worker ThreadId(03) fenrir::infra::http: HTTP server task spawned

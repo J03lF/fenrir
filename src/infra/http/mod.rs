@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex, RwLock, Weak};
@@ -29,6 +30,7 @@ use serde::{Deserialize, Serialize};
 use serde_json;
 use std::convert::Infallible;
 use time::format_description::well_known::Rfc3339;
+use time::Duration as TimeDuration;
 use time::OffsetDateTime;
 use tokio::net::{lookup_host, TcpListener, TcpStream};
 use tokio::sync::oneshot;
@@ -530,6 +532,24 @@ struct MetricsResponse {
     live: bool,
     ready: bool,
     counters: std::collections::BTreeMap<String, u64>,
+}
+
+#[derive(Deserialize)]
+struct MetricsHistoryQuery {
+    range: Option<String>,
+}
+
+#[derive(Serialize)]
+struct TelemetryHistoryResponse {
+    range: String,
+    samples: Vec<TelemetryHistorySampleView>,
+}
+
+#[derive(Serialize)]
+struct TelemetryHistorySampleView {
+    timestamp_ms: i64,
+    timestamp: String,
+    metrics: HashMap<String, u64>,
 }
 
 #[derive(Serialize)]
@@ -1086,6 +1106,7 @@ fn build_router(state: HttpState) -> Router {
         .route("/scheduler/jobs", get(list_scheduler_jobs))
         .route("/logging/level", post(update_logging_level))
         .route("/metrics", get(metrics_snapshot))
+        .route("/metrics/history", get(metrics_history))
         .route("/audit", get(list_audit_events))
         .route("/events/stream", get(audit_events_stream))
         .route("/modules/installed", get(list_installed_modules))
@@ -1371,6 +1392,17 @@ async fn metrics_snapshot() -> impl IntoResponse {
             .unwrap_or_default(),
     };
     Json(body)
+}
+
+async fn metrics_history(Query(query): Query<MetricsHistoryQuery>) -> impl IntoResponse {
+    let (range, label) = parse_history_range(query.range.as_deref());
+    let samples = telemetry::history(range);
+    let views: Vec<TelemetryHistorySampleView> =
+        samples.into_iter().map(history_sample_to_view).collect();
+    Json(TelemetryHistoryResponse {
+        range: label.to_string(),
+        samples: views,
+    })
 }
 
 async fn update_logging_level(
@@ -1889,6 +1921,36 @@ fn authorize(
             }
             Err(map_auth_error(err))
         }
+    }
+}
+
+fn parse_history_range(range: Option<&str>) -> (Duration, &'static str) {
+    match range.unwrap_or("1h") {
+        "3h" => (Duration::from_secs(3 * 3600), "3h"),
+        "24h" | "1d" | "day" => (Duration::from_secs(24 * 3600), "24h"),
+        _ => (Duration::from_secs(3600), "1h"),
+    }
+}
+
+fn history_sample_to_view(sample: telemetry::MetricHistoryPoint) -> TelemetryHistorySampleView {
+    TelemetryHistorySampleView {
+        timestamp_ms: sample.timestamp_ms,
+        timestamp: history_timestamp_iso(sample.timestamp_ms),
+        metrics: sample.metrics,
+    }
+}
+
+fn history_timestamp_iso(timestamp_ms: i64) -> String {
+    let secs = timestamp_ms.div_euclid(1000);
+    let millis = timestamp_ms.rem_euclid(1000);
+    match OffsetDateTime::from_unix_timestamp(secs) {
+        Ok(dt) => match dt.checked_add(TimeDuration::milliseconds(millis as i64)) {
+            Some(adjusted) => adjusted
+                .format(&Rfc3339)
+                .unwrap_or_else(|_| timestamp_ms.to_string()),
+            None => timestamp_ms.to_string(),
+        },
+        Err(_) => timestamp_ms.to_string(),
     }
 }
 
@@ -2702,10 +2764,48 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         display: flex;
         justify-content: space-between;
         align-items: center;
+        flex-wrap: wrap;
+        gap: 0.75rem;
       }
-      .chart-header small {
+      .chart-header-left {
+        display: flex;
+        flex-direction: column;
+        gap: 0.35rem;
+      }
+      .chart-header-left small {
         color: rgba(162, 190, 230, 0.78);
         font-weight: 500;
+      }
+      .chart-range {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        background: rgba(18, 34, 58, 0.6);
+        border: 1px solid rgba(102, 150, 226, 0.28);
+        border-radius: 999px;
+        padding: 0.25rem 0.35rem;
+        flex-wrap: wrap;
+      }
+      .chart-range button {
+        appearance: none;
+        border: 0;
+        border-radius: 999px;
+        padding: 0.3rem 0.85rem;
+        font-size: 0.72rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        background: transparent;
+        color: rgba(188, 210, 246, 0.85);
+        cursor: pointer;
+        transition: background 0.2s ease, color 0.2s ease;
+      }
+      .chart-range button[data-active="true"] {
+        background: linear-gradient(135deg, rgba(78, 156, 255, 0.32), rgba(48, 215, 198, 0.32));
+        color: #f3f8ff;
+      }
+      .chart-range button:hover {
+        background: rgba(88, 138, 220, 0.28);
+        color: #ffffff;
       }
       .chart-empty {
         display: none;
@@ -3089,8 +3189,15 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         <div class="telemetry-grid">
           <article class="card chart-card">
             <div class="chart-header">
-              <h3>Performance Verlauf</h3>
-              <small data-telemetry-note>Telemetrie wird geladen …</small>
+              <div class="chart-header-left">
+                <h3>Performance Verlauf</h3>
+                <small data-telemetry-note>Telemetrie wird geladen …</small>
+              </div>
+              <div class="chart-range" role="tablist" aria-label="Zeitraum">
+                <button type="button" data-history-range="1h" data-active="true">1h</button>
+                <button type="button" data-history-range="3h">3h</button>
+                <button type="button" data-history-range="24h">24h</button>
+              </div>
             </div>
             <canvas class="metric-chart" data-metric-chart width="960" height="320"></canvas>
             <div class="chart-legend" data-metric-legend>
@@ -3226,6 +3333,9 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         'process.io.read_bytes_per_sec': 'I/O Lesen pro Sekunde',
         'process.io.write_bytes_per_sec': 'I/O Schreiben pro Sekunde',
       };
+      const HISTORY_RANGE_DEFAULT = '1h';
+      const HISTORY_RANGES = ['1h', '3h', '24h'];
+      const HISTORY_RETENTION_MS = 24 * 60 * 60 * 1000;
 
       const metaEl = document.querySelector('[data-meta]');
       const alertEl = document.querySelector('[data-alert]');
@@ -3263,6 +3373,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       const pageContainers = new Map(
         Array.from(document.querySelectorAll('[data-page]')).map((el) => [el.dataset.page, el]),
       );
+      const historyRangeButtons = Array.from(document.querySelectorAll('[data-history-range]'));
 
       const TOKEN_KEY = 'fenrir-control-plane-token';
       const PAGE_STORAGE_KEY = 'fenrir-control-plane-page';
@@ -3277,7 +3388,8 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       let eventSource = null;
       let sseWarned = false;
       const metricHistory = [];
-      const METRIC_HISTORY_LIMIT = 60;
+      const METRIC_HISTORY_LIMIT = 20000;
+      const METRIC_HISTORY_CHART_LIMIT = 2000;
       const METRIC_SERIES_MAX = 4;
       const METRIC_COLORS = ['#4f8efd', '#33d5c4', '#f4d35e', '#ed6a5a', '#c792ea', '#6ad1ff'];
       const numberFormatter = new Intl.NumberFormat('de-DE');
@@ -3286,6 +3398,9 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       const SERVICE_STATUS_FALLBACK = 'services.status.other';
       const SERVICE_TAG_KEYS = ['core', 'platform', 'auxiliary'];
       let chartHoverState = null;
+      let currentHistoryRange = HISTORY_RANGE_DEFAULT;
+      let historyLoaded = false;
+      let historyLoading = false;
 
       const loadToken = () => {
         try {
@@ -3306,6 +3421,90 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       };
 
       const currentToken = () => tokenInput.value.trim();
+
+      const setHistoryButtonsActive = (range) => {
+        historyRangeButtons.forEach((button) => {
+          const active = button.dataset.historyRange === range;
+          button.dataset.active = active ? 'true' : 'false';
+        });
+      };
+
+      const pruneMetricHistory = () => {
+        const cutoff = Date.now() - HISTORY_RETENTION_MS;
+        while (metricHistory.length > 0 && metricHistory[0].timestamp < cutoff) {
+          metricHistory.shift();
+        }
+        if (metricHistory.length > METRIC_HISTORY_LIMIT) {
+          metricHistory.splice(0, metricHistory.length - METRIC_HISTORY_LIMIT);
+        }
+      };
+
+      const getHistoryForChart = () => {
+        if (metricHistory.length <= METRIC_HISTORY_CHART_LIMIT) {
+          return metricHistory;
+        }
+        const step = Math.ceil(metricHistory.length / METRIC_HISTORY_CHART_LIMIT);
+        const sampled = [];
+        for (let idx = 0; idx < metricHistory.length; idx += step) {
+          sampled.push(metricHistory[idx]);
+        }
+        const last = metricHistory[metricHistory.length - 1];
+        if (sampled[sampled.length - 1] !== last) {
+          sampled.push(last);
+        }
+        return sampled;
+      };
+
+      const applyHistorySamples = (samples) => {
+        metricHistory.length = 0;
+        if (Array.isArray(samples) && samples.length > 0) {
+          samples
+            .slice()
+            .sort((a, b) => a.timestamp_ms - b.timestamp_ms)
+            .forEach((sample) => {
+              metricHistory.push({
+                timestamp: sample.timestamp_ms,
+                counters: sample.metrics ?? {},
+              });
+            });
+          pruneMetricHistory();
+          if (metricHistory.length > 0) {
+            const latestCounters = metricHistory[metricHistory.length - 1].counters;
+            renderMetricList(latestCounters);
+            updateTelemetrySummary(latestCounters);
+          }
+        }
+        renderMetricChart();
+      };
+
+      const fetchTelemetryHistory = async (range, { background = false } = {}) => {
+        if (historyLoading) {
+          return;
+        }
+        historyLoading = true;
+        try {
+          const response = await fetchWithToken(`/metrics/history?range=${encodeURIComponent(range)}`);
+          if (!response.ok) {
+            if (!background && telemetryNote) {
+              telemetryNote.textContent = `Historie nicht verfügbar (${response.status}).`;
+            }
+            return;
+          }
+          const body = await response.json();
+          applyHistorySamples(body.samples ?? []);
+          if (telemetryNote) {
+            const stamp = new Date().toLocaleTimeString('de-DE');
+            telemetryNote.textContent = `Stand: ${stamp} · Range ${body.range ?? range}`;
+          }
+          historyLoaded = true;
+        } catch (error) {
+          if (!background && telemetryNote) {
+            telemetryNote.textContent = 'Telemetrie-Historie nicht verfügbar.';
+          }
+        } finally {
+          historyLoading = false;
+        }
+      };
 
       const authHeaders = () => {
         const token = currentToken();
@@ -3656,7 +3855,8 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
           return;
         }
         chartHoverState = null;
-        if (metricHistory.length === 0) {
+        const history = getHistoryForChart();
+        if (history.length === 0) {
           metricCtx.clearRect(0, 0, metricChartCanvas.width, metricChartCanvas.height);
           renderMetricLegend([]);
           const placeholderText = metricPlaceholder ? metricPlaceholder.textContent : '';
@@ -3675,7 +3875,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         const plotHeight = height - padding * 2;
 
         const keys = new Set();
-        metricHistory.forEach((sample) => {
+        history.forEach((sample) => {
           Object.keys(sample.counters).forEach((key) => keys.add(key));
         });
         if (keys.size === 0) {
@@ -3703,7 +3903,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
 
         let minValue = Infinity;
         let maxValue = -Infinity;
-        metricHistory.forEach((sample) => {
+        history.forEach((sample) => {
           series.forEach((key) => {
             const value = sample.counters[key];
             if (Number.isFinite(value)) {
@@ -3727,7 +3927,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         }
 
         const toX = (index) => {
-          const ratio = index / Math.max(metricHistory.length - 1, 1);
+          const ratio = index / Math.max(history.length - 1, 1);
           return padding + ratio * plotWidth;
         };
         const toY = (value) => {
@@ -3735,8 +3935,8 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
           return height - padding - ratio * plotHeight;
         };
 
-        const firstTimestamp = metricHistory[0]?.timestamp;
-        const lastTimestamp = metricHistory[metricHistory.length - 1]?.timestamp;
+        const firstTimestamp = history[0]?.timestamp;
+        const lastTimestamp = history[history.length - 1]?.timestamp;
 
         const legendEntries = series.map((key, index) => ({
           key,
@@ -3765,7 +3965,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
           ctx.lineTo(padding + plotWidth, y);
           ctx.stroke();
         }
-        const gridX = Math.min(Math.max(metricHistory.length - 1, 1), 6);
+        const gridX = Math.min(Math.max(history.length - 1, 1), 6);
         for (let i = 1; i < gridX; i += 1) {
           const x = padding + (plotWidth / gridX) * i;
           ctx.beginPath();
@@ -3786,15 +3986,15 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         ctx.restore();
 
         const hoverSeries = [];
-        const timestamps = metricHistory.map((sample) => sample.timestamp ?? NaN);
-        const stepX = plotWidth / Math.max(metricHistory.length - 1, 1);
+        const timestamps = history.map((sample) => sample.timestamp ?? NaN);
+        const stepX = plotWidth / Math.max(history.length - 1, 1);
         series.forEach((key, index) => {
           const color = METRIC_COLORS[index % METRIC_COLORS.length];
-          const values = new Array(metricHistory.length).fill(null);
-          const points = new Array(metricHistory.length).fill(null);
+          const values = new Array(history.length).fill(null);
+          const points = new Array(history.length).fill(null);
           const pathPoints = [];
 
-          metricHistory.forEach((sample, idx) => {
+          history.forEach((sample, idx) => {
             const value = sample.counters[key];
             if (!Number.isFinite(value)) {
               return;
@@ -3913,10 +4113,15 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         const snapshot = Object.fromEntries(numericEntries);
         const chartSnapshot = filterChartCounters(snapshot);
         if (Object.keys(chartSnapshot).length > 0) {
-          metricHistory.push({ timestamp: Date.now(), counters: chartSnapshot });
-          if (metricHistory.length > METRIC_HISTORY_LIMIT) {
-            metricHistory.splice(0, metricHistory.length - METRIC_HISTORY_LIMIT);
+          const now = Date.now();
+          const last = metricHistory[metricHistory.length - 1];
+          if (last && Math.abs(now - last.timestamp) < 500) {
+            last.timestamp = now;
+            last.counters = chartSnapshot;
+          } else {
+            metricHistory.push({ timestamp: now, counters: chartSnapshot });
           }
+          pruneMetricHistory();
         } else {
           hideChartTooltip();
         }
@@ -3924,7 +4129,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         updateTelemetrySummary(snapshot);
         renderMetricChart();
         if (telemetryNote) {
-          telemetryNote.textContent = `Stand: ${new Date().toLocaleTimeString('de-DE')}`;
+          telemetryNote.textContent = `Stand: ${new Date().toLocaleTimeString('de-DE')} · Range ${currentHistoryRange}`;
         }
       };
 
@@ -3941,6 +4146,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         if (telemetryNote) {
           telemetryNote.textContent = message || 'Telemetrie nicht verfügbar.';
         }
+        historyLoaded = false;
       };
 
       const handleChartHover = (event) => {
@@ -4121,6 +4327,9 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         }
         if (target === 'telemetry') {
           window.requestAnimationFrame(() => renderMetricChart());
+          if (!historyLoaded && !historyLoading) {
+            fetchTelemetryHistory(currentHistoryRange, { background: true });
+          }
         } else {
           hideChartTooltip();
         }
@@ -4136,6 +4345,20 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         button.addEventListener('click', () => {
           const target = button.dataset.pageTrigger || 'overview';
           setActivePage(target);
+        });
+      });
+
+      setHistoryButtonsActive(currentHistoryRange);
+      historyRangeButtons.forEach((button) => {
+        button.addEventListener('click', async () => {
+          const targetRange = button.dataset.historyRange;
+          if (!targetRange || targetRange === currentHistoryRange || historyLoading) {
+            return;
+          }
+          currentHistoryRange = targetRange;
+          setHistoryButtonsActive(targetRange);
+          historyLoaded = false;
+          await fetchTelemetryHistory(targetRange);
         });
       });
 
@@ -4511,6 +4734,9 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
 
           if (metricsRes.ok) {
             const metrics = await metricsRes.json();
+            if (!historyLoaded) {
+              await fetchTelemetryHistory(currentHistoryRange, { background });
+            }
             setUptimeBase(metrics.uptime_seconds ?? null);
             updateHealth(metrics.live, metrics.ready);
             recordMetricSample(metrics.counters ?? {});

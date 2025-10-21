@@ -1,11 +1,11 @@
-use super::{modules, ticket, user};
+use super::modules;
 use crate::cli::commands::registry::{
     CliDependencies, CommandArgument, CommandEntry, CommandOutcome, CommandRegistry, CommandShape,
     CompletionContext, CompletionKind, ShellEnvironment,
 };
 use std::io::{self, Write};
 
-const SHOW_RESOURCE_OPTIONS: &[&str] = &["user", "users", "ticket", "tickets", "module", "modules"];
+const SHOW_RESOURCE_OPTIONS: &[&str] = &["module", "modules"];
 const SHOW_RESOURCE_ARGUMENT: CommandArgument = CommandArgument::required("resource")
     .with_completion(CompletionKind::Static(SHOW_RESOURCE_OPTIONS));
 const SHOW_TARGET_ARGUMENT: CommandArgument = CommandArgument::required("target")
@@ -14,17 +14,13 @@ const SHOW_TARGET_ARGUMENT: CommandArgument = CommandArgument::required("target"
 const SHOW_ARGUMENTS: &[CommandArgument] = &[SHOW_RESOURCE_ARGUMENT, SHOW_TARGET_ARGUMENT];
 const SHOW_SHAPE: CommandShape = CommandShape::new("show", &[], SHOW_ARGUMENTS, &[]);
 
-const SHOW_DETAILS: &[&str] = &[
-    "show user <username> – zeigt Benutzerdetails",
-    "show ticket <ticket-id> – zeigt Ticketinformationen",
-    "show module <name[@version]> – zeigt Modul-Metadaten",
-];
+const SHOW_DETAILS: &[&str] = &["show module <name[@version]> – zeigt Modul-Metadaten"];
 
 pub fn command() -> CommandEntry {
     CommandEntry::with_shape(
         "show",
-        "Zeigt Details für Benutzer, Tickets oder Module",
-        "show <user|ticket|module> <ziel>",
+        "Zeigt Modul-Metadaten",
+        "show module <name[@version]>",
         SHOW_DETAILS,
         handle_show,
         SHOW_SHAPE,
@@ -44,12 +40,6 @@ fn handle_show(
     };
 
     match resource.to_ascii_lowercase().as_str() {
-        "user" | "users" => {
-            user::show_user(&deps.services.user, tail, out)?;
-        }
-        "ticket" | "tickets" => {
-            ticket::show_ticket(&deps.services.ticket, &deps.services.user, tail, out)?;
-        }
         "module" | "modules" => {
             if tail.is_empty() {
                 writeln!(out, "Nutzung: show module <name[@version]>")?;
@@ -59,7 +49,7 @@ fn handle_show(
         }
         other => {
             writeln!(out, "unbekannte Ressource: {other}")?;
-            writeln!(out, "verfügbar: show user|ticket|module")?;
+            writeln!(out, "verfügbar: show module")?;
         }
     }
 
@@ -72,8 +62,8 @@ fn complete_show_targets(deps: &CliDependencies, ctx: &CompletionContext<'_>) ->
     };
 
     if matches!(resource, "module" | "modules") {
-        return modules::complete_module_ids(deps, ctx);
+        modules::complete_module_ids(deps, ctx)
+    } else {
+        Vec::new()
     }
-
-    Vec::new()
 }

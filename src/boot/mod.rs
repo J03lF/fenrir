@@ -10,12 +10,11 @@ use crate::infra::modules::{
     registry::HttpModuleRegistry, Ed25519ModuleVerifier, FilesystemModuleStorage,
     ProcessModuleRuntime,
 };
-use crate::infra::storage::memory::{InMemoryTicketRepository, InMemoryUserRepository};
 use crate::infra::{db, logging, ssh, telemetry};
 use crate::services::scheduler::install_default_jobs;
 use crate::services::{
     AppServices, DbShellService, ModuleService, SchedulerService, ServiceDescriptor, ServiceKind,
-    ServiceRegistry, ServiceStatus, ServiceTag, TicketService, UserService,
+    ServiceRegistry, ServiceStatus, ServiceTag,
 };
 use anyhow::{anyhow, Result};
 use tracing::info;
@@ -51,28 +50,6 @@ pub fn boot() -> Result<BootContext> {
         Some("bereit".to_string()),
     );
     info!("core services registered in registry");
-    registry.register(
-        ServiceDescriptor::new(
-            "user-service",
-            "User Service",
-            "Verwaltet Benutzer und Rollen",
-            ServiceKind::Security,
-        )
-        .with_tags(&[ServiceTag::Platform]),
-        ServiceStatus::Starting,
-        Some("Initialisierung".to_string()),
-    );
-    registry.register(
-        ServiceDescriptor::new(
-            "ticket-service",
-            "Ticket Service",
-            "Kern-Use-Cases für das Ticketsystem",
-            ServiceKind::Infrastructure,
-        )
-        .with_tags(&[ServiceTag::Platform]),
-        ServiceStatus::Starting,
-        Some("Initialisierung".to_string()),
-    );
     registry.register(
         ServiceDescriptor::new(
             "ssh-server",
@@ -152,12 +129,6 @@ pub fn boot() -> Result<BootContext> {
 
     let db_shell_service = Arc::new(DbShellService::new(default_engine, adapters)?);
     let scheduler_service = Arc::new(SchedulerService::new(Arc::clone(&registry)));
-    let user_repository: Arc<dyn crate::domain::user::UserRepository> =
-        Arc::new(InMemoryUserRepository::new());
-    let user_service = Arc::new(UserService::new(Arc::clone(&user_repository)));
-    let ticket_repository: Arc<dyn crate::domain::ticket::TicketRepository> =
-        Arc::new(InMemoryTicketRepository::new());
-    let ticket_service = Arc::new(TicketService::new(Arc::clone(&ticket_repository)));
     scheduler_service.start();
     info!("scheduler service started");
 
@@ -191,8 +162,6 @@ pub fn boot() -> Result<BootContext> {
     let services = Arc::new(AppServices::new(
         Arc::clone(&db_shell_service),
         Arc::clone(&scheduler_service),
-        Arc::clone(&ticket_service),
-        Arc::clone(&user_service),
         Arc::clone(&registry),
         Arc::clone(&audit_log),
     ));

@@ -530,11 +530,8 @@ mod tests {
     use crate::domain::db::{
         DbAdminPort, DbEngine, DbExecutionResult, DbResult, DbTable, DbTableSchema,
     };
-    use crate::infra::storage::memory::{InMemoryTicketRepository, InMemoryUserRepository};
     use crate::services::ServiceRegistry;
-    use crate::services::{
-        AppServices, DbShellService, SchedulerService, TicketService, UserService,
-    };
+    use crate::services::{AppServices, DbShellService, SchedulerService};
     use async_trait::async_trait;
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -650,17 +647,11 @@ mod tests {
         let db_shell =
             Arc::new(DbShellService::new(DbEngine::Postgres, adapters).expect("db shell"));
 
-        let ticket_repo = Arc::new(InMemoryTicketRepository::new());
-        let ticket = Arc::new(TicketService::new(ticket_repo));
-        let user_repo = Arc::new(InMemoryUserRepository::new());
-        let user = Arc::new(UserService::new(user_repo));
         let audit = Arc::new(InMemoryAuditLog::new(32));
 
         let services = Arc::new(AppServices::new(
             Arc::clone(&db_shell),
             Arc::clone(&scheduler),
-            Arc::clone(&ticket),
-            Arc::clone(&user),
             Arc::clone(&registry),
             audit,
         ));

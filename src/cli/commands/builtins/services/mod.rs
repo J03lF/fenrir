@@ -1,4 +1,4 @@
-use super::{modules, ticket, user};
+use super::modules;
 use crate::audit::{AuditActor, AuditEvent, AuditMetadata, AuditOutcome};
 use crate::cli::commands::registry::{
     CliDependencies, CommandArgument, CommandEntry, CommandOutcome, CommandRegistry, CommandShape,
@@ -32,7 +32,7 @@ impl ServiceCliAction {
 }
 
 const SERVICE_RESOURCE_OPTIONS: &[&str] = &["service", "services", "module", "modules"];
-const LIST_RESOURCE_OPTIONS: &[&str] = &["services", "jobs", "modules", "users", "tickets"];
+const LIST_RESOURCE_OPTIONS: &[&str] = &["services", "jobs", "modules"];
 const SERVICE_TARGET_GLOBAL_OPTIONS: &[&str] = &["--all", "-a", "all"];
 const SERVICE_FORCE_OPTIONS: &[&str] = &["--force", "-f"];
 
@@ -55,8 +55,6 @@ const LIST_DETAILS: &[&str] = &[
     "list services – zeigt registrierte Services",
     "list jobs – listet Scheduler-Jobs",
     "list modules – zeigt installierte Module (mit Runtime)",
-    "list users [--role <rolle>] [--search <term>] [--include-locked]",
-    "list tickets [--status <liste>] [--reporter <user>] [--assignee <user>]",
 ];
 
 const SERVICE_RESOURCE_ARGUMENT: CommandArgument = CommandArgument::required("resource")
@@ -84,13 +82,8 @@ const RESTART_ARGUMENTS: &[CommandArgument] = &[
 ];
 const RESTART_SHAPE: CommandShape = CommandShape::new("restart", &[], RESTART_ARGUMENTS, &[]);
 
-const LIST_ARGUMENTS: &[CommandArgument] = &[
-    CommandArgument::optional("resource")
-        .with_completion(CompletionKind::Static(LIST_RESOURCE_OPTIONS)),
-    CommandArgument::optional("option")
-        .with_completion(CompletionKind::Dynamic(complete_list_options))
-        .variadic(),
-];
+const LIST_ARGUMENTS: &[CommandArgument] = &[CommandArgument::optional("resource")
+    .with_completion(CompletionKind::Static(LIST_RESOURCE_OPTIONS))];
 const LIST_SHAPE: CommandShape = CommandShape::new("list", &[], LIST_ARGUMENTS, &[]);
 
 pub fn start_command() -> CommandEntry {
@@ -129,8 +122,8 @@ pub fn restart_command() -> CommandEntry {
 pub fn list_command() -> CommandEntry {
     CommandEntry::with_shape(
         "list",
-        "Listet Ressourcen (Services, Jobs, Module, Users, Tickets)",
-        "list <services|jobs|modules|users|tickets> [optionen]",
+        "Listet Ressourcen (Services, Jobs, Module)",
+        "list <services|jobs|modules>",
         LIST_DETAILS,
         handle_list,
         LIST_SHAPE,
@@ -204,15 +197,9 @@ fn handle_list(
         "modules" | "module" => {
             modules::run_module_command(deps, "list", rest, out)?;
         }
-        "users" | "user" => {
-            user::list_users(&deps.services.user, rest, out)?;
-        }
-        "tickets" | "ticket" => {
-            ticket::list_tickets(&deps.services.ticket, &deps.services.user, rest, out)?;
-        }
         other => {
             writeln!(out, "unbekannte Ressource: {other}")?;
-            writeln!(out, "verfügbar: list services|jobs|modules|users|tickets")?;
+            writeln!(out, "verfügbar: list services|jobs|modules")?;
         }
     }
     Ok(CommandOutcome::Continue)
@@ -367,24 +354,6 @@ fn complete_force_flags(_deps: &CliDependencies, ctx: &CompletionContext<'_>) ->
     }
 
     Vec::new()
-}
-
-fn complete_list_options(_deps: &CliDependencies, ctx: &CompletionContext<'_>) -> Vec<String> {
-    let Some(resource) = ctx.tokens.get(1).copied() else {
-        return Vec::new();
-    };
-
-    match resource {
-        "users" | "user" => user::USER_LIST_OPTIONS
-            .iter()
-            .map(|value| (*value).to_string())
-            .collect(),
-        "tickets" | "ticket" => ticket::TICKET_LIST_OPTIONS
-            .iter()
-            .map(|value| (*value).to_string())
-            .collect(),
-        _ => Vec::new(),
-    }
 }
 
 fn route_service_action(

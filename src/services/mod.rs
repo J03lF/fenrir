@@ -1,8 +1,6 @@
 pub mod db_shell;
 pub mod module;
 pub mod scheduler;
-pub mod ticket;
-pub mod user;
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -24,8 +22,6 @@ use once_cell::sync::OnceCell;
 pub use db_shell::DbShellService;
 pub use module::ModuleService;
 pub use scheduler::SchedulerService;
-pub use ticket::TicketService;
-pub use user::UserService;
 
 #[derive(Debug)]
 pub struct ServiceActionReport {
@@ -346,8 +342,6 @@ mod tests {
 pub struct AppServices {
     pub db_shell: Arc<DbShellService>,
     pub scheduler: Arc<SchedulerService>,
-    pub ticket: Arc<TicketService>,
-    pub user: Arc<UserService>,
     registry: Arc<ServiceRegistry>,
     managed: RwLock<BTreeMap<&'static str, Arc<dyn ManagedService>>>,
     logging: RwLock<Option<ReloadHandle>>,
@@ -360,8 +354,6 @@ impl AppServices {
     pub fn new(
         db_shell: Arc<DbShellService>,
         scheduler: Arc<SchedulerService>,
-        ticket: Arc<TicketService>,
-        user: Arc<UserService>,
         registry: Arc<ServiceRegistry>,
         audit_log: Arc<dyn AuditLog>,
     ) -> Self {
@@ -369,8 +361,6 @@ impl AppServices {
         Self {
             db_shell,
             scheduler,
-            ticket,
-            user,
             registry,
             managed: RwLock::new(BTreeMap::new()),
             logging: RwLock::new(None),

@@ -1,20 +1,13 @@
 use super::registry::CommandRegistry;
 
-pub mod assign;
 pub mod audit;
-pub mod create;
 pub mod db_shell;
 pub mod exit;
 pub mod help;
-pub mod lock;
 pub mod log;
 pub mod modules;
 pub mod services;
 pub mod show;
-pub mod status;
-pub mod ticket;
-pub mod unlock;
-pub mod user;
 
 pub fn register_builtins(registry: &mut CommandRegistry) {
     registry.register(help::command());
@@ -31,11 +24,6 @@ pub fn register_builtins(registry: &mut CommandRegistry) {
     registry.register(modules::update_command());
     registry.register(modules::check_command());
     registry.register(modules::logs_command());
-    registry.register(assign::command());
-    registry.register(create::command());
-    registry.register(status::command());
-    registry.register(lock::command());
-    registry.register(unlock::command());
     registry.register(show::command());
     registry.register(exit::command());
 }

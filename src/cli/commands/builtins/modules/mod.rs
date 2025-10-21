@@ -730,7 +730,7 @@ fn handle_search(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) ->
 
 fn handle_info(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> io::Result<()> {
     let Some(target) = args.first() else {
-        writeln!(out, "Kommando: show module <name[@version]>")?;
+        writeln!(out, "Use: show module <name[@version]>")?;
         return Ok(());
     };
 
@@ -762,7 +762,7 @@ fn handle_info(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> i
 
 fn handle_install(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> io::Result<()> {
     if args.is_empty() {
-        writeln!(out, "Kommando: install module <name[@version]>")?;
+        writeln!(out, "Use: install module <name[@version]>")?;
         return Ok(());
     }
 
@@ -834,7 +834,7 @@ fn handle_install(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -
 
 fn handle_uninstall(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> io::Result<()> {
     if args.len() != 1 {
-        writeln!(out, "Kommando: uninstall module <name>")?;
+        writeln!(out, "Use: uninstall module <name>")?;
         return Ok(());
     }
 
@@ -1010,7 +1010,7 @@ fn handle_check_updates(
 
 fn handle_start(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> io::Result<()> {
     if args.len() != 1 {
-        writeln!(out, "Kommando: start module <name>")?;
+        writeln!(out, "Use: start module <name>")?;
         return Ok(());
     }
 
@@ -1073,7 +1073,7 @@ fn handle_start(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> 
 
 fn handle_stop(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> io::Result<()> {
     if args.len() != 1 {
-        writeln!(out, "Kommando: stop module <name>")?;
+        writeln!(out, "Use: stop module <name>")?;
         return Ok(());
     }
 
@@ -1115,7 +1115,7 @@ fn handle_stop(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> i
 
 fn handle_restart(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> io::Result<()> {
     if args.len() != 1 {
-        writeln!(out, "Kommando: restart module <name>")?;
+        writeln!(out, "Use: restart module <name>")?;
         return Ok(());
     }
 
@@ -1168,7 +1168,7 @@ fn handle_restart(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -
 
 fn handle_logs(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> io::Result<()> {
     if args.is_empty() {
-        writeln!(out, "Kommando: logs module <name> [--tail N]")?;
+        writeln!(out, "Use: logs module <name> [--tail N]")?;
         return Ok(());
     }
 

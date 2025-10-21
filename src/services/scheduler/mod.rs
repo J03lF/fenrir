@@ -293,7 +293,7 @@ pub fn install_default_jobs(
                     .count();
                 registry.update_note(
                     "scheduler",
-                    Some(format!("Jobs aktiv – failed={failed}, degraded={degraded}")),
+                    Some(format!("Jobs – failed={failed}, degraded={degraded}")),
                 );
                 Ok::<(), anyhow::Error>(())
             }

@@ -44,7 +44,7 @@ export FENRIR_SSH_PASSWORD=test
 export FENRIR_HTTP_TOKEN_ADMIN=testa
 export FENRIR_HTTP_TOKEN_OPERATOR=testo
 export FENRIR_HTTP_TOKEN_VIEWER=testv
-export FENRIR_REGISTRY_TOKEN=""
+export FENRIR_REGISTRY_TOKEN="test12345678910111213141516"
 TLS Konfiguration
 - HTTP: aktiviere `[server.http.tls]` mit `enabled = true`, setze `cert_path`, `key_path` und sichere `cipher_suites`.
 - Optional `reload_interval_seconds` erlaubt automatisches Neuladen von Zertifikaten.

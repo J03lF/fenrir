@@ -17,6 +17,7 @@ use tokio::task;
 
 use crate::audit::{AuditError, AuditEvent, AuditLog};
 use crate::infra::logging::ReloadHandle;
+use crate::security::manager::{AuditSink, SecurityManager};
 use once_cell::sync::OnceCell;
 
 pub use db_shell::DbShellService;
@@ -348,6 +349,7 @@ pub struct AppServices {
     audit_log: Arc<dyn AuditLog>,
     audit_bus: broadcast::Sender<AuditEvent>,
     module_service: OnceCell<Arc<ModuleService>>,
+    security: OnceCell<Arc<SecurityManager>>,
 }
 
 impl AppServices {
@@ -367,6 +369,7 @@ impl AppServices {
             audit_log,
             audit_bus,
             module_service: OnceCell::new(),
+            security: OnceCell::new(),
         }
     }
 
@@ -378,6 +381,16 @@ impl AppServices {
 
     pub fn module_service(&self) -> Option<Arc<ModuleService>> {
         self.module_service.get().cloned()
+    }
+
+    pub fn attach_security(&self, manager: Arc<SecurityManager>) -> Result<(), &'static str> {
+        self.security
+            .set(manager)
+            .map_err(|_| "security manager already attached")
+    }
+
+    pub fn security_manager(&self) -> Option<Arc<SecurityManager>> {
+        self.security.get().cloned()
     }
 
     pub fn registry(&self) -> Arc<ServiceRegistry> {
@@ -567,6 +580,12 @@ impl AppServices {
                 result: self.restart_service(id, force),
             })
             .collect()
+    }
+}
+
+impl AuditSink for AppServices {
+    fn record(&self, event: AuditEvent) -> Result<(), AuditError> {
+        self.record_audit(event)
     }
 }
 

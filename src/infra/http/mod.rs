@@ -915,7 +915,7 @@ fn module_validation_problem(code: &'static str, err: ModuleError) -> ServiceAct
 }
 
 async fn list_installed_modules(State(state): State<HttpState>, headers: HeaderMap) -> Response {
-    if let Err(problem) = authorize(&state.auth, &headers, Role::Viewer) {
+    if let Err(problem) = authorize(&state.auth, &state.services, &headers, Role::Viewer) {
         return problem.into_response();
     }
 
@@ -941,7 +941,7 @@ async fn list_available_modules(
     headers: HeaderMap,
     Query(query): Query<ModuleSearchQueryParams>,
 ) -> Response {
-    if let Err(problem) = authorize(&state.auth, &headers, Role::Viewer) {
+    if let Err(problem) = authorize(&state.auth, &state.services, &headers, Role::Viewer) {
         return problem.into_response();
     }
 
@@ -974,7 +974,7 @@ async fn install_module_version(
     headers: HeaderMap,
     Json(payload): Json<ModuleInstallRequest>,
 ) -> Response {
-    if let Err(problem) = authorize(&state.auth, &headers, Role::Operator) {
+    if let Err(problem) = authorize(&state.auth, &state.services, &headers, Role::Operator) {
         return problem.into_response();
     }
 
@@ -1008,7 +1008,7 @@ async fn update_module_versions(
     headers: HeaderMap,
     Json(payload): Json<ModuleUpdateRequest>,
 ) -> Response {
-    if let Err(problem) = authorize(&state.auth, &headers, Role::Operator) {
+    if let Err(problem) = authorize(&state.auth, &state.services, &headers, Role::Operator) {
         return problem.into_response();
     }
 
@@ -1051,7 +1051,7 @@ async fn uninstall_module_version(
     headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
 ) -> Response {
-    if let Err(problem) = authorize(&state.auth, &headers, Role::Operator) {
+    if let Err(problem) = authorize(&state.auth, &state.services, &headers, Role::Operator) {
         return problem.into_response();
     }
 
@@ -1117,6 +1117,10 @@ pub fn router_with_dependencies(
         },
     };
     build_router(state)
+}
+
+pub fn admin_console_html() -> &'static str {
+    INDEX_HTML
 }
 
 async fn index() -> impl IntoResponse {
@@ -1509,7 +1513,7 @@ async fn service_action(
         ..
     } = state;
 
-    let role = authorize(&auth, &headers, kind.required_role())?;
+    let role = authorize(&auth, &services, &headers, kind.required_role())?;
     let actor = audit_actor_from_role(&role);
     let action_label = format!("service::{}", kind.as_str());
     let base_metadata = audit_metadata_base(&role, force);
@@ -1541,6 +1545,10 @@ async fn service_action(
                 metadata,
             );
 
+            telemetry::record_counter("service.action.total", 1);
+            telemetry::record_counter("service.action.success", 1);
+            telemetry::record_counter(&format!("service.action.{}.success", kind.as_str()), 1);
+
             Ok(ServiceActionResponse {
                 id,
                 action: kind.as_str(),
@@ -1565,6 +1573,9 @@ async fn service_action(
                 AuditOutcome::Failure,
                 metadata,
             );
+            telemetry::record_counter("service.action.total", 1);
+            telemetry::record_counter("service.action.failure", 1);
+            telemetry::record_counter(&format!("service.action.{}.failure", kind.as_str()), 1);
             Err(problem)
         }
     }
@@ -1583,7 +1594,7 @@ async fn bulk_service_action(
         ..
     } = state;
 
-    match authorize(&auth, &headers, kind.required_role()) {
+    match authorize(&auth, &services, &headers, kind.required_role()) {
         Ok(role) => {
             let actor = audit_actor_from_role(&role);
             let base_metadata = audit_metadata_base(&role, force);
@@ -1640,6 +1651,19 @@ async fn bulk_service_action(
             } else {
                 AuditOutcome::Failure
             };
+
+            telemetry::record_counter("service.bulk.total", 1);
+            telemetry::record_counter(&format!("service.bulk.{}.total", kind.as_str()), 1);
+            telemetry::record_counter("service.bulk.success_services", success_count as u64);
+            telemetry::record_counter("service.bulk.failed_services", failed as u64);
+            telemetry::record_counter(
+                &format!("service.bulk.{}.success_services", kind.as_str()),
+                success_count as u64,
+            );
+            telemetry::record_counter(
+                &format!("service.bulk.{}.failed_services", kind.as_str()),
+                failed as u64,
+            );
             push_audit_event(
                 &services,
                 actor,
@@ -1826,21 +1850,45 @@ fn extract_bearer_token(headers: &HeaderMap) -> Option<&str> {
 
 fn authorize(
     auth: &ControlPlaneAuthorizer,
+    services: &AppServices,
     headers: &HeaderMap,
     required: Role,
 ) -> Result<Role, ServiceActionProblem> {
     let token = extract_bearer_token(headers);
-    let role = auth.authorize_token(token).map_err(map_auth_error)?;
-    if role.satisfies(required.clone()) {
-        Ok(role)
-    } else {
-        Err(ServiceActionProblem::new(
-            StatusCode::FORBIDDEN,
-            "role_insufficient",
-            format!(
-                "Aktion erfordert Rolle {required:?}, aktuelle Rolle {role:?} reicht nicht aus"
-            ),
-        ))
+    match auth.authorize_token(token) {
+        Ok(role) => {
+            if role.satisfies(required.clone()) {
+                if let Some(security) = services.security_manager() {
+                    security.audit_control_plane_token(token, required.clone(), &Ok(role.clone()));
+                }
+                Ok(role)
+            } else {
+                if let Some(security) = services.security_manager() {
+                    security.audit_control_plane_token(
+                        token,
+                        required.clone(),
+                        &Err(AuthError::Forbidden),
+                    );
+                }
+                Err(ServiceActionProblem::new(
+                    StatusCode::FORBIDDEN,
+                    "role_insufficient",
+                    format!(
+                        "Aktion erfordert Rolle {required:?}, aktuelle Rolle {role:?} reicht nicht aus"
+                    ),
+                ))
+            }
+        }
+        Err(err) => {
+            if let Some(security) = services.security_manager() {
+                let audit_err = match &err {
+                    AuthError::Unauthorized => AuthError::Unauthorized,
+                    AuthError::Forbidden => AuthError::Forbidden,
+                };
+                security.audit_control_plane_token(token, required.clone(), &Err(audit_err));
+            }
+            Err(map_auth_error(err))
+        }
     }
 }
 
@@ -2278,6 +2326,8 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         border: 1px solid rgba(120, 170, 244, 0.22);
         box-shadow: 0 28px 58px rgba(4, 10, 22, 0.34);
         backdrop-filter: blur(16px);
+        height: 54px;
+        margin-bottom: 30px;
       }
       header.topbar .brand {
         display: flex;
@@ -2337,6 +2387,56 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       header.topbar .actions button:disabled {
         filter: grayscale(1) opacity(0.6);
         cursor: not-allowed;
+      }
+      nav.tabbar {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        gap: 0.6rem;
+        padding: 0.65rem 0.75rem;
+        border-radius: 1.4rem;
+        background: rgba(9, 18, 34, 0.78);
+        border: 1px solid rgba(120, 170, 244, 0.22);
+        box-shadow: inset 0 0 0 1px rgba(76, 128, 210, 0.12);
+        backdrop-filter: blur(14px);
+        width: 100%;
+        max-width: 860px;
+        margin: 0 auto;
+        align-items: stretch;
+        height: 46px;
+      }
+      nav.tabbar button {
+        appearance: none;
+        border: 0;
+        border-radius: 999px;
+        padding: 0.45rem 1.1rem;
+        font-size: 0.78rem;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        font-weight: 600;
+        cursor: pointer;
+        background: rgba(82, 134, 214, 0.24);
+        color: rgba(220, 232, 255, 0.88);
+        transition: background 0.2s ease, color 0.2s ease, transform 0.2s ease;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 44px;
+      }
+      nav.tabbar button:hover {
+        background: rgba(108, 160, 244, 0.32);
+        transform: translateY(-1px);
+      }
+      nav.tabbar button[data-active="true"] {
+        background: linear-gradient(135deg, rgba(78, 156, 255, 0.82), rgba(48, 215, 198, 0.82));
+        color: #041021;
+        box-shadow: 0 14px 26px rgba(56, 122, 214, 0.38);
+      }
+      section.page {
+        display: none;
+        gap: 1.8rem;
+      }
+      section.page[data-visible="true"] {
+        display: grid;
       }
       section.hero {
         display: grid;
@@ -2467,6 +2567,194 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         background: rgba(94, 118, 160, 0.26);
         color: rgba(210, 226, 250, 0.6);
         cursor: not-allowed;
+      }
+      .telemetry-grid {
+        display: grid;
+        gap: 1.6rem;
+        grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+      }
+      .telemetry-stats {
+        display: grid;
+        gap: 1.2rem;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      }
+      .telemetry-stat-value {
+        font-size: clamp(2.2rem, 3vw, 2.8rem);
+        font-weight: 600;
+        color: #f2f6ff;
+      }
+      .telemetry-stat-note {
+        font-size: 0.94rem;
+        color: rgba(156, 190, 255, 0.72);
+        letter-spacing: 0.04em;
+      }
+      @media (max-width: 980px) {
+        .telemetry-grid {
+          grid-template-columns: minmax(0, 1fr);
+        }
+      }
+      .chart-card {
+        position: relative;
+        overflow: hidden;
+        display: grid;
+        gap: 1.1rem;
+      }
+      .chart-card canvas.metric-chart {
+        width: 100%;
+        max-width: 100%;
+        display: block;
+        border-radius: 1rem;
+        background: rgba(6, 14, 24, 0.65);
+        border: 1px solid rgba(88, 134, 212, 0.26);
+        box-shadow: inset 0 0 0 1px rgba(70, 118, 196, 0.14);
+        aspect-ratio: auto;
+        height: clamp(200px, 24vh, 260px);
+      }
+      .chart-legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.6rem;
+        align-items: center;
+      }
+      .chart-legend .legend-item {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        padding: 0.35rem 0.75rem;
+        border-radius: 0.9rem;
+        background: rgba(28, 46, 76, 0.58);
+        border: 1px solid rgba(102, 150, 226, 0.34);
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        font-size: 0.72rem;
+        color: #dce6ff;
+      }
+      .chart-legend .legend-swatch {
+        width: 10px;
+        height: 10px;
+        border-radius: 999px;
+        box-shadow: 0 0 0 2px rgba(4, 10, 22, 0.38);
+      }
+      .chart-legend .legend-label {
+        white-space: nowrap;
+      }
+      .chart-legend .legend-value {
+        font-variant-numeric: tabular-nums;
+        color: rgba(170, 196, 232, 0.85);
+      }
+      .chart-legend .legend-empty {
+        font-size: 0.82rem;
+        color: rgba(156, 190, 255, 0.72);
+      }
+      .chart-tooltip {
+        position: absolute;
+        top: 0;
+        left: 0;
+        display: none;
+        min-width: 180px;
+        padding: 0.75rem 0.9rem;
+        border-radius: 0.9rem;
+        background: rgba(14, 24, 38, 0.92);
+        border: 1px solid rgba(120, 170, 244, 0.42);
+        box-shadow: 0 18px 40px rgba(4, 10, 22, 0.45);
+        backdrop-filter: blur(12px);
+        pointer-events: none;
+        z-index: 5;
+        transform: translate(-9999px, -9999px);
+      }
+      .chart-tooltip[data-visible="true"] {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+      }
+      .chart-tooltip .tooltip-header {
+        font-size: 0.78rem;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: rgba(176, 206, 255, 0.78);
+      }
+      .chart-tooltip .tooltip-body {
+        display: grid;
+        gap: 0.35rem;
+      }
+      .chart-tooltip .tooltip-row {
+        display: grid;
+        grid-template-columns: auto 1fr auto;
+        align-items: center;
+        gap: 0.55rem;
+        font-size: 0.88rem;
+        color: #eaf3ff;
+      }
+      .chart-tooltip .tooltip-swatch {
+        width: 10px;
+        height: 10px;
+        border-radius: 999px;
+        box-shadow: 0 0 0 2px rgba(4, 16, 32, 0.45);
+      }
+      .chart-tooltip .tooltip-label {
+        white-space: nowrap;
+      }
+      .chart-tooltip .tooltip-value {
+        font-variant-numeric: tabular-nums;
+        color: rgba(196, 218, 255, 0.92);
+      }
+      .chart-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .chart-header small {
+        color: rgba(162, 190, 230, 0.78);
+        font-weight: 500;
+      }
+      .chart-empty {
+        display: none;
+        border-radius: 1rem;
+        padding: 1rem 1.2rem;
+        background: rgba(12, 24, 42, 0.78);
+        border: 1px dashed rgba(120, 168, 240, 0.32);
+        color: rgba(170, 196, 232, 0.82);
+        text-align: center;
+      }
+      .chart-empty[data-visible="true"] {
+        display: block;
+      }
+      .metric-table-card {
+        display: flex;
+        flex-direction: column;
+        gap: 0.85rem;
+      }
+      .metric-table-scroll {
+        overflow-y: auto;
+        max-height: clamp(160px, 24vh, 240px);
+        border-radius: 1rem;
+        border: 1px solid rgba(88, 134, 212, 0.16);
+        background: rgba(12, 20, 34, 0.55);
+        box-shadow: inset 0 0 0 1px rgba(68, 106, 184, 0.12);
+      }
+      .metric-table-card table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      .metric-table-card th,
+      .metric-table-card td {
+        padding: 0.6rem 0.4rem;
+        border-bottom: 1px solid rgba(120, 168, 240, 0.18);
+        font-size: 0.88rem;
+      }
+      .metric-table-card th {
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        color: rgba(156, 190, 255, 0.76);
+        font-size: 0.75rem;
+      }
+      .metric-table-card td:first-child {
+        color: #f0f6ff;
+      }
+      .metric-table-card td:last-child {
+        text-align: right;
+        color: rgba(198, 218, 248, 0.9);
+        font-variant-numeric: tabular-nums;
       }
       section.services {
         display: grid;
@@ -2697,6 +2985,8 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         body { padding: 3.2rem 1.6rem 4rem; }
         header.topbar { grid-template-columns: 1fr; }
         header.topbar .actions { justify-content: flex-end; }
+        nav.tabbar { grid-template-columns: 1fr; max-width: 100%; }
+        nav.tabbar button { width: 100%; }
         table.service-table th:nth-child(4),
         table.service-table td:nth-child(4),
         table.service-table th:nth-child(5),
@@ -2709,6 +2999,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
   </head>
   <body>
     <main class="shell">
+    <div>
       <header class="topbar">
         <div class="brand">
           <div class="logo">FN</div>
@@ -2722,89 +3013,159 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         </div>
       </header>
 
-      <section class="hero">
-        <h2>Überblick &amp; Steuerung für Fenrir</h2>
-        <p>
-          Echtzeitstatus, geschützte Service-Aktionen und ein aufgeräumtes Interface ermöglichen einen ruhigen Betrieb.
-          Jeder Eingriff läuft über RBAC und Audit-Logs.
-        </p>
+      <nav class="tabbar" role="tablist" aria-label="Bereichsauswahl">
+        <button type="button" role="tab" data-page-trigger="overview" data-active="true" aria-selected="true">Übersicht</button>
+        <button type="button" role="tab" data-page-trigger="services" aria-selected="false">Services</button>
+        <button type="button" role="tab" data-page-trigger="telemetry" aria-selected="false">Telemetry</button>
+        <button type="button" role="tab" data-page-trigger="audit" aria-selected="false">Audit</button>
+      </nav>
+       </div>
+      <section class="page" data-page="overview" data-visible="true">
+        <section class="hero">
+          <h2>Überblick &amp; Steuerung für Fenrir</h2>
+          <p>
+            Echtzeitstatus, geschützte Service-Aktionen und ein aufgeräumtes Interface ermöglichen einen ruhigen Betrieb.
+            Jeder Eingriff läuft über RBAC und Audit-Logs.
+          </p>
+        </section>
         <div class="alert" data-alert></div>
         <div class="meta" data-meta>
           <span>lade Applikationsdaten …</span>
         </div>
+        <section class="summary-grid">
+          <article class="card metric-card" data-card="app">
+            <h3>Applikation</h3>
+            <div class="metric-value" data-app-name>–</div>
+            <div class="metric-hint" data-app-version>Version wird geladen …</div>
+          </article>
+          <article class="card metric-card" data-card="uptime">
+            <h3>Uptime</h3>
+            <div class="metric-value" data-uptime>–</div>
+            <div class="metric-hint">Quelle: Telemetrie</div>
+          </article>
+          <article class="card metric-card" data-card="health">
+            <h3>Status</h3>
+            <div class="metric-value" data-health>—</div>
+            <div class="metric-hint" data-health-note>Prüfe Readiness-Status …</div>
+          </article>
+        </section>
+        <section class="management-grid">
+          <article class="card token-card">
+            <h3>API Token</h3>
+            <div class="token-input">
+              <input
+                type="password"
+                autocomplete="off"
+                placeholder="Bearer Token hier einfügen"
+                aria-label="Control Plane Token"
+                data-token-input
+              />
+            </div>
+            <div class="token-status" data-token-status>
+              Token nicht gesetzt – Anfragen erfolgen ohne Auth.
+            </div>
+          </article>
+        </section>
       </section>
 
-      <section class="summary-grid">
-        <article class="card metric-card" data-card="app">
-          <h3>Applikation</h3>
-          <div class="metric-value" data-app-name>–</div>
-          <div class="metric-hint" data-app-version>Version wird geladen …</div>
-        </article>
-        <article class="card metric-card" data-card="uptime">
-          <h3>Uptime</h3>
-          <div class="metric-value" data-uptime>–</div>
-          <div class="metric-hint">Quelle: Telemetrie</div>
-        </article>
-        <article class="card metric-card" data-card="health">
-          <h3>Status</h3>
-          <div class="metric-value" data-health>—</div>
-          <div class="metric-hint" data-health-note>Prüfe Readiness-Status …</div>
-        </article>
-      </section>
-
-      <section class="management-grid">
-        <article class="card token-card">
-          <h3>API Token</h3>
-          <div class="token-input">
-            <input
-              type="password"
-              autocomplete="off"
-              placeholder="Bearer Token hier einfügen"
-              aria-label="Control Plane Token"
-              data-token-input
-            />
-          </div>
-          <div class="token-status" data-token-status>
-            Token nicht gesetzt – Anfragen erfolgen ohne Auth.
-          </div>
-        </article>
-        <article class="card control-card">
-          <h3>Service Aktionen</h3>
-          <div class="button-row">
-            <button type="button" data-bulk-start>Start All</button>
-            <button type="button" data-bulk-stop>Stop All</button>
-            <button type="button" data-bulk-restart>Restart All</button>
-          </div>
-          <div class="metric-hint">Nur nicht-core Services werden beeinflusst.</div>
-        </article>
-      </section>
-
-      <section class="services">
-        <div class="service-header">
-          <h2>Registrierte Services</h2>
-          <small data-service-meta>lade Registry …</small>
+      <section class="page" data-page="telemetry" data-visible="false">
+        <div class="telemetry-stats">
+          <article class="card metric-card">
+            <h3>CPU Auslastung</h3>
+            <div class="telemetry-stat-value" data-metric-cpu>–</div>
+            <div class="telemetry-stat-note" data-metric-cpu-note>Keine Daten verfügbar.</div>
+          </article>
+          <article class="card metric-card">
+            <h3>Speichernutzung</h3>
+            <div class="telemetry-stat-value" data-metric-mem>–</div>
+            <div class="telemetry-stat-note" data-metric-mem-note>Keine Daten verfügbar.</div>
+          </article>
+          <article class="card metric-card">
+            <h3>Disk I/O</h3>
+            <div class="telemetry-stat-value" data-metric-io>–</div>
+            <div class="telemetry-stat-note" data-metric-io-note>Keine Daten verfügbar.</div>
+          </article>
         </div>
-        <div class="service-board">
-          <table class="service-table">
-            <thead>
-              <tr>
-                <th>ID</th>
-                <th>Name</th>
-                <th>Status</th>
-                <th>Tags</th>
-                <th>Hinweis</th>
-                <th>Aktionen</th>
-              </tr>
-            </thead>
-            <tbody data-services>
-              <tr>
-                <td colspan="6">Service-Registry wird abgefragt …</td>
-              </tr>
-            </tbody>
-          </table>
+        <div class="telemetry-grid">
+          <article class="card chart-card">
+            <div class="chart-header">
+              <h3>Performance Verlauf</h3>
+              <small data-telemetry-note>Telemetrie wird geladen …</small>
+            </div>
+            <canvas class="metric-chart" data-metric-chart width="960" height="320"></canvas>
+            <div class="chart-legend" data-metric-legend>
+              <span class="legend-empty">Es liegen noch keine Messwerte vor.</span>
+            </div>
+            <div class="chart-tooltip" data-chart-tooltip>
+              <div class="tooltip-header" data-tooltip-time>–</div>
+              <div class="tooltip-body" data-tooltip-body></div>
+            </div>
+            <div class="chart-empty" data-chart-empty data-visible="true">
+              Noch keine Telemetriedaten verfügbar.
+            </div>
+          </article>
+          <article class="card metric-table-card">
+            <h3>Aktuelle Kennzahlen</h3>
+            <div class="metric-table-scroll">
+              <table class="metric-table">
+                <thead>
+                  <tr>
+                    <th>Metrik</th>
+                    <th>Wert</th>
+                  </tr>
+                </thead>
+                <tbody data-metric-list>
+                  <tr>
+                    <td colspan="2">Noch keine Daten geladen.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </article>
         </div>
       </section>
 
+      <section class="page" data-page="services" data-visible="false">
+        <section class="management-grid service-actions-grid">
+          <article class="card control-card">
+            <h3>Service Aktionen</h3>
+            <div class="button-row">
+              <button type="button" data-bulk-start>Start All</button>
+              <button type="button" data-bulk-stop>Stop All</button>
+              <button type="button" data-bulk-restart>Restart All</button>
+            </div>
+            <div class="metric-hint">Nur nicht-core Services werden beeinflusst.</div>
+          </article>
+        </section>
+
+        <section class="services">
+          <div class="service-header">
+            <h2>Registrierte Services</h2>
+            <small data-service-meta>lade Registry …</small>
+          </div>
+          <div class="service-board">
+            <table class="service-table">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Name</th>
+                  <th>Status</th>
+                  <th>Tags</th>
+                  <th>Hinweis</th>
+                  <th>Aktionen</th>
+                </tr>
+              </thead>
+              <tbody data-services>
+                <tr>
+                  <td colspan="6">Service-Registry wird abgefragt …</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+    </section>
+
+    <section class="page" data-page="audit" data-visible="false">
       <section class="audit">
         <div class="audit-board">
           <div class="audit-meta">
@@ -2833,6 +3194,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
           </table>
         </div>
       </section>
+    </section>
 
       <footer class="note">
         Zugriff auf erweiterte Aktionen erfolgt über die CLI oder autorisierte API-Clients. Alle
@@ -2844,6 +3206,26 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       
       const REFRESH_INTERVAL_MS = 15000;
       const UPTIME_TICK_MS = 1000;
+      const CHART_METRIC_KEYS = [
+        'process.cpu.usage_percent',
+        'process.memory.resident_bytes',
+        'process.io.read_bytes_per_sec',
+        'process.io.write_bytes_per_sec',
+      ];
+      const PINNED_METRIC_KEYS = [
+        'process.cpu.usage_percent',
+        'process.memory.resident_bytes',
+        'process.memory.virtual_bytes',
+        'process.io.read_bytes_per_sec',
+        'process.io.write_bytes_per_sec',
+      ];
+      const METRIC_LABEL_OVERRIDES = {
+        'process.cpu.usage_percent': 'CPU-Auslastung (Prozess)',
+        'process.memory.resident_bytes': 'Arbeitsspeicher RSS (Prozess)',
+        'process.memory.virtual_bytes': 'Arbeitsspeicher virtuell (Prozess)',
+        'process.io.read_bytes_per_sec': 'I/O Lesen pro Sekunde',
+        'process.io.write_bytes_per_sec': 'I/O Schreiben pro Sekunde',
+      };
 
       const metaEl = document.querySelector('[data-meta]');
       const alertEl = document.querySelector('[data-alert]');
@@ -2863,8 +3245,27 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       const auditBody = document.querySelector('[data-audit-events]');
       const auditMeta = document.querySelector('[data-audit-meta]');
       const auditRefreshBtn = document.querySelector('[data-audit-refresh]');
+      const telemetryNote = document.querySelector('[data-telemetry-note]');
+      const metricChartCanvas = document.querySelector('[data-metric-chart]');
+      const metricPlaceholder = document.querySelector('[data-chart-empty]');
+      const metricLegend = document.querySelector('[data-metric-legend]');
+      const metricListBody = document.querySelector('[data-metric-list]');
+      const metricCpuValue = document.querySelector('[data-metric-cpu]');
+      const metricCpuNote = document.querySelector('[data-metric-cpu-note]');
+      const metricMemValue = document.querySelector('[data-metric-mem]');
+      const metricMemNote = document.querySelector('[data-metric-mem-note]');
+      const metricIoValue = document.querySelector('[data-metric-io]');
+      const metricIoNote = document.querySelector('[data-metric-io-note]');
+      const chartTooltip = document.querySelector('[data-chart-tooltip]');
+      const chartTooltipTime = document.querySelector('[data-tooltip-time]');
+      const chartTooltipBody = document.querySelector('[data-tooltip-body]');
+      const pageButtons = Array.from(document.querySelectorAll('[data-page-trigger]'));
+      const pageContainers = new Map(
+        Array.from(document.querySelectorAll('[data-page]')).map((el) => [el.dataset.page, el]),
+      );
 
       const TOKEN_KEY = 'fenrir-control-plane-token';
+      const PAGE_STORAGE_KEY = 'fenrir-control-plane-page';
 
       let refreshHandle = null;
       let uptimeHandle = null;
@@ -2875,6 +3276,16 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       let servicesCache = new Map();
       let eventSource = null;
       let sseWarned = false;
+      const metricHistory = [];
+      const METRIC_HISTORY_LIMIT = 60;
+      const METRIC_SERIES_MAX = 4;
+      const METRIC_COLORS = ['#4f8efd', '#33d5c4', '#f4d35e', '#ed6a5a', '#c792ea', '#6ad1ff'];
+      const numberFormatter = new Intl.NumberFormat('de-DE');
+      let metricCtx = null;
+      const SERVICE_STATUS_KEYS = ['starting', 'active', 'degraded', 'failed', 'standby', 'stopped'];
+      const SERVICE_STATUS_FALLBACK = 'services.status.other';
+      const SERVICE_TAG_KEYS = ['core', 'platform', 'auxiliary'];
+      let chartHoverState = null;
 
       const loadToken = () => {
         try {
@@ -2956,6 +3367,787 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
           hour12: false,
         });
       };
+
+      const escapeHtml = (value) => {
+        return String(value ?? '')
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
+      };
+
+      const formatNumber = (value) => {
+        if (!Number.isFinite(value)) {
+          return '–';
+        }
+        return numberFormatter.format(value);
+      };
+
+      const withAlpha = (hex, alpha) => {
+        if (typeof hex !== 'string') {
+          return hex;
+        }
+        const normalized = hex.startsWith('#') ? hex.slice(1) : hex;
+        if (normalized.length !== 6) {
+          return hex;
+        }
+        const r = parseInt(normalized.slice(0, 2), 16);
+        const g = parseInt(normalized.slice(2, 4), 16);
+        const b = parseInt(normalized.slice(4, 6), 16);
+        const clampedAlpha = Math.min(Math.max(alpha ?? 1, 0), 1);
+        if (!Number.isFinite(r) || !Number.isFinite(g) || !Number.isFinite(b)) {
+          return hex;
+        }
+        return `rgba(${r}, ${g}, ${b}, ${clampedAlpha})`;
+      };
+
+      const formatChartTime = (timestamp) => {
+        if (!Number.isFinite(timestamp)) {
+          return '';
+        }
+        const date = new Date(timestamp);
+        return date.toLocaleTimeString('de-DE', {
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+        });
+      };
+
+      const formatMetricLabel = (key) => {
+        if (!key) {
+          return 'metric';
+        }
+        return String(key)
+          .replace(/^(services|process)\./, '')
+          .replace(/\./g, ' › ')
+          .replace(/_/g, ' ');
+      };
+
+      const formatPercent = (value, fractionDigits = 0) => {
+        if (!Number.isFinite(value)) {
+          return '–';
+        }
+        return `${value.toFixed(fractionDigits)} %`;
+      };
+
+      const formatBytes = (value) => {
+        if (!Number.isFinite(value)) {
+          return '–';
+        }
+        const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
+        let amount = value;
+        let unitIndex = 0;
+        while (amount >= 1024 && unitIndex < units.length - 1) {
+          amount /= 1024;
+          unitIndex += 1;
+        }
+        const precision = amount >= 10 || unitIndex === 0 ? 0 : 1;
+        return `${amount.toFixed(precision)} ${units[unitIndex]}`;
+      };
+
+      const formatThroughput = (value) => {
+        if (!Number.isFinite(value)) {
+          return '0 B/s';
+        }
+        if (value === 0) {
+          return '0 B/s';
+        }
+        return `${formatBytes(value)}/s`;
+      };
+
+      const formatTooltipValue = (key, value) => {
+        if (!Number.isFinite(value)) {
+          return '–';
+        }
+        if (key.includes('.cpu.') || key.endsWith('.percent')) {
+          return formatPercent(value, value < 10 ? 1 : 0);
+        }
+        if (key.includes('.memory.') || key.includes('.bytes_total')) {
+          return formatBytes(value);
+        }
+        if (key.includes('.io.') && key.includes('_per_sec')) {
+          return formatThroughput(value);
+        }
+        return formatNumber(value);
+      };
+
+      const hideChartTooltip = () => {
+        if (!chartTooltip) {
+          return;
+        }
+        chartTooltip.dataset.visible = 'false';
+        chartTooltip.style.transform = 'translate(-9999px, -9999px)';
+      };
+
+      const filterChartCounters = (counters) => {
+        if (!counters) {
+          return {};
+        }
+        const preferred = CHART_METRIC_KEYS.filter((key) => key in counters);
+        if (preferred.length === 0) {
+          return {};
+        }
+        const mapped = {};
+        preferred.forEach((key) => {
+          mapped[key] = counters[key];
+        });
+        return mapped;
+      };
+
+      const resetTelemetrySummary = () => {
+        if (metricCpuValue) {
+          metricCpuValue.textContent = '–';
+        }
+        if (metricCpuNote) {
+          metricCpuNote.textContent = 'Keine Prozessdaten verfügbar.';
+        }
+        if (metricMemValue) {
+          metricMemValue.textContent = '–';
+        }
+        if (metricMemNote) {
+          metricMemNote.textContent = 'Keine Prozessdaten verfügbar.';
+        }
+        if (metricIoValue) {
+          metricIoValue.textContent = '–';
+        }
+        if (metricIoNote) {
+          metricIoNote.textContent = 'Keine Prozessdaten verfügbar.';
+        }
+      };
+
+      const updateTelemetrySummary = (counters) => {
+        if (!counters || !Object.keys(counters).some((key) => key.startsWith('process.'))) {
+          return;
+        }
+
+        if (metricCpuValue) {
+          const cpuPercent = Number(counters['process.cpu.usage_percent']);
+          if (Number.isFinite(cpuPercent)) {
+            metricCpuValue.textContent = formatPercent(cpuPercent, cpuPercent < 10 ? 1 : 0);
+            if (metricCpuNote) {
+              if (cpuPercent >= 90) {
+                metricCpuNote.textContent = 'Warnung: sehr hohe Auslastung.';
+              } else if (cpuPercent >= 70) {
+                metricCpuNote.textContent = 'Hinweis: erhöhte CPU-Last.';
+              } else {
+                metricCpuNote.textContent = 'CPU-Last unkritisch.';
+              }
+            }
+          }
+        }
+
+        if (metricMemValue) {
+          const residentBytes = Number(counters['process.memory.resident_bytes']);
+          const virtualBytes = Number(counters['process.memory.virtual_bytes']);
+          if (Number.isFinite(residentBytes)) {
+            metricMemValue.textContent = formatBytes(residentBytes);
+            if (metricMemNote) {
+              if (Number.isFinite(virtualBytes) && virtualBytes > 0) {
+                metricMemNote.textContent = `Virtuell: ${formatBytes(virtualBytes)}`;
+              } else {
+                metricMemNote.textContent = 'Residenter Speicher (RSS).';
+              }
+            }
+          }
+        }
+
+        if (metricIoValue) {
+          const readRate = Number(counters['process.io.read_bytes_per_sec']);
+          const writeRate = Number(counters['process.io.write_bytes_per_sec']);
+          const combinedRate = [readRate, writeRate]
+            .filter((value) => Number.isFinite(value))
+            .reduce((sum, value) => sum + value, 0);
+          if (Number.isFinite(combinedRate)) {
+            metricIoValue.textContent = formatThroughput(combinedRate);
+            if (metricIoNote) {
+              const readText = Number.isFinite(readRate) ? formatThroughput(readRate) : '0 B/s';
+              const writeText = Number.isFinite(writeRate) ? formatThroughput(writeRate) : '0 B/s';
+              metricIoNote.textContent = `Lesen ${readText} · Schreiben ${writeText}`;
+            }
+          }
+        }
+      };
+
+      const renderMetricLegend = (entries) => {
+        if (!metricLegend) {
+          return;
+        }
+        const items = Array.isArray(entries) ? entries : [];
+        if (items.length === 0) {
+          metricLegend.innerHTML = '<span class="legend-empty">Es liegen noch keine Messwerte vor.</span>';
+          return;
+        }
+        metricLegend.innerHTML = items
+          .map((entry) => {
+            const baseLabel = entry.label ?? METRIC_LABEL_OVERRIDES[entry.key] ?? formatMetricLabel(entry.key);
+            const label = escapeHtml(baseLabel);
+            const valueText = escapeHtml(formatTooltipValue(entry.key, entry.value));
+            const color = entry.color || '#4f8efd';
+            return `
+              <span class="legend-item">
+                <span class="legend-swatch" style="background:${color}"></span>
+                <span class="legend-label">${label}</span>
+                <span class="legend-value">${valueText}</span>
+              </span>
+            `;
+          })
+          .join('');
+      };
+
+      const setChartEmpty = (empty, message) => {
+        if (!metricChartCanvas || !metricPlaceholder) {
+          return;
+        }
+        if (empty) {
+          metricChartCanvas.style.display = 'none';
+          metricPlaceholder.dataset.visible = 'true';
+          if (message) {
+            metricPlaceholder.textContent = message;
+          }
+          renderMetricLegend([]);
+          hideChartTooltip();
+        } else {
+          metricChartCanvas.style.display = 'block';
+          metricPlaceholder.dataset.visible = 'false';
+          if (message) {
+            metricPlaceholder.textContent = message;
+          }
+        }
+      };
+
+      const renderMetricList = (counters) => {
+        if (!metricListBody) {
+          return;
+        }
+        const entries = Object.entries(counters || {}).filter(([, value]) => Number.isFinite(value));
+        if (entries.length === 0) {
+          metricListBody.innerHTML = '<tr><td colspan="2">Keine Telemetriedaten gemeldet.</td></tr>';
+          return;
+        }
+
+        const pinned = PINNED_METRIC_KEYS
+          .map((key) => [key, Number(counters?.[key])])
+          .filter(([, value]) => Number.isFinite(value));
+        const seen = new Set(pinned.map(([key]) => key));
+
+        const dynamic = entries
+          .filter(([key]) => !seen.has(key))
+          .sort((a, b) => b[1] - a[1]);
+
+        const combined = [...pinned, ...dynamic].slice(0, 20);
+        metricListBody.innerHTML = combined
+          .map(([name, value]) => {
+            const label = escapeHtml(METRIC_LABEL_OVERRIDES[name] ?? formatMetricLabel(name));
+            const valueText = escapeHtml(formatTooltipValue(name, value));
+            return `<tr><td>${label}</td><td>${valueText}</td></tr>`;
+          })
+          .join('');
+      };
+
+      const renderMetricChart = () => {
+        if (!metricChartCanvas) {
+          return;
+        }
+        if (!metricCtx) {
+          metricCtx = metricChartCanvas.getContext('2d');
+        }
+        if (!metricCtx) {
+          return;
+        }
+        chartHoverState = null;
+        if (metricHistory.length === 0) {
+          metricCtx.clearRect(0, 0, metricChartCanvas.width, metricChartCanvas.height);
+          renderMetricLegend([]);
+          const placeholderText = metricPlaceholder ? metricPlaceholder.textContent : '';
+          setChartEmpty(true, placeholderText || 'Keine Telemetriedaten gemeldet.');
+          return;
+        }
+
+        setChartEmpty(false);
+        const ctx = metricCtx;
+        const width = metricChartCanvas.width;
+        const height = metricChartCanvas.height;
+        ctx.clearRect(0, 0, width, height);
+
+        const padding = 48;
+        const plotWidth = width - padding * 2;
+        const plotHeight = height - padding * 2;
+
+        const keys = new Set();
+        metricHistory.forEach((sample) => {
+          Object.keys(sample.counters).forEach((key) => keys.add(key));
+        });
+        if (keys.size === 0) {
+          renderMetricLegend([]);
+          setChartEmpty(true, 'Keine Telemetriedaten gemeldet.');
+          return;
+        }
+
+        const latest = metricHistory[metricHistory.length - 1]?.counters ?? {};
+        const prioritizedSeries = [];
+        CHART_METRIC_KEYS.forEach((key) => {
+          if (keys.has(key) && !prioritizedSeries.includes(key)) {
+            prioritizedSeries.push(key);
+          }
+        });
+        const otherSeries = Array.from(keys).filter((key) => !prioritizedSeries.includes(key));
+        otherSeries.sort((a, b) => (latest[b] ?? 0) - (latest[a] ?? 0));
+        const series = [...prioritizedSeries, ...otherSeries].slice(0, METRIC_SERIES_MAX);
+
+        if (series.length === 0) {
+          renderMetricLegend([]);
+          setChartEmpty(true, 'Keine Telemetriedaten gemeldet.');
+          return;
+        }
+
+        let minValue = Infinity;
+        let maxValue = -Infinity;
+        metricHistory.forEach((sample) => {
+          series.forEach((key) => {
+            const value = sample.counters[key];
+            if (Number.isFinite(value)) {
+              if (value < minValue) minValue = value;
+              if (value > maxValue) maxValue = value;
+            }
+          });
+        });
+
+        if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) {
+          renderMetricLegend([]);
+          setChartEmpty(true, 'Keine Telemetriedaten gemeldet.');
+          return;
+        }
+        if (minValue === maxValue) {
+          if (minValue === 0) {
+            maxValue = 1;
+          } else {
+            minValue = 0;
+          }
+        }
+
+        const toX = (index) => {
+          const ratio = index / Math.max(metricHistory.length - 1, 1);
+          return padding + ratio * plotWidth;
+        };
+        const toY = (value) => {
+          const ratio = (value - minValue) / (maxValue - minValue);
+          return height - padding - ratio * plotHeight;
+        };
+
+        const firstTimestamp = metricHistory[0]?.timestamp;
+        const lastTimestamp = metricHistory[metricHistory.length - 1]?.timestamp;
+
+        const legendEntries = series.map((key, index) => ({
+          key,
+          value: latest[key] ?? 0,
+          color: METRIC_COLORS[index % METRIC_COLORS.length],
+        }));
+        renderMetricLegend(legendEntries);
+
+        ctx.save();
+        const background = ctx.createLinearGradient(0, padding, 0, height - padding);
+        background.addColorStop(0, 'rgba(62, 124, 214, 0.20)');
+        background.addColorStop(1, 'rgba(8, 16, 30, 0.82)');
+        ctx.fillStyle = background;
+        ctx.fillRect(padding, padding, plotWidth, plotHeight);
+        ctx.restore();
+
+        ctx.save();
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = 'rgba(120, 160, 220, 0.18)';
+        ctx.setLineDash([4, 8]);
+        const gridY = 4;
+        for (let i = 1; i < gridY; i += 1) {
+          const y = padding + (plotHeight / gridY) * i;
+          ctx.beginPath();
+          ctx.moveTo(padding, y);
+          ctx.lineTo(padding + plotWidth, y);
+          ctx.stroke();
+        }
+        const gridX = Math.min(Math.max(metricHistory.length - 1, 1), 6);
+        for (let i = 1; i < gridX; i += 1) {
+          const x = padding + (plotWidth / gridX) * i;
+          ctx.beginPath();
+          ctx.moveTo(x, padding);
+          ctx.lineTo(x, padding + plotHeight);
+          ctx.stroke();
+        }
+        ctx.restore();
+
+        ctx.save();
+        ctx.strokeStyle = 'rgba(140, 180, 240, 0.45)';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(padding, padding);
+        ctx.lineTo(padding, height - padding);
+        ctx.lineTo(width - padding, height - padding);
+        ctx.stroke();
+        ctx.restore();
+
+        const hoverSeries = [];
+        const timestamps = metricHistory.map((sample) => sample.timestamp ?? NaN);
+        const stepX = plotWidth / Math.max(metricHistory.length - 1, 1);
+        series.forEach((key, index) => {
+          const color = METRIC_COLORS[index % METRIC_COLORS.length];
+          const values = new Array(metricHistory.length).fill(null);
+          const points = new Array(metricHistory.length).fill(null);
+          const pathPoints = [];
+
+          metricHistory.forEach((sample, idx) => {
+            const value = sample.counters[key];
+            if (!Number.isFinite(value)) {
+              return;
+            }
+            const x = padding + stepX * idx;
+            const y = toY(value);
+            const point = { x, y };
+            points[idx] = point;
+            pathPoints.push(point);
+            values[idx] = value;
+          });
+
+          if (pathPoints.length === 0) {
+            return;
+          }
+
+          if (pathPoints.length > 1) {
+            ctx.save();
+            ctx.fillStyle = withAlpha(color, 0.18);
+            ctx.beginPath();
+            ctx.moveTo(pathPoints[0].x, height - padding);
+            pathPoints.forEach((point) => ctx.lineTo(point.x, point.y));
+            ctx.lineTo(pathPoints[pathPoints.length - 1].x, height - padding);
+            ctx.closePath();
+            ctx.fill();
+            ctx.restore();
+          }
+
+          ctx.save();
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 2.2;
+          ctx.lineJoin = 'round';
+          ctx.lineCap = 'round';
+          ctx.beginPath();
+          let started = false;
+          points.forEach((point) => {
+            if (!point) {
+              return;
+            }
+            if (!started) {
+              ctx.moveTo(point.x, point.y);
+              started = true;
+            } else {
+              ctx.lineTo(point.x, point.y);
+            }
+          });
+          ctx.stroke();
+          ctx.restore();
+
+          const lastPoint = pathPoints[pathPoints.length - 1];
+          if (lastPoint) {
+            ctx.save();
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            ctx.arc(lastPoint.x, lastPoint.y, 4, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+          }
+
+          hoverSeries.push({
+            key,
+            label: formatMetricLabel(key),
+            color,
+            values,
+            points,
+          });
+        });
+
+        ctx.save();
+        ctx.fillStyle = 'rgba(156, 190, 255, 0.7)';
+        ctx.font = '12px "Inter", system-ui, sans-serif';
+        ctx.textBaseline = 'alphabetic';
+        ctx.fillText(formatNumber(Math.round(maxValue)), padding + 4, padding + 12);
+        ctx.fillText(formatNumber(Math.round(minValue)), padding + 4, height - padding - 4);
+        ctx.textBaseline = 'top';
+        ctx.textAlign = 'left';
+        if (Number.isFinite(firstTimestamp)) {
+          ctx.fillText(formatChartTime(firstTimestamp), padding, height - padding + 8);
+        }
+        if (Number.isFinite(lastTimestamp)) {
+          ctx.textAlign = 'right';
+          ctx.fillText(formatChartTime(lastTimestamp), width - padding, height - padding + 8);
+        }
+        ctx.restore();
+
+        if (hoverSeries.length > 0) {
+          chartHoverState = {
+            padding,
+            plotWidth,
+            width,
+            height,
+            series: hoverSeries,
+            timestamps,
+          };
+        } else {
+          chartHoverState = null;
+        }
+      };
+
+      const recordMetricSample = (counters) => {
+        const numericEntries = Object.entries(counters || {}).filter(([, value]) => {
+          return typeof value === 'number' && Number.isFinite(value);
+        });
+        if (numericEntries.length === 0) {
+          metricHistory.length = 0;
+          renderMetricList({});
+          renderMetricChart();
+          if (telemetryNote) {
+            telemetryNote.textContent = 'Keine Telemetriedaten verfügbar.';
+          }
+          resetTelemetrySummary();
+          setChartEmpty(true, 'Keine Telemetriedaten gemeldet.');
+          return;
+        }
+
+        const snapshot = Object.fromEntries(numericEntries);
+        const chartSnapshot = filterChartCounters(snapshot);
+        if (Object.keys(chartSnapshot).length > 0) {
+          metricHistory.push({ timestamp: Date.now(), counters: chartSnapshot });
+          if (metricHistory.length > METRIC_HISTORY_LIMIT) {
+            metricHistory.splice(0, metricHistory.length - METRIC_HISTORY_LIMIT);
+          }
+        } else {
+          hideChartTooltip();
+        }
+        renderMetricList(snapshot);
+        updateTelemetrySummary(snapshot);
+        renderMetricChart();
+        if (telemetryNote) {
+          telemetryNote.textContent = `Stand: ${new Date().toLocaleTimeString('de-DE')}`;
+        }
+      };
+
+      const markTelemetryUnavailable = (message) => {
+        metricHistory.length = 0;
+        if (metricCtx && metricChartCanvas) {
+          metricCtx.clearRect(0, 0, metricChartCanvas.width, metricChartCanvas.height);
+        }
+        renderMetricList({});
+        renderMetricLegend([]);
+        resetTelemetrySummary();
+        hideChartTooltip();
+        setChartEmpty(true, message || 'Telemetrie nicht verfügbar.');
+        if (telemetryNote) {
+          telemetryNote.textContent = message || 'Telemetrie nicht verfügbar.';
+        }
+      };
+
+      const handleChartHover = (event) => {
+        if (!metricChartCanvas || !chartHoverState || !chartHoverState.timestamps || chartHoverState.timestamps.length === 0) {
+          hideChartTooltip();
+          return;
+        }
+        const rect = metricChartCanvas.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) {
+          hideChartTooltip();
+          return;
+        }
+        const scaleX = metricChartCanvas.width / rect.width;
+        let canvasX = (event.clientX - rect.left) * scaleX;
+        const { padding, plotWidth } = chartHoverState;
+        const maxX = padding + plotWidth;
+        canvasX = Math.min(Math.max(canvasX, padding), maxX);
+
+        const total = chartHoverState.timestamps.length;
+        if (total === 0) {
+          hideChartTooltip();
+          return;
+        }
+        const ratio = total === 1 ? 0 : (canvasX - padding) / plotWidth;
+        let index = Math.round(ratio * (total - 1));
+        index = Math.min(Math.max(index, 0), total - 1);
+
+        renderMetricChart();
+        const state = chartHoverState;
+        if (!state || state.series.length === 0) {
+          hideChartTooltip();
+          return;
+        }
+
+        const hoverX = total === 1 ? padding : padding + (index / (total - 1)) * state.plotWidth;
+        const ctx = metricCtx;
+        ctx.save();
+        ctx.strokeStyle = 'rgba(236, 246, 255, 0.34)';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([3, 4]);
+        ctx.beginPath();
+        ctx.moveTo(hoverX, state.padding);
+        ctx.lineTo(hoverX, state.height - state.padding);
+        ctx.stroke();
+        ctx.restore();
+
+        const rows = [];
+        state.series.forEach((series) => {
+          const value = series.values[index];
+          if (!Number.isFinite(value)) {
+            return;
+          }
+          const point = series.points[index];
+          if (point) {
+            ctx.save();
+            ctx.fillStyle = series.color;
+            ctx.strokeStyle = 'rgba(4, 16, 32, 0.82)';
+            ctx.lineWidth = 1.2;
+            ctx.beginPath();
+            ctx.arc(point.x, point.y, 4.5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.stroke();
+            ctx.restore();
+          }
+          rows.push({
+            key: series.key,
+            label: series.label,
+            value,
+            color: series.color,
+          });
+        });
+
+        if (!chartTooltip || !chartTooltipBody || !chartTooltipTime || rows.length === 0) {
+          hideChartTooltip();
+          return;
+        }
+
+        rows.sort((a, b) => b.value - a.value);
+        chartTooltipBody.innerHTML = rows
+          .map((row) => {
+            const formattedValue = formatTooltipValue(row.key, row.value);
+            return `
+              <div class="tooltip-row">
+                <span class="tooltip-swatch" style="background:${row.color}"></span>
+                <span class="tooltip-label">${escapeHtml(row.label)}</span>
+                <span class="tooltip-value">${formattedValue}</span>
+              </div>
+            `;
+          })
+          .join('');
+
+        const timestamp = state.timestamps[index];
+        chartTooltipTime.textContent = Number.isFinite(timestamp)
+          ? formatChartTime(timestamp)
+          : '–';
+
+        chartTooltip.dataset.visible = 'true';
+        const container = metricChartCanvas.parentElement;
+        if (!container) {
+          return;
+        }
+        const containerRect = container.getBoundingClientRect();
+        const tooltipRect = chartTooltip.getBoundingClientRect();
+        const offsetX = event.clientX - containerRect.left + 12;
+        const offsetY = event.clientY - containerRect.top + 12;
+        const maxLeft = containerRect.width - tooltipRect.width - 12;
+        const maxTop = containerRect.height - tooltipRect.height - 12;
+        const finalX = Math.max(12, Math.min(offsetX, maxLeft));
+        const finalY = Math.max(12, Math.min(offsetY, maxTop));
+        chartTooltip.style.transform = `translate(${finalX}px, ${finalY}px)`;
+      };
+
+      const collectServiceMetrics = () => {
+        const counters = {
+          'services.total': servicesCache.size,
+          'services.critical': 0,
+        };
+        SERVICE_STATUS_KEYS.forEach((key) => {
+          counters[`services.status.${key}`] = 0;
+        });
+        counters[SERVICE_STATUS_FALLBACK] = 0;
+        SERVICE_TAG_KEYS.forEach((key) => {
+          counters[`services.tag.${key}`] = 0;
+        });
+        servicesCache.forEach((svc) => {
+          const statusKey = `services.status.${svc.status ?? 'other'}`;
+          if (statusKey in counters) {
+            counters[statusKey] += 1;
+          } else {
+            counters[SERVICE_STATUS_FALLBACK] += 1;
+          }
+          if (Array.isArray(svc.tags)) {
+            svc.tags.forEach((tag) => {
+              const tagKey = `services.tag.${tag}`;
+              if (tagKey in counters) {
+                counters[tagKey] += 1;
+              }
+            });
+          }
+          if (svc.critical) {
+            counters['services.critical'] += 1;
+          }
+        });
+        return counters;
+      };
+
+      const pushServiceMetricsSample = () => {
+        if (!servicesCache || servicesCache.size === 0) {
+          return;
+        }
+        renderMetricList(collectServiceMetrics());
+      };
+
+      const getStoredPage = () => {
+        try {
+          const value = localStorage.getItem(PAGE_STORAGE_KEY);
+          if (value && pageContainers.has(value)) {
+            return value;
+          }
+        } catch (_) {}
+        return 'overview';
+      };
+
+      const setActivePage = (name, { persist = true } = {}) => {
+        const target = pageContainers.has(name) ? name : 'overview';
+        pageContainers.forEach((element, key) => {
+          element.dataset.visible = key === target ? 'true' : 'false';
+        });
+        pageButtons.forEach((button) => {
+          const active = button.dataset.pageTrigger === target;
+          button.dataset.active = active ? 'true' : 'false';
+          button.setAttribute('aria-selected', active ? 'true' : 'false');
+        });
+        if (persist) {
+          try {
+            localStorage.setItem(PAGE_STORAGE_KEY, target);
+          } catch (_) {}
+        }
+        if (target === 'telemetry') {
+          window.requestAnimationFrame(() => renderMetricChart());
+        } else {
+          hideChartTooltip();
+        }
+      };
+
+      resetTelemetrySummary();
+      setChartEmpty(true, 'Noch keine Telemetriedaten verfügbar.');
+
+      const initialPage = getStoredPage();
+      setActivePage(initialPage, { persist: false });
+
+      pageButtons.forEach((button) => {
+        button.addEventListener('click', () => {
+          const target = button.dataset.pageTrigger || 'overview';
+          setActivePage(target);
+        });
+      });
+
+      if (metricChartCanvas) {
+        metricChartCanvas.addEventListener('mousemove', handleChartHover);
+        metricChartCanvas.addEventListener('mouseleave', () => {
+          hideChartTooltip();
+          if (chartHoverState) {
+            window.requestAnimationFrame(() => renderMetricChart());
+          }
+        });
+      }
 
       const renderActor = (actor) => {
         if (!actor || actor.kind === 'system') {
@@ -3214,6 +4406,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
           });
         }
         renderServicesTable();
+        pushServiceMetricsSample();
       };
 
       const applyServiceState = (event) => {
@@ -3234,6 +4427,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         };
         servicesCache.set(event.id, updated);
         renderServicesTable();
+        pushServiceMetricsSample();
       };
 
       const updateHealth = (live, ready) => {
@@ -3319,10 +4513,12 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
             const metrics = await metricsRes.json();
             setUptimeBase(metrics.uptime_seconds ?? null);
             updateHealth(metrics.live, metrics.ready);
+            recordMetricSample(metrics.counters ?? {});
           } else {
             setUptimeBase(null);
             healthValue.textContent = 'unbekannt';
             healthNote.textContent = 'Telemetrie nicht verfügbar.';
+            markTelemetryUnavailable(`Telemetrie nicht verfügbar (${metricsRes.status}).`);
           }
 
           if (auditRes.ok) {
@@ -3338,6 +4534,10 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
           showAlert(background ? 'Auto-Refresh fehlgeschlagen – Verbindung prüfen.' : 'Netzwerkfehler: Bitte Verbindung prüfen.');
           auditBody.innerHTML = '<tr><td colspan="6">Netzwerkfehler – keine Audit-Daten.</td></tr>';
           auditMeta.textContent = 'Fehler';
+          setUptimeBase(null);
+          healthValue.textContent = 'unbekannt';
+          healthNote.textContent = 'Telemetrie nicht verfügbar.';
+          markTelemetryUnavailable('Telemetrie nicht verfügbar.');
         } finally {
           isLoading = false;
         }

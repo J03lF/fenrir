@@ -1,4 +1,11 @@
 use serde::Deserialize;
+use std::env;
+use std::path::{Path, PathBuf};
+
+const ENV_CONFIG_FILE: &str = "FENRIR_CONFIG_FILE";
+const ENV_CONFIG_ENV: &str = "FENRIR_CONFIG_ENV";
+const ENV_ENV: &str = "FENRIR_ENV";
+const LOCAL_OVERRIDE_FILE: &str = "config/local.toml";
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct AppConfig {
@@ -70,11 +77,23 @@ pub struct SecuritySection {
     pub allowed_ciphers: Vec<String>,
     #[serde(default)]
     pub http: HttpSecuritySection,
+    #[serde(default)]
+    pub session: SessionSection,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct KdfConfig {
     pub algorithm: String,
+    #[serde(default = "default_argon2_memory_mib")]
+    pub memory_mib: u32,
+    #[serde(default = "default_argon2_iterations")]
+    pub iterations: u32,
+    #[serde(default = "default_argon2_parallelism")]
+    pub parallelism: u32,
+    #[serde(default = "default_kdf_salt_len")]
+    pub salt_length: u32,
+    #[serde(default = "default_kdf_output_len")]
+    pub output_length: u32,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -129,6 +148,24 @@ pub struct TelemetrySection {
     pub tracing_level: String,
     pub metrics_enabled: bool,
     pub health_enabled: bool,
+    #[serde(default)]
+    pub system: TelemetrySystemSection,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct TelemetrySystemSection {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub interval_ms: Option<u64>,
+}
+
+impl Default for TelemetrySystemSection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_ms: None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -186,8 +223,54 @@ pub struct ModuleTrustSection {
     pub keyring_path: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct SessionSection {
+    #[serde(default = "default_session_lifetime_seconds")]
+    pub lifetime_seconds: u64,
+    #[serde(default = "default_session_idle_timeout_seconds")]
+    pub idle_timeout_seconds: u64,
+    #[serde(default = "default_session_cleanup_interval_seconds")]
+    pub cleanup_interval_seconds: u64,
+}
+
 fn default_require_signature() -> bool {
     true
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_argon2_memory_mib() -> u32 {
+    64
+}
+
+fn default_argon2_iterations() -> u32 {
+    3
+}
+
+fn default_argon2_parallelism() -> u32 {
+    2
+}
+
+fn default_kdf_salt_len() -> u32 {
+    16
+}
+
+fn default_kdf_output_len() -> u32 {
+    32
+}
+
+fn default_session_lifetime_seconds() -> u64 {
+    3600
+}
+
+fn default_session_idle_timeout_seconds() -> u64 {
+    900
+}
+
+fn default_session_cleanup_interval_seconds() -> u64 {
+    300
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -198,6 +281,10 @@ pub enum ConfigError {
     Invalid(&'static str),
     #[error("missing environment variable {var} for {key}")]
     MissingEnv { key: &'static str, var: String },
+    #[error("config profile '{value}' contains invalid characters (allowed: a-z, 0-9, '-', '_')")]
+    InvalidProfile { value: String },
+    #[error("config file not found: {path}")]
+    MissingConfigFile { path: String },
 }
 
 impl HttpSecuritySection {
@@ -205,7 +292,7 @@ impl HttpSecuritySection {
         let mut resolved = Vec::with_capacity(self.control_tokens.len());
         for entry in &self.control_tokens {
             let (role, value) = parse_role_token(entry)?;
-            let secret = resolve_secret(value)?;
+            let secret = resolve_secret(value, "security.http.control_tokens")?;
             if secret.is_empty() {
                 return Err(ConfigError::Invalid(
                     "security.http.control_tokens secrets must not be empty",
@@ -226,6 +313,159 @@ impl HttpSecuritySection {
                         "security.http.control_tokens must prefix role as admin|operator|viewer",
                     ))
                 }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl KdfConfig {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.algorithm.trim().is_empty() {
+            return Err(ConfigError::Invalid(
+                "security.kdf.algorithm must not be empty",
+            ));
+        }
+        match self.algorithm.to_ascii_lowercase().as_str() {
+            "argon2id" | "argon2" => {}
+            other => {
+                return Err(ConfigError::Invalid(match other {
+                    _ => "security.kdf.algorithm must be argon2id",
+                }))
+            }
+        }
+        if self.memory_mib == 0 {
+            return Err(ConfigError::Invalid("security.kdf.memory_mib must be > 0"));
+        }
+        if self.iterations == 0 {
+            return Err(ConfigError::Invalid("security.kdf.iterations must be > 0"));
+        }
+        if self.parallelism == 0 {
+            return Err(ConfigError::Invalid("security.kdf.parallelism must be > 0"));
+        }
+        if self.salt_length < 12 {
+            return Err(ConfigError::Invalid(
+                "security.kdf.salt_length must be >= 12 bytes",
+            ));
+        }
+        if self.output_length < 16 {
+            return Err(ConfigError::Invalid(
+                "security.kdf.output_length must be >= 16 bytes",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl SecuritySection {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.allowed_ciphers.is_empty() {
+            return Err(ConfigError::Invalid(
+                "security.allowed_ciphers must contain at least one cipher",
+            ));
+        }
+
+        for cipher in &self.allowed_ciphers {
+            match cipher.trim().to_ascii_lowercase().as_str() {
+                "aes-gcm" | "aes256-gcm" | "aes_256_gcm" | "xchacha20-poly1305" => {}
+                _ => {
+                    return Err(ConfigError::Invalid(
+                        "security.allowed_ciphers contains unsupported cipher",
+                    ))
+                }
+            }
+        }
+
+        self.kdf.validate()?;
+        self.http.validate()?;
+        self.session.validate()?;
+        Ok(())
+    }
+}
+
+impl ModuleRegistrySection {
+    pub fn resolved_auth_token(&self) -> Result<Option<String>, ConfigError> {
+        resolve_optional_secret(&self.auth_token, "modules.registry.auth_token")
+    }
+
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.url.trim().is_empty() {
+            return Err(ConfigError::Invalid(
+                "modules.registry.url must not be empty",
+            ));
+        }
+        if let Some(token) = self.resolved_auth_token()? {
+            if token.len() < 16 {
+                return Err(ConfigError::Invalid(
+                    "modules.registry.auth_token must be at least 16 characters",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl ModuleStorageSection {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.install_dir.trim().is_empty() {
+            return Err(ConfigError::Invalid(
+                "modules.storage.install_dir must not be empty",
+            ));
+        }
+        if let Some(cache) = &self.cache_dir {
+            if cache.trim().is_empty() {
+                return Err(ConfigError::Invalid(
+                    "modules.storage.cache_dir must not be empty when set",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl SessionSection {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.lifetime_seconds == 0 {
+            return Err(ConfigError::Invalid(
+                "security.session.lifetime_seconds must be > 0",
+            ));
+        }
+        if self.idle_timeout_seconds == 0 {
+            return Err(ConfigError::Invalid(
+                "security.session.idle_timeout_seconds must be > 0",
+            ));
+        }
+        if self.idle_timeout_seconds > self.lifetime_seconds {
+            return Err(ConfigError::Invalid(
+                "security.session.idle_timeout_seconds must not exceed lifetime_seconds",
+            ));
+        }
+        if self.cleanup_interval_seconds == 0 {
+            return Err(ConfigError::Invalid(
+                "security.session.cleanup_interval_seconds must be > 0",
+            ));
+        }
+        if self.cleanup_interval_seconds > self.lifetime_seconds {
+            return Err(ConfigError::Invalid(
+                "security.session.cleanup_interval_seconds must not exceed lifetime_seconds",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl TelemetrySection {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.tracing_level.trim().is_empty() {
+            return Err(ConfigError::Invalid(
+                "telemetry.tracing_level must not be empty",
+            ));
+        }
+        if let Some(interval) = self.system.interval_ms {
+            if interval == 0 {
+                return Err(ConfigError::Invalid(
+                    "telemetry.system.interval_ms must be > 0",
+                ));
             }
         }
         Ok(())
@@ -283,16 +523,16 @@ fn parse_role_token(raw: &str) -> Result<(String, &str), ConfigError> {
     Ok((role.to_ascii_lowercase(), value))
 }
 
-fn resolve_secret(value: &str) -> Result<String, ConfigError> {
+fn resolve_secret(value: &str, key: &'static str) -> Result<String, ConfigError> {
     if let Some(env) = value.strip_prefix("env:") {
         let var = env.trim();
         match std::env::var(var) {
             Ok(secret) if !secret.trim().is_empty() => Ok(secret),
             Ok(_) => Err(ConfigError::Invalid(
-                "environment variable for control token must not be empty",
+                "environment variable referenced in configuration must not be empty",
             )),
             Err(_) => Err(ConfigError::MissingEnv {
-                key: "security.http.control_tokens",
+                key,
                 var: var.to_string(),
             }),
         }
@@ -301,9 +541,104 @@ fn resolve_secret(value: &str) -> Result<String, ConfigError> {
     }
 }
 
+fn resolve_optional_secret(
+    value: &Option<String>,
+    key: &'static str,
+) -> Result<Option<String>, ConfigError> {
+    match value {
+        Some(raw) => {
+            let secret = resolve_secret(raw, key)?;
+            if secret.trim().is_empty() {
+                return Err(ConfigError::Invalid("secret values must not be empty"));
+            }
+            Ok(Some(secret))
+        }
+        None => Ok(None),
+    }
+}
+
+fn detect_config_profile() -> Result<Option<String>, ConfigError> {
+    for key in [ENV_CONFIG_ENV, ENV_ENV] {
+        if let Ok(value) = env::var(key) {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let profile = sanitize_profile(trimmed)?;
+            return Ok(Some(profile));
+        }
+    }
+    Ok(None)
+}
+
+fn sanitize_profile(raw: &str) -> Result<String, ConfigError> {
+    let lower = raw.trim().to_ascii_lowercase();
+    if lower
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        Ok(lower)
+    } else {
+        Err(ConfigError::InvalidProfile {
+            value: raw.to_string(),
+        })
+    }
+}
+
+fn explicit_config_path() -> Result<Option<PathBuf>, ConfigError> {
+    match env::var(ENV_CONFIG_FILE) {
+        Ok(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return Err(ConfigError::Invalid(
+                    "FENRIR_CONFIG_FILE must not be empty when set",
+                ));
+            }
+            let path = PathBuf::from(trimmed);
+            if !path.exists() {
+                return Err(ConfigError::MissingConfigFile {
+                    path: path.display().to_string(),
+                });
+            }
+            Ok(Some(path))
+        }
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => Err(ConfigError::Invalid(
+            "FENRIR_CONFIG_FILE must be valid UTF-8",
+        )),
+    }
+}
+
+fn local_override_path() -> Option<PathBuf> {
+    let path = PathBuf::from(LOCAL_OVERRIDE_FILE);
+    if path.exists() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
 pub fn load() -> Result<AppConfig, ConfigError> {
     let mut builder =
-        config::Config::builder().add_source(config::File::with_name("config/default.toml"));
+        config::Config::builder().add_source(config::File::from(Path::new("config/default.toml")));
+
+    if let Some(profile) = detect_config_profile()? {
+        let profile_path = Path::new("config").join(format!("{}.toml", profile));
+        if !profile_path.exists() {
+            return Err(ConfigError::MissingConfigFile {
+                path: profile_path.display().to_string(),
+            });
+        }
+        builder = builder.add_source(config::File::from(profile_path));
+    }
+
+    if let Some(local) = local_override_path() {
+        builder = builder.add_source(config::File::from(local));
+    }
+
+    if let Some(explicit) = explicit_config_path()? {
+        builder = builder.add_source(config::File::from(explicit));
+    }
 
     // Add env overrides like FENRIR__SERVER__SSH__PORT=2222
     builder = builder.add_source(config::Environment::with_prefix("FENRIR").separator("__"));
@@ -318,6 +653,11 @@ pub fn load() -> Result<AppConfig, ConfigError> {
 }
 
 pub fn validate(cfg: &AppConfig) -> Result<(), ConfigError> {
+    cfg.security.validate()?;
+    cfg.telemetry.validate()?;
+    cfg.modules.registry.validate()?;
+    cfg.modules.storage.validate()?;
+
     if !matches!(
         cfg.db.default_engine.as_str(),
         "postgres" | "mysql" | "sqlite" | "mongodb"
@@ -391,26 +731,7 @@ pub fn validate(cfg: &AppConfig) -> Result<(), ConfigError> {
     }
     validate_http_tls(&cfg.server.http)?;
     validate_ssh_tls(&cfg.server.ssh)?;
-    cfg.security.http.validate()?;
-
-    if cfg.modules.registry.url.trim().is_empty() {
-        return Err(ConfigError::Invalid(
-            "modules.registry.url must not be empty",
-        ));
-    }
     validate_module_registry_tls(&cfg.modules.registry)?;
-    if cfg.modules.storage.install_dir.trim().is_empty() {
-        return Err(ConfigError::Invalid(
-            "modules.storage.install_dir must not be empty",
-        ));
-    }
-    if let Some(cache_dir) = &cfg.modules.storage.cache_dir {
-        if cache_dir.trim().is_empty() {
-            return Err(ConfigError::Invalid(
-                "modules.storage.cache_dir must not be empty when set",
-            ));
-        }
-    }
     if cfg.modules.trust.require_signature {
         let _keyring_path = cfg
             .modules
@@ -536,17 +857,83 @@ fn validate_module_registry_tls(cfg: &ModuleRegistrySection) -> Result<(), Confi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn test_mutex() -> &'static Mutex<()> {
+        static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+        GUARD.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn default_config_loads_and_validates() {
-        std::env::set_var(
+        let _lock = test_mutex().lock().unwrap();
+        env::set_var(
             "FENRIR_DB_POSTGRES_URI",
             "postgresql://localhost:5432/fenrir",
         );
-        std::env::set_var("FENRIR_HTTP_TOKEN_ADMIN", "admin-token");
-        std::env::set_var("FENRIR_HTTP_TOKEN_OPERATOR", "operator-token");
-        std::env::set_var("FENRIR_HTTP_TOKEN_VIEWER", "viewer-token");
+        env::set_var("FENRIR_HTTP_TOKEN_ADMIN", "admin-token-example");
+        env::set_var("FENRIR_HTTP_TOKEN_OPERATOR", "operator-token-example");
+        env::set_var("FENRIR_HTTP_TOKEN_VIEWER", "viewer-token-example");
+        env::set_var("FENRIR_REGISTRY_TOKEN", "registry-token-example-123");
+        env::remove_var(ENV_CONFIG_FILE);
+        env::remove_var(ENV_CONFIG_ENV);
+        env::remove_var(ENV_ENV);
+
         let cfg = load().expect("config should load");
         assert!(!cfg.app.name.is_empty());
+        env::remove_var("FENRIR_DB_POSTGRES_URI");
+        env::remove_var("FENRIR_HTTP_TOKEN_ADMIN");
+        env::remove_var("FENRIR_HTTP_TOKEN_OPERATOR");
+        env::remove_var("FENRIR_HTTP_TOKEN_VIEWER");
+        env::remove_var("FENRIR_REGISTRY_TOKEN");
+    }
+
+    #[test]
+    fn config_env_requires_existing_profile_file() {
+        let _lock = test_mutex().lock().unwrap();
+        env::set_var(
+            "FENRIR_DB_POSTGRES_URI",
+            "postgresql://localhost:5432/fenrir",
+        );
+        env::set_var("FENRIR_HTTP_TOKEN_ADMIN", "admin-token-example");
+        env::set_var("FENRIR_HTTP_TOKEN_OPERATOR", "operator-token-example");
+        env::set_var("FENRIR_HTTP_TOKEN_VIEWER", "viewer-token-example");
+        env::set_var("FENRIR_REGISTRY_TOKEN", "registry-token-example-123");
+        env::set_var(ENV_CONFIG_ENV, "does-not-exist");
+        env::remove_var(ENV_CONFIG_FILE);
+        env::remove_var(ENV_ENV);
+
+        let err = load().expect_err("profile should be missing");
+        match err {
+            ConfigError::MissingConfigFile { path } => {
+                assert!(path.ends_with("config/does-not-exist.toml"));
+            }
+            other => panic!("expected MissingConfigFile, got {other:?}"),
+        }
+        env::remove_var("FENRIR_DB_POSTGRES_URI");
+        env::remove_var("FENRIR_HTTP_TOKEN_ADMIN");
+        env::remove_var("FENRIR_HTTP_TOKEN_OPERATOR");
+        env::remove_var("FENRIR_HTTP_TOKEN_VIEWER");
+        env::remove_var("FENRIR_REGISTRY_TOKEN");
+        env::remove_var(ENV_CONFIG_ENV);
+    }
+
+    #[test]
+    fn explicit_config_file_must_exist() {
+        let _lock = test_mutex().lock().unwrap();
+        let missing = env::temp_dir().join("fenrir-test-missing-config.toml");
+        if missing.exists() {
+            std::fs::remove_file(&missing).ok();
+        }
+        env::set_var(ENV_CONFIG_FILE, missing.to_string_lossy().to_string());
+        env::remove_var(ENV_CONFIG_ENV);
+        env::remove_var(ENV_ENV);
+
+        let err = explicit_config_path().expect_err("should fail for missing file");
+        match err {
+            ConfigError::MissingConfigFile { .. } => {}
+            other => panic!("expected missing config file error, got {other:?}"),
+        }
+        env::remove_var(ENV_CONFIG_FILE);
     }
 }

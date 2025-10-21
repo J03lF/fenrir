@@ -524,8 +524,8 @@ mod tests {
         AppConfig, AppSection, AuditSection, CliSection, DbConnectionSettings, DbConnections,
         DbPoolSettings, DbSection, HttpConfig, HttpSecuritySection, HttpTlsConfig, JwtConfig,
         KdfConfig, ModuleRegistrySection, ModuleRegistryTlsSection, ModuleStorageSection,
-        ModuleTrustSection, ModulesSection, SecuritySection, ServerSection, SshConfig,
-        SshTlsConfig, TelemetrySection,
+        ModuleTrustSection, ModulesSection, SecuritySection, ServerSection, SessionSection,
+        SshConfig, SshTlsConfig, TelemetrySection, TelemetrySystemSection,
     };
     use crate::domain::db::{
         DbAdminPort, DbEngine, DbExecutionResult, DbResult, DbTable, DbTableSchema,
@@ -597,15 +597,25 @@ mod tests {
             security: SecuritySection {
                 kdf: KdfConfig {
                     algorithm: "argon2id".to_string(),
+                    memory_mib: 64,
+                    iterations: 3,
+                    parallelism: 2,
+                    salt_length: 16,
+                    output_length: 32,
                 },
                 jwt: JwtConfig {
                     issuer: "fenrir".to_string(),
                     audience: "fenrir".to_string(),
                     exp_seconds: 3600,
                 },
-                allowed_ciphers: vec!["AES-GCM".to_string()],
+                allowed_ciphers: vec!["AES-GCM".to_string(), "XChaCha20-Poly1305".to_string()],
                 http: HttpSecuritySection {
                     control_tokens: Vec::new(),
+                },
+                session: SessionSection {
+                    lifetime_seconds: 3600,
+                    idle_timeout_seconds: 900,
+                    cleanup_interval_seconds: 300,
                 },
             },
             db: DbSection {
@@ -616,6 +626,10 @@ mod tests {
                 tracing_level: "info".to_string(),
                 metrics_enabled: false,
                 health_enabled: false,
+                system: TelemetrySystemSection {
+                    enabled: true,
+                    interval_ms: Some(5000),
+                },
             },
             audit: AuditSection { enabled: false },
             cli: CliSection {

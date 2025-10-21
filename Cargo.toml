@@ -32,6 +32,7 @@ arc-swap = "1.6"
 tokio-rustls = "0.24"
 rustls = "0.21"
 rustls-pemfile = "1.0"
+libc = "0.2"
 hyper-util = { version = "0.1", features = ["tokio"] }
 hyper = { version = "1.7", features = ["http1", "http2", "server"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
@@ -48,6 +49,12 @@ reqwest = { version = "0.11", default-features = false, features = ["json", "rus
 urlencoding = "2.1"
 flate2 = { version = "1.0", default-features = true }
 tar = "0.4"
+argon2 = { version = "0.5", default-features = false, features = ["std", "password-hash"] }
+password-hash = { version = "0.5", features = ["std"] }
+aes-gcm = { version = "0.10", features = ["aes"] }
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["std"] }
+rand = { version = "0.8", features = ["std"] }
+rand_core = "0.6"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.27", features = ["signal", "process"] }

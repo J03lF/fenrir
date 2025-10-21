@@ -11,6 +11,7 @@ use crate::infra::modules::{
     ProcessModuleRuntime,
 };
 use crate::infra::{db, logging, ssh, telemetry};
+use crate::security::manager::{AuditSink, SecurityManager};
 use crate::services::scheduler::install_default_jobs;
 use crate::services::{
     AppServices, DbShellService, ModuleService, SchedulerService, ServiceDescriptor, ServiceKind,
@@ -117,6 +118,9 @@ pub fn boot() -> Result<BootContext> {
         }),
     );
 
+    telemetry::attach_service_registry(Arc::clone(&registry));
+    telemetry::start_system_metrics_sampler(&cfg);
+
     crate::infra::telemetry::register_readiness_probe("services", {
         let registry = Arc::clone(&registry);
         move || {
@@ -169,6 +173,14 @@ pub fn boot() -> Result<BootContext> {
     services
         .attach_module_service(Arc::clone(&module_service))
         .map_err(|err| anyhow!("module service attach failed: {err}"))?;
+    let audit_sink: Arc<dyn AuditSink> = Arc::clone(&services) as Arc<dyn AuditSink>;
+    let _security_manager = Arc::new(
+        SecurityManager::new(&cfg.security, audit_sink)
+            .map_err(|err| anyhow!("security manager init failed: {err}"))?,
+    );
+    services
+        .attach_security(Arc::clone(&_security_manager))
+        .map_err(|err| anyhow!(err))?;
     registry.set_status(
         "module-runtime",
         ServiceStatus::Active,
@@ -275,40 +287,11 @@ pub fn boot() -> Result<BootContext> {
     register_registry_toggle_service(
         &services,
         &registry,
-        "user-service",
-        ServiceStatus::Active,
-        "Service aktiv",
-        ServiceStatus::Standby,
-        "Service gestoppt",
-    );
-    register_registry_toggle_service(
-        &services,
-        &registry,
-        "ticket-service",
-        ServiceStatus::Active,
-        "Service aktiv",
-        ServiceStatus::Standby,
-        "Service gestoppt",
-    );
-    register_registry_toggle_service(
-        &services,
-        &registry,
         "cli-shell",
         ServiceStatus::Standby,
         "Bereit für neue Sessions",
         ServiceStatus::Stopped,
         "CLI deaktiviert",
-    );
-
-    registry.set_status(
-        "user-service",
-        ServiceStatus::Active,
-        Some("In-Memory Repository initialisiert".to_string()),
-    );
-    registry.set_status(
-        "ticket-service",
-        ServiceStatus::Active,
-        Some("In-Memory Repository initialisiert".to_string()),
     );
     info!("user and ticket services initialised");
 

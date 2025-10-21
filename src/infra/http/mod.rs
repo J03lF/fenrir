@@ -539,10 +539,22 @@ struct MetricsHistoryQuery {
     range: Option<String>,
 }
 
+#[derive(Deserialize, Default)]
+struct AuditHistoryQuery {
+    range: Option<String>,
+    limit: Option<usize>,
+}
+
 #[derive(Serialize)]
 struct TelemetryHistoryResponse {
     range: String,
     samples: Vec<TelemetryHistorySampleView>,
+}
+
+#[derive(Serialize)]
+struct AuditHistoryResponse {
+    range: String,
+    events: Vec<AuditEventView>,
 }
 
 #[derive(Serialize)]
@@ -1107,6 +1119,7 @@ fn build_router(state: HttpState) -> Router {
         .route("/logging/level", post(update_logging_level))
         .route("/metrics", get(metrics_snapshot))
         .route("/metrics/history", get(metrics_history))
+        .route("/audit/history", get(audit_history))
         .route("/audit", get(list_audit_events))
         .route("/events/stream", get(audit_events_stream))
         .route("/modules/installed", get(list_installed_modules))
@@ -1403,6 +1416,57 @@ async fn metrics_history(Query(query): Query<MetricsHistoryQuery>) -> impl IntoR
         range: label.to_string(),
         samples: views,
     })
+}
+
+async fn audit_history(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Query(query): Query<AuditHistoryQuery>,
+) -> Response {
+    if state.auth.is_configured() {
+        let token = extract_bearer_token(&headers);
+        let role = state.auth.authorize_token(token).map_err(map_auth_error);
+        match role {
+            Ok(role) if role.satisfies(Role::Viewer) => {}
+            Ok(_) => {
+                return ServiceActionProblem::new(
+                    StatusCode::FORBIDDEN,
+                    "role_insufficient",
+                    "Mindestens Rolle viewer erforderlich",
+                )
+                .into_response();
+            }
+            Err(problem) => return problem.into_response(),
+        }
+    }
+
+    let (range, label) = parse_history_range(query.range.as_deref());
+    let limit = query.limit.unwrap_or(512).clamp(1, 5000);
+
+    match state.services.audit_recent(limit) {
+        Ok(events) => {
+            let cutoff = SystemTime::now()
+                .checked_sub(range)
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            let filtered: Vec<AuditEventView> = events
+                .into_iter()
+                .filter(|event| event.timestamp >= cutoff)
+                .map(audit_event_to_view)
+                .collect();
+
+            Json(AuditHistoryResponse {
+                range: label.to_string(),
+                events: filtered,
+            })
+            .into_response()
+        }
+        Err(err) => ServiceActionProblem::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "audit_unavailable",
+            format!("Audit-Store nicht verfügbar: {err}"),
+        )
+        .into_response(),
+    }
 }
 
 async fn update_logging_level(
@@ -3014,6 +3078,8 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         padding: 0.85rem 1.1rem;
         background: rgba(15, 28, 48, 0.84);
         border-bottom: 1px solid rgba(100, 140, 210, 0.24);
+        gap: 0.75rem;
+        flex-wrap: wrap;
       }
       .audit-meta h2 {
         margin: 0;
@@ -3024,7 +3090,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         color: rgba(162, 190, 230, 0.8);
         font-weight: 500;
       }
-      .audit-meta button {
+      .audit-meta button[data-audit-refresh] {
         appearance: none;
         border: 0;
         border-radius: 0.75rem;
@@ -3037,7 +3103,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         cursor: pointer;
         transition: background 0.2s ease;
       }
-      .audit-meta button:hover:not(:disabled) {
+      .audit-meta button[data-audit-refresh]:hover:not(:disabled) {
         background: rgba(112, 156, 236, 0.4);
       }
       .pill {
@@ -3280,6 +3346,11 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
               <h2>Audit Log</h2>
               <small data-audit-meta>–</small>
             </div>
+            <div class="chart-range audit-range" role="tablist" aria-label="Audit-Zeitraum">
+              <button type="button" data-audit-range="1h" data-active="true">1h</button>
+              <button type="button" data-audit-range="3h">3h</button>
+              <button type="button" data-audit-range="24h">24h</button>
+            </div>
             <button type="button" data-audit-refresh>Refresh</button>
           </div>
           <table class="audit-table">
@@ -3336,6 +3407,9 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       const HISTORY_RANGE_DEFAULT = '1h';
       const HISTORY_RANGES = ['1h', '3h', '24h'];
       const HISTORY_RETENTION_MS = 24 * 60 * 60 * 1000;
+      const AUDIT_HISTORY_RANGE_DEFAULT = '1h';
+      const AUDIT_HISTORY_RANGES = ['1h', '3h', '24h'];
+      const AUDIT_HISTORY_LIMIT = 1000;
 
       const metaEl = document.querySelector('[data-meta]');
       const alertEl = document.querySelector('[data-alert]');
@@ -3374,6 +3448,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         Array.from(document.querySelectorAll('[data-page]')).map((el) => [el.dataset.page, el]),
       );
       const historyRangeButtons = Array.from(document.querySelectorAll('[data-history-range]'));
+      const auditRangeButtons = Array.from(document.querySelectorAll('[data-audit-range]'));
 
       const TOKEN_KEY = 'fenrir-control-plane-token';
       const PAGE_STORAGE_KEY = 'fenrir-control-plane-page';
@@ -3401,6 +3476,9 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       let currentHistoryRange = HISTORY_RANGE_DEFAULT;
       let historyLoaded = false;
       let historyLoading = false;
+      let currentAuditRange = AUDIT_HISTORY_RANGE_DEFAULT;
+      let auditHistoryLoaded = false;
+      let auditHistoryLoading = false;
 
       const loadToken = () => {
         try {
@@ -3420,11 +3498,31 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         } catch (_) {}
       };
 
+      const rangeToMillis = (range) => {
+        switch (range) {
+          case '3h':
+            return 3 * 60 * 60 * 1000;
+          case '24h':
+          case '1d':
+            return 24 * 60 * 60 * 1000;
+          case '1h':
+          default:
+            return 60 * 60 * 1000;
+        }
+      };
+
       const currentToken = () => tokenInput.value.trim();
 
       const setHistoryButtonsActive = (range) => {
         historyRangeButtons.forEach((button) => {
           const active = button.dataset.historyRange === range;
+          button.dataset.active = active ? 'true' : 'false';
+        });
+      };
+
+      const setAuditButtonsActive = (range) => {
+        auditRangeButtons.forEach((button) => {
+          const active = button.dataset.auditRange === range;
           button.dataset.active = active ? 'true' : 'false';
         });
       };
@@ -3503,6 +3601,58 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
           }
         } finally {
           historyLoading = false;
+        }
+      };
+
+      const trimAuditCache = () => {
+        if (!Array.isArray(auditCache)) {
+          auditCache = [];
+          return;
+        }
+        const rangeMs = rangeToMillis(currentAuditRange);
+        const cutoff = Date.now() - rangeMs;
+        auditCache = auditCache.filter((entry) => {
+          const ts = Date.parse(entry.timestamp ?? '');
+          return !Number.isFinite(ts) || ts >= cutoff;
+        });
+        if (auditCache.length > AUDIT_HISTORY_LIMIT) {
+          auditCache.length = AUDIT_HISTORY_LIMIT;
+        }
+      };
+
+      const applyAuditEvents = (events) => {
+        if (!Array.isArray(events)) {
+          auditCache = [];
+        } else {
+          auditCache = events;
+        }
+        trimAuditCache();
+        renderAuditCache();
+      };
+
+      const fetchAuditHistory = async (range, { background = false } = {}) => {
+        if (auditHistoryLoading) {
+          return;
+        }
+        auditHistoryLoading = true;
+        try {
+          const response = await fetchWithToken(`/audit/history?range=${encodeURIComponent(range)}&limit=${AUDIT_HISTORY_LIMIT}`);
+          if (!response.ok) {
+            if (!background) {
+              showAlert(`Audit-Historie nicht verfügbar (${response.status}).`);
+            }
+            return;
+          }
+          const body = await response.json();
+          applyAuditEvents(body.events ?? []);
+          auditMeta.textContent = `${auditCache.length} Einträge · Range ${body.range ?? range}`;
+          auditHistoryLoaded = true;
+        } catch (error) {
+          if (!background) {
+            showAlert('Audit-Historie nicht verfügbar.');
+          }
+        } finally {
+          auditHistoryLoading = false;
         }
       };
 
@@ -4328,7 +4478,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         if (target === 'telemetry') {
           window.requestAnimationFrame(() => renderMetricChart());
           if (!historyLoaded && !historyLoading) {
-            fetchTelemetryHistory(currentHistoryRange, { background: true });
+            fetchTelemetryHistory(currentHistoryRange, { background: true }).catch(() => {});
           }
         } else {
           hideChartTooltip();
@@ -4350,7 +4500,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
 
       setHistoryButtonsActive(currentHistoryRange);
       historyRangeButtons.forEach((button) => {
-        button.addEventListener('click', async () => {
+        button.addEventListener('click', () => {
           const targetRange = button.dataset.historyRange;
           if (!targetRange || targetRange === currentHistoryRange || historyLoading) {
             return;
@@ -4358,7 +4508,21 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
           currentHistoryRange = targetRange;
           setHistoryButtonsActive(targetRange);
           historyLoaded = false;
-          await fetchTelemetryHistory(targetRange);
+          fetchTelemetryHistory(targetRange).catch(() => {});
+        });
+      });
+
+      setAuditButtonsActive(currentAuditRange);
+      auditRangeButtons.forEach((button) => {
+        button.addEventListener('click', () => {
+          const targetRange = button.dataset.auditRange;
+          if (!targetRange || targetRange === currentAuditRange || auditHistoryLoading) {
+            return;
+          }
+          currentAuditRange = targetRange;
+          setAuditButtonsActive(targetRange);
+          auditHistoryLoaded = false;
+          fetchAuditHistory(targetRange).catch(() => {});
         });
       });
 
@@ -4403,10 +4567,10 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       const renderAuditCache = () => {
         if (!auditCache || auditCache.length === 0) {
           auditBody.innerHTML = '<tr><td colspan="6">Keine Audit-Ereignisse vorhanden.</td></tr>';
-          auditMeta.textContent = '0 Einträge';
+          auditMeta.textContent = `0 Einträge · Range ${currentAuditRange}`;
           return;
         }
-        auditMeta.textContent = `${auditCache.length} Einträge`;
+        auditMeta.textContent = `${auditCache.length} Einträge · Range ${currentAuditRange}`;
         auditBody.innerHTML = auditCache
           .map((event) => {
             const outcomeClass = event.outcome === 'success'
@@ -4437,21 +4601,23 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         if (!event) {
           return;
         }
-        const duplicate = auditCache
-          .slice(0, 20)
-          .some(
-            (existing) =>
-              existing.timestamp === event.timestamp &&
-              existing.action === event.action &&
-              existing.target === event.target,
-          );
-        if (!duplicate) {
-          auditCache = [event, ...auditCache].slice(0, 200);
-          renderAuditCache();
+        const eventTime = Date.parse(event.timestamp ?? '');
+        const rangeMs = rangeToMillis(currentAuditRange);
+        const cutoff = Date.now() - rangeMs;
+        if (Number.isFinite(eventTime) && eventTime < cutoff) {
+          return;
         }
-        if (!isLoading) {
-          loadAll({ background: true });
+
+        const key = `${event.timestamp}|${event.action}|${event.target}`;
+        const existingIndex = auditCache.findIndex((entry) => {
+          return `${entry.timestamp}|${entry.action}|${entry.target}` === key;
+        });
+        if (existingIndex !== -1) {
+          auditCache.splice(existingIndex, 1);
         }
+        auditCache.unshift(event);
+        trimAuditCache();
+        renderAuditCache();
       };
 
       const connectEventStream = () => {
@@ -4713,11 +4879,10 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
           showAlert('');
         }
         try {
-          const [infoRes, servicesRes, metricsRes, auditRes] = await Promise.all([
+          const [infoRes, servicesRes, metricsRes] = await Promise.all([
             fetchWithToken('/info'),
             fetchWithToken('/services'),
             fetchWithToken('/metrics'),
-            fetchWithToken('/audit?limit=20'),
           ]);
 
           if (infoRes.ok) {
@@ -4747,11 +4912,8 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
             markTelemetryUnavailable(`Telemetrie nicht verfügbar (${metricsRes.status}).`);
           }
 
-          if (auditRes.ok) {
-            renderAuditEvents(await auditRes.json());
-          } else {
-            auditBody.innerHTML = '<tr><td colspan="6">Audit-Endpunkt nicht verfügbar.</td></tr>';
-            auditMeta.textContent = `Fehler (${auditRes.status})`;
+          if (!auditHistoryLoaded && !auditHistoryLoading) {
+            fetchAuditHistory(currentAuditRange, { background: background || !document.hasFocus() }).catch(() => {});
           }
         } catch (error) {
           servicesCache = new Map();
@@ -4760,6 +4922,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
           showAlert(background ? 'Auto-Refresh fehlgeschlagen – Verbindung prüfen.' : 'Netzwerkfehler: Bitte Verbindung prüfen.');
           auditBody.innerHTML = '<tr><td colspan="6">Netzwerkfehler – keine Audit-Daten.</td></tr>';
           auditMeta.textContent = 'Fehler';
+          auditHistoryLoaded = false;
           setUptimeBase(null);
           healthValue.textContent = 'unbekannt';
           healthNote.textContent = 'Telemetrie nicht verfügbar.';
@@ -4789,7 +4952,11 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       });
 
       if (auditRefreshBtn) {
-        auditRefreshBtn.addEventListener('click', () => loadAll({ background: true }));
+        auditRefreshBtn.addEventListener('click', () => {
+          auditHistoryLoaded = false;
+          historyLoaded = false;
+          loadAll({ background: true });
+        });
       }
 
       testButton.addEventListener('click', async () => {

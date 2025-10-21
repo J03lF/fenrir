@@ -1,6 +1,9 @@
-use std::path::PathBuf;
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::audit::InMemoryAuditLog;
 use crate::config::{self, AppConfig};
@@ -18,7 +21,7 @@ use crate::services::{
     ServiceRegistry, ServiceStatus, ServiceTag,
 };
 use anyhow::{anyhow, Result};
-use tracing::info;
+use tracing::{debug, info};
 
 pub struct BootContext {
     pub config: Arc<AppConfig>,
@@ -29,6 +32,11 @@ pub struct BootContext {
 
 pub fn boot() -> Result<BootContext> {
     let cfg = config::load()?;
+    let runtime_dir = resolve_runtime_dir();
+    env::set_var(
+        "FENRIR_RUNTIME_DIR",
+        runtime_dir.to_string_lossy().into_owned(),
+    );
     let logging_handle = logging::init_tracing(&cfg)?;
     telemetry::init(&cfg)?;
 
@@ -137,8 +145,19 @@ pub fn boot() -> Result<BootContext> {
     info!("scheduler service started");
 
     let audit_capacity = if cfg.audit.enabled { 1024 } else { 0 };
-    let audit_log: Arc<dyn crate::audit::AuditLog> =
-        Arc::new(InMemoryAuditLog::new(audit_capacity));
+    let audit_log: Arc<dyn crate::audit::AuditLog> = if audit_capacity == 0 {
+        Arc::new(InMemoryAuditLog::new(audit_capacity))
+    } else {
+        let audit_path = runtime_dir.join("fenrir-audit-history.json");
+        let retention = Duration::from_secs(24 * 60 * 60);
+        let persist_interval = Duration::from_secs(30);
+        Arc::new(InMemoryAuditLog::with_persistence(
+            audit_capacity,
+            audit_path,
+            retention,
+            persist_interval,
+        ))
+    };
 
     let module_registry: Arc<dyn crate::domain::module::ModuleRegistryPort> = Arc::new(
         HttpModuleRegistry::new(&cfg.modules.registry)
@@ -293,7 +312,6 @@ pub fn boot() -> Result<BootContext> {
         ServiceStatus::Stopped,
         "CLI deaktiviert",
     );
-    info!("user and ticket services initialised");
 
     crate::infra::telemetry::mark_ready();
 
@@ -349,6 +367,39 @@ pub async fn start_transports(ctx: &BootContext) -> Result<()> {
     spawn_config_reloader(ctx)?;
     info!("transport initialisation triggered");
     Ok(())
+}
+
+fn resolve_runtime_dir() -> PathBuf {
+    if let Ok(dir) = env::var("FENRIR_RUNTIME_DIR") {
+        let candidate = PathBuf::from(dir);
+        if ensure_dir(&candidate) {
+            return candidate;
+        }
+    }
+
+    let mut candidates = Vec::new();
+    if let Ok(cwd) = env::current_dir() {
+        if let Some(parent) = cwd.parent() {
+            candidates.push(parent.join("tmp"));
+        }
+        candidates.push(cwd.join("tmp"));
+    }
+
+    for candidate in candidates {
+        if ensure_dir(&candidate) {
+            return candidate;
+        } else {
+            debug!(path = ?candidate, "failed to create runtime directory candidate");
+        }
+    }
+
+    let fallback = env::temp_dir().join("fenrir-runtime");
+    let _ = fs::create_dir_all(&fallback);
+    fallback
+}
+
+fn ensure_dir(path: &Path) -> bool {
+    fs::create_dir_all(path).is_ok()
 }
 
 fn register_registry_toggle_service(

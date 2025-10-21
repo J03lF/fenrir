@@ -1,0 +1,10 @@
+2025-10-21T17:05:28.047565Z  INFO main ThreadId(01) fenrir::infra::logging: dateilogging initialisiert log_path=logs/app.log
+2025-10-21T17:05:28.047747Z  INFO main ThreadId(01) fenrir::infra::logging: db-logdatei vorbereitet log_path=logs/db.log
+2025-10-21T17:05:28.048051Z  INFO main ThreadId(01) fenrir::boot: core services registered in registry
+2025-10-21T17:05:28.048948Z  INFO main ThreadId(01) fenrir::boot: scheduler service started
+2025-10-21T17:05:28.049028Z  INFO tokio-runtime-worker ThreadId(05) fenrir::services::scheduler: scheduler heartbeat loop started
+2025-10-21T17:05:28.055306Z  INFO                 main ThreadId(01) fenrir::boot: boot complete app=fenrir version=0.1.4
+2025-10-21T17:05:28.055379Z  INFO                 main ThreadId(01) fenrir::boot: transport initialisation triggered
+2025-10-21T17:05:28.055395Z  INFO tokio-runtime-worker ThreadId(15) fenrir::boot: ssh server task spawned
+2025-10-21T17:05:28.055856Z  INFO tokio-runtime-worker ThreadId(15) fenrir::infra::ssh: starting SSH server host=127.0.0.1 port=2222
+2025-10-21T17:05:28.056090Z  INFO tokio-runtime-worker ThreadId(02) fenrir::infra::http: HTTP server task spawned

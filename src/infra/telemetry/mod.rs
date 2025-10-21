@@ -5,7 +5,7 @@ use std::fs;
 use std::fs::File;
 #[cfg(target_os = "linux")]
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -141,6 +141,12 @@ impl TelemetryState {
         };
         match serde_json::to_vec(&payload) {
             Ok(data) => {
+                if let Some(parent) = self.history_path.parent() {
+                    if let Err(err) = fs::create_dir_all(parent) {
+                        tracing::debug!(error = %err, path = ?parent, "telemetrie-history verzeichnis konnte nicht erstellt werden");
+                        return;
+                    }
+                }
                 if let Err(err) = fs::write(&self.history_path, data) {
                     tracing::debug!(error = %err, path = ?self.history_path, "telemetrie-history konnte nicht geschrieben werden");
                 }
@@ -180,7 +186,8 @@ struct HistoryFile {
 }
 
 fn telemetry_history_path() -> PathBuf {
-    env::temp_dir().join(HISTORY_FILENAME)
+    let base = telemetry_runtime_dir();
+    base.join(HISTORY_FILENAME)
 }
 
 fn load_history_from_disk(path: &PathBuf, retention: Duration) -> VecDeque<MetricHistorySample> {
@@ -231,6 +238,22 @@ fn duration_to_millis(duration: Duration) -> i64 {
     } else {
         millis as i64
     }
+}
+
+fn telemetry_runtime_dir() -> PathBuf {
+    if let Ok(dir) = env::var("FENRIR_RUNTIME_DIR") {
+        let path = PathBuf::from(dir);
+        if ensure_dir(&path) {
+            return path;
+        }
+    }
+    let fallback = env::temp_dir().join("fenrir-runtime");
+    let _ = fs::create_dir_all(&fallback);
+    fallback
+}
+
+fn ensure_dir(path: &Path) -> bool {
+    fs::create_dir_all(path).is_ok()
 }
 
 fn now_ms() -> i64 {

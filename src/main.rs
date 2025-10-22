@@ -20,26 +20,17 @@ struct Args {
 
 #[tokio::main]
 async fn main() {
-    let args = Args::parse();
+    let args = Args::parse_from(normalize_args());
 
     if args.check_config {
-        match fenrir::config::load() {
-            Ok(_) => {
-                println!("config OK");
-                std::process::exit(0);
-            }
-            Err(err) => {
-                eprintln!("config ERROR: {err}");
-                std::process::exit(1);
-            }
-        }
+        handle_check_config();
     }
 
     // Boot sequence (logging/telemetry)
     let ctx = match fenrir::boot::boot() {
         Ok(ctx) => ctx,
         Err(err) => {
-            eprintln!("boot failed: {err}");
+            report_boot_error(&err);
             std::process::exit(1);
         }
     };
@@ -83,5 +74,49 @@ async fn main() {
     } else {
         // Keep running if started without CLI to serve SSH
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+fn normalize_args() -> Vec<String> {
+    std::env::args()
+        .map(|arg| {
+            if arg == "-check-config" {
+                "--check-config".to_string()
+            } else {
+                arg
+            }
+        })
+        .collect()
+}
+
+fn handle_check_config() {
+    match fenrir::config::load() {
+        Ok(_) => {
+            println!("CFG-OK configuration valid");
+            std::process::exit(0);
+        }
+        Err(err) => {
+            let code = config_error_code(&err);
+            eprintln!("{code}: {err}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn report_boot_error(err: &fenrir::boot::BootError) {
+    if let Some(source) = <fenrir::boot::BootError as std::error::Error>::source(err) {
+        eprintln!("{}: {} ({source})", err.code(), err.message());
+    } else {
+        eprintln!("{}: {}", err.code(), err.message());
+    }
+}
+
+fn config_error_code(err: &fenrir::config::ConfigError) -> &'static str {
+    match err {
+        fenrir::config::ConfigError::MissingEnv { .. } => "CFG-MISSING-SECRET",
+        fenrir::config::ConfigError::Invalid(_) => "CFG-INVALID",
+        fenrir::config::ConfigError::MissingConfigFile { .. } => "CFG-MISSING-FILE",
+        fenrir::config::ConfigError::InvalidProfile { .. } => "CFG-INVALID-PROFILE",
+        fenrir::config::ConfigError::Anyhow(_) => "CFG-DESERIALIZE",
     }
 }

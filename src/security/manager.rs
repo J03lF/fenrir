@@ -274,6 +274,7 @@ mod tests {
         SecuritySection {
             kdf: KdfConfig {
                 algorithm: "argon2id".to_string(),
+                version: 1,
                 memory_mib: 8,
                 iterations: 2,
                 parallelism: 1,

@@ -25,11 +25,22 @@ cert_path = "config/certs/server.crt"
 key_path = "config/certs/server.key"
 cipher_suites = ["TLS_AES_256_GCM_SHA384", "TLS_AES_128_GCM_SHA256"]
 
+[server.grpc]
+host = "127.0.0.1"
+port = 50051
+
+[server.grpc.tls]
+enabled = false
+cert_path = "config/certs/server-grpc.crt"
+key_path = "config/certs/server-grpc.key"
+cipher_suites = ["TLS_AES_256_GCM_SHA384", "TLS_AES_128_GCM_SHA256"]
+
 [security]
 allowed_ciphers = ["AES-GCM", "XChaCha20-Poly1305"]
 
 [security.kdf]
 algorithm = "argon2id"
+version = 1
 
 [security.jwt]
 issuer = "fenrir"
@@ -58,10 +69,14 @@ uri = "env:FENRIR_DB_POSTGRES_URI"
 max = 16
 timeout_ms = 5000
 
-[telemetry]
-tracing_level = "info"
-metrics_enabled = true
-health_enabled = true
+[telemetry.tracing]
+level = "info"
+
+[telemetry.metrics]
+enabled = true
+
+[telemetry.health]
+enabled = true
 
 [telemetry.system]
 enabled = true
@@ -69,6 +84,12 @@ interval_ms = 5000
 
 [audit]
 enabled = true
+buffer_capacity = 2048
+
+[audit.storage]
+path = "runtime/audit/fenrir-audit-history.json"
+retention_hours = 24
+persist_interval_seconds = 30
 
 [cli]
 prompt_theme = "default"

@@ -1,4 +1,5 @@
 use std::env;
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -6,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::audit::InMemoryAuditLog;
-use crate::config::{self, AppConfig};
+use crate::config::{self, AppConfig, ConfigError};
 use crate::domain::db::DbEngine;
 use crate::infra::http::{HttpServer, HTTP_SERVICE_ID};
 use crate::infra::modules::{
@@ -21,6 +22,7 @@ use crate::services::{
     ServiceRegistry, ServiceStatus, ServiceTag,
 };
 use anyhow::{anyhow, Result};
+use thiserror::Error;
 use tracing::{debug, info};
 
 pub struct BootContext {
@@ -30,22 +32,153 @@ pub struct BootContext {
     pub logging: crate::infra::logging::ReloadHandle,
 }
 
-pub fn boot() -> Result<BootContext> {
-    let cfg = config::load()?;
+#[derive(Debug, Clone, Copy)]
+pub enum BootErrorCode {
+    ConfigLoad,
+    ConfigInvalid,
+    ConfigMissingSecret,
+    LoggingInit,
+    TelemetryInit,
+    TelemetryProbe,
+    DbAdapters,
+    DbEngine,
+    DbShellInit,
+    AuditInit,
+    ModuleRegistry,
+    ModuleStorage,
+    ModuleVerifier,
+    ModuleAttach,
+    SecurityInit,
+    SecurityAttach,
+    SchedulerJobs,
+    HttpServerInit,
+}
+
+impl BootErrorCode {
+    fn as_str(&self) -> &'static str {
+        match self {
+            BootErrorCode::ConfigLoad => "BOOT-CONFIG-LOAD",
+            BootErrorCode::ConfigInvalid => "BOOT-CONFIG-INVALID",
+            BootErrorCode::ConfigMissingSecret => "BOOT-CONFIG-MISSING-SECRET",
+            BootErrorCode::LoggingInit => "BOOT-LOGGING-INIT",
+            BootErrorCode::TelemetryInit => "BOOT-TELEMETRY-INIT",
+            BootErrorCode::TelemetryProbe => "BOOT-TELEMETRY-PROBE",
+            BootErrorCode::DbAdapters => "BOOT-DB-ADAPTERS",
+            BootErrorCode::DbEngine => "BOOT-DB-ENGINE",
+            BootErrorCode::DbShellInit => "BOOT-DB-SHELL",
+            BootErrorCode::AuditInit => "BOOT-AUDIT",
+            BootErrorCode::ModuleRegistry => "BOOT-MODULE-REGISTRY",
+            BootErrorCode::ModuleStorage => "BOOT-MODULE-STORAGE",
+            BootErrorCode::ModuleVerifier => "BOOT-MODULE-VERIFIER",
+            BootErrorCode::ModuleAttach => "BOOT-MODULE-ATTACH",
+            BootErrorCode::SecurityInit => "BOOT-SECURITY-INIT",
+            BootErrorCode::SecurityAttach => "BOOT-SECURITY-ATTACH",
+            BootErrorCode::SchedulerJobs => "BOOT-SCHEDULER-JOBS",
+            BootErrorCode::HttpServerInit => "BOOT-HTTP-INIT",
+        }
+    }
+}
+
+impl fmt::Display for BootErrorCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Error)]
+#[error("{code}: {message}")]
+pub struct BootError {
+    code: BootErrorCode,
+    message: &'static str,
+    #[source]
+    source: anyhow::Error,
+}
+
+impl BootError {
+    fn new(code: BootErrorCode, message: &'static str, source: impl Into<anyhow::Error>) -> Self {
+        Self {
+            code,
+            message,
+            source: source.into(),
+        }
+    }
+
+    fn from_config(err: ConfigError) -> Self {
+        match err {
+            ConfigError::MissingEnv { .. } => BootError::new(
+                BootErrorCode::ConfigMissingSecret,
+                "missing required secret",
+                err,
+            ),
+            ConfigError::Invalid(_) => {
+                BootError::new(BootErrorCode::ConfigInvalid, "configuration invalid", err)
+            }
+            ConfigError::MissingConfigFile { .. } => BootError::new(
+                BootErrorCode::ConfigLoad,
+                "configuration file not found",
+                err,
+            ),
+            ConfigError::InvalidProfile { .. } => BootError::new(
+                BootErrorCode::ConfigInvalid,
+                "configuration profile invalid",
+                err,
+            ),
+            ConfigError::Anyhow(_) => BootError::new(
+                BootErrorCode::ConfigLoad,
+                "failed to load configuration",
+                err,
+            ),
+        }
+    }
+
+    pub fn code(&self) -> &'static str {
+        self.code.as_str()
+    }
+
+    pub fn message(&self) -> &'static str {
+        self.message
+    }
+}
+
+fn wrap_boot<T, E>(
+    result: Result<T, E>,
+    code: BootErrorCode,
+    message: &'static str,
+) -> Result<T, BootError>
+where
+    anyhow::Error: From<E>,
+{
+    result.map_err(|err| BootError::new(code, message, err))
+}
+
+pub fn boot() -> Result<BootContext, BootError> {
+    let cfg = config::load().map_err(BootError::from_config)?;
     let runtime_dir = resolve_runtime_dir();
     env::set_var(
         "FENRIR_RUNTIME_DIR",
         runtime_dir.to_string_lossy().into_owned(),
     );
-    let logging_handle = logging::init_tracing(&cfg)?;
-    telemetry::init(&cfg)?;
+    let logging_handle = wrap_boot(
+        logging::init_tracing(&cfg),
+        BootErrorCode::LoggingInit,
+        "failed to initialize logging",
+    )?;
+    wrap_boot(
+        telemetry::init(&cfg),
+        BootErrorCode::TelemetryInit,
+        "failed to initialize telemetry",
+    )?;
 
-    let adapters = db::manager::build_adapters(&cfg)?;
-    let default_engine = cfg
-        .db
-        .default_engine
-        .parse::<DbEngine>()
-        .map_err(|err| anyhow!("ungültiger DB-Typ: {err}"))?;
+    let adapters = wrap_boot(
+        db::manager::build_adapters(&cfg),
+        BootErrorCode::DbAdapters,
+        "failed to build database adapters",
+    )?;
+    let default_engine = wrap_boot(
+        cfg.db.default_engine.parse::<DbEngine>(),
+        BootErrorCode::DbEngine,
+        "invalid default database engine",
+    )?;
     let registry = Arc::new(ServiceRegistry::new());
     registry.register(
         ServiceDescriptor::new(
@@ -129,48 +262,85 @@ pub fn boot() -> Result<BootContext> {
     telemetry::attach_service_registry(Arc::clone(&registry));
     telemetry::start_system_metrics_sampler(&cfg);
 
-    crate::infra::telemetry::register_readiness_probe("services", {
-        let registry = Arc::clone(&registry);
-        move || {
-            registry
-                .snapshot()
-                .into_iter()
-                .all(|svc| !matches!(svc.status, ServiceStatus::Failed))
-        }
-    })?;
+    wrap_boot(
+        crate::infra::telemetry::register_readiness_probe("services", {
+            let registry = Arc::clone(&registry);
+            move || {
+                registry
+                    .snapshot()
+                    .into_iter()
+                    .all(|svc| !matches!(svc.status, ServiceStatus::Failed))
+            }
+        }),
+        BootErrorCode::TelemetryProbe,
+        "failed to register telemetry readiness probe",
+    )?;
 
-    let db_shell_service = Arc::new(DbShellService::new(default_engine, adapters)?);
+    let db_shell_service = Arc::new(wrap_boot(
+        DbShellService::new(default_engine, adapters),
+        BootErrorCode::DbShellInit,
+        "failed to initialize database shell service",
+    )?);
     let scheduler_service = Arc::new(SchedulerService::new(Arc::clone(&registry)));
     scheduler_service.start();
     info!("scheduler service started");
 
-    let audit_capacity = if cfg.audit.enabled { 1024 } else { 0 };
+    let audit_capacity = if cfg.audit.enabled {
+        cfg.audit.buffer_capacity()
+    } else {
+        0
+    };
     let audit_log: Arc<dyn crate::audit::AuditLog> = if audit_capacity == 0 {
         Arc::new(InMemoryAuditLog::new(audit_capacity))
     } else {
-        let audit_path = runtime_dir.join("fenrir-audit-history.json");
-        let retention = Duration::from_secs(24 * 60 * 60);
-        let persist_interval = Duration::from_secs(30);
-        Arc::new(InMemoryAuditLog::with_persistence(
+        let configured_path = cfg
+            .audit
+            .storage
+            .path()
+            .expect("audit storage path validated during configuration");
+        let resolved_path = resolve_storage_path(&runtime_dir, configured_path);
+        if let Some(parent) = resolved_path.parent() {
+            wrap_boot(
+                fs::create_dir_all(parent),
+                BootErrorCode::AuditInit,
+                "failed to prepare audit storage directory",
+            )?;
+        }
+        let retention_hours = cfg.audit.storage.retention_hours().unwrap_or(24);
+        let retention_seconds = retention_hours.checked_mul(3600).unwrap_or(u64::MAX);
+        let persist_seconds = cfg.audit.storage.persist_interval_seconds().unwrap_or(30);
+        let log_path = resolved_path.clone();
+        let audit = InMemoryAuditLog::with_persistence(
             audit_capacity,
-            audit_path,
-            retention,
-            persist_interval,
-        ))
+            resolved_path,
+            Duration::from_secs(retention_seconds),
+            Duration::from_secs(persist_seconds),
+        );
+        tracing::info!(
+            path = %log_path.display(),
+            capacity = audit_capacity,
+            retention_hours,
+            persist_seconds,
+            "audit log persistence configured"
+        );
+        Arc::new(audit)
     };
 
-    let module_registry: Arc<dyn crate::domain::module::ModuleRegistryPort> = Arc::new(
-        HttpModuleRegistry::new(&cfg.modules.registry)
-            .map_err(|err| anyhow!("module registry init failed: {err}"))?,
-    );
-    let module_storage: Arc<dyn crate::domain::module::ModuleStoragePort> = Arc::new(
-        FilesystemModuleStorage::new(&cfg.modules.storage)
-            .map_err(|err| anyhow!("module storage init failed: {err}"))?,
-    );
-    let module_verifier: Arc<dyn crate::domain::module::ModuleVerifierPort> = Arc::new(
-        Ed25519ModuleVerifier::from_config(&cfg.modules.trust)
-            .map_err(|err| anyhow!("module verifier init failed: {err}"))?,
-    );
+    let module_registry: Arc<dyn crate::domain::module::ModuleRegistryPort> = Arc::new(wrap_boot(
+        HttpModuleRegistry::new(&cfg.modules.registry),
+        BootErrorCode::ModuleRegistry,
+        "failed to initialize module registry",
+    )?);
+    let module_storage: Arc<dyn crate::domain::module::ModuleStoragePort> = Arc::new(wrap_boot(
+        FilesystemModuleStorage::new(&cfg.modules.storage),
+        BootErrorCode::ModuleStorage,
+        "failed to initialize module storage",
+    )?);
+    let module_verifier: Arc<dyn crate::domain::module::ModuleVerifierPort> = Arc::new(wrap_boot(
+        Ed25519ModuleVerifier::from_config(&cfg.modules.trust),
+        BootErrorCode::ModuleVerifier,
+        "failed to initialize module verifier",
+    )?);
     let runtime_state_dir = PathBuf::from(&cfg.modules.storage.install_dir).join("runtime");
     let module_runtime: Arc<dyn crate::domain::module::ModuleRuntimePort> = Arc::new(
         ProcessModuleRuntime::new(Arc::clone(&module_storage), runtime_state_dir),
@@ -191,32 +361,48 @@ pub fn boot() -> Result<BootContext> {
     services.set_logging_handle(logging_handle.clone());
     services
         .attach_module_service(Arc::clone(&module_service))
-        .map_err(|err| anyhow!("module service attach failed: {err}"))?;
+        .map_err(|err| {
+            BootError::new(
+                BootErrorCode::ModuleAttach,
+                "failed to attach module service",
+                anyhow!(err),
+            )
+        })?;
     let audit_sink: Arc<dyn AuditSink> = Arc::clone(&services) as Arc<dyn AuditSink>;
-    let _security_manager = Arc::new(
-        SecurityManager::new(&cfg.security, audit_sink)
-            .map_err(|err| anyhow!("security manager init failed: {err}"))?,
-    );
+    let _security_manager = Arc::new(wrap_boot(
+        SecurityManager::new(&cfg.security, audit_sink),
+        BootErrorCode::SecurityInit,
+        "failed to initialize security manager",
+    )?);
     services
         .attach_security(Arc::clone(&_security_manager))
-        .map_err(|err| anyhow!(err))?;
+        .map_err(|err| {
+            BootError::new(
+                BootErrorCode::SecurityAttach,
+                "failed to attach security manager",
+                anyhow!(err),
+            )
+        })?;
     registry.set_status(
         "module-runtime",
         ServiceStatus::Active,
         Some("Bereit für Module".to_string()),
     );
 
-    install_default_jobs(
-        &scheduler_service,
-        Arc::clone(&registry),
-        Arc::clone(&db_shell_service),
-    )
-    .map_err(|err| anyhow!(err))?;
+    wrap_boot(
+        install_default_jobs(
+            &scheduler_service,
+            Arc::clone(&registry),
+            Arc::clone(&db_shell_service),
+        ),
+        BootErrorCode::SchedulerJobs,
+        "failed to install scheduler jobs",
+    )?;
 
-    let http_server = Arc::new(HttpServer::new(
-        &cfg,
-        Arc::clone(&registry),
-        Arc::downgrade(&services),
+    let http_server = Arc::new(wrap_boot(
+        HttpServer::new(&cfg, Arc::clone(&registry), Arc::downgrade(&services)),
+        BootErrorCode::HttpServerInit,
+        "failed to initialize http server",
     )?);
     {
         let http_start = Arc::clone(&http_server);
@@ -398,6 +584,15 @@ fn resolve_runtime_dir() -> PathBuf {
     fallback
 }
 
+fn resolve_storage_path(base: &Path, configured: &str) -> PathBuf {
+    let candidate = PathBuf::from(configured);
+    if candidate.is_absolute() {
+        candidate
+    } else {
+        base.join(configured)
+    }
+}
+
 fn ensure_dir(path: &Path) -> bool {
     fs::create_dir_all(path).is_ok()
 }
@@ -471,7 +666,7 @@ fn spawn_config_reloader(ctx: &BootContext) -> Result<()> {
                 match crate::config::load() {
                     Ok(new_cfg) => {
                         if let Err(err) =
-                            logging::reload(&logging, &new_cfg.telemetry.tracing_level)
+                            logging::reload(&logging, &new_cfg.telemetry.tracing.level)
                         {
                             tracing::warn!(error = %err, "konnte Logging-Level nicht aktualisieren");
                         }

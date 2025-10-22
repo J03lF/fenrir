@@ -31,6 +31,8 @@ pub struct ServerSection {
     pub enable_grpc: bool,
     pub ssh: SshConfig,
     pub http: HttpConfig,
+    #[serde(default)]
+    pub grpc: Option<GrpcConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -53,11 +55,30 @@ pub struct HttpConfig {
     pub tls: HttpTlsConfig,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct GrpcConfig {
+    pub host: String,
+    pub port: u16,
+    #[serde(default)]
+    pub tls: GrpcTlsConfig,
+}
+
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct HttpTlsConfig {
     pub enabled: bool,
     pub cert_path: Option<String>,
     pub key_path: Option<String>,
+    #[serde(default)]
+    pub cipher_suites: Vec<String>,
+    pub reload_interval_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct GrpcTlsConfig {
+    pub enabled: bool,
+    pub cert_path: Option<String>,
+    pub key_path: Option<String>,
+    pub client_ca_path: Option<String>,
     #[serde(default)]
     pub cipher_suites: Vec<String>,
     pub reload_interval_seconds: Option<u64>,
@@ -84,6 +105,8 @@ pub struct SecuritySection {
 #[derive(Debug, Deserialize, Clone)]
 pub struct KdfConfig {
     pub algorithm: String,
+    #[serde(default = "default_kdf_version")]
+    pub version: u32,
     #[serde(default = "default_argon2_memory_mib")]
     pub memory_mib: u32,
     #[serde(default = "default_argon2_iterations")]
@@ -145,11 +168,47 @@ pub struct DbPoolSettings {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct TelemetrySection {
-    pub tracing_level: String,
-    pub metrics_enabled: bool,
-    pub health_enabled: bool,
+    pub tracing: TelemetryTracingSection,
+    #[serde(default)]
+    pub metrics: TelemetryMetricsSection,
+    #[serde(default)]
+    pub health: TelemetryHealthSection,
     #[serde(default)]
     pub system: TelemetrySystemSection,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct TelemetryTracingSection {
+    pub level: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct TelemetryMetricsSection {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub exporter: Option<String>,
+}
+
+impl Default for TelemetryMetricsSection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            exporter: None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct TelemetryHealthSection {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for TelemetryHealthSection {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -171,6 +230,19 @@ impl Default for TelemetrySystemSection {
 #[derive(Debug, Deserialize, Clone)]
 pub struct AuditSection {
     pub enabled: bool,
+    #[serde(default)]
+    pub buffer_capacity: Option<usize>,
+    #[serde(default)]
+    pub storage: AuditStorageSection,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct AuditStorageSection {
+    pub path: Option<String>,
+    #[serde(default)]
+    pub retention_hours: Option<u64>,
+    #[serde(default)]
+    pub persist_interval_seconds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -239,6 +311,10 @@ fn default_require_signature() -> bool {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_kdf_version() -> u32 {
+    1
 }
 
 fn default_argon2_memory_mib() -> u32 {
@@ -333,6 +409,9 @@ impl KdfConfig {
                     _ => "security.kdf.algorithm must be argon2id",
                 }))
             }
+        }
+        if self.version == 0 {
+            return Err(ConfigError::Invalid("security.kdf.version must be > 0"));
         }
         if self.memory_mib == 0 {
             return Err(ConfigError::Invalid("security.kdf.memory_mib must be > 0"));
@@ -454,12 +533,81 @@ impl SessionSection {
     }
 }
 
+impl AuditSection {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if let Some(capacity) = self.buffer_capacity {
+            if capacity == 0 {
+                return Err(ConfigError::Invalid("audit.buffer_capacity must be > 0"));
+            }
+        }
+        self.storage.validate(self.enabled)
+    }
+
+    pub fn buffer_capacity(&self) -> usize {
+        self.buffer_capacity.unwrap_or(1024)
+    }
+}
+
+impl AuditStorageSection {
+    fn validate(&self, audit_enabled: bool) -> Result<(), ConfigError> {
+        if let Some(hours) = self.retention_hours {
+            if hours == 0 {
+                return Err(ConfigError::Invalid(
+                    "audit.storage.retention_hours must be > 0 when set",
+                ));
+            }
+        }
+        if let Some(interval) = self.persist_interval_seconds {
+            if interval == 0 {
+                return Err(ConfigError::Invalid(
+                    "audit.storage.persist_interval_seconds must be > 0 when set",
+                ));
+            }
+        }
+
+        match self
+            .path
+            .as_ref()
+            .map(|path| path.trim())
+            .filter(|p| !p.is_empty())
+        {
+            Some(_) => Ok(()),
+            None if audit_enabled => Err(ConfigError::Invalid(
+                "audit.storage.path must be set when audit.enabled=true",
+            )),
+            None => Ok(()),
+        }
+    }
+
+    pub fn path(&self) -> Option<&str> {
+        self.path
+            .as_deref()
+            .map(|path| path.trim())
+            .filter(|p| !p.is_empty())
+    }
+
+    pub fn retention_hours(&self) -> Option<u64> {
+        self.retention_hours
+    }
+
+    pub fn persist_interval_seconds(&self) -> Option<u64> {
+        self.persist_interval_seconds
+    }
+}
+
 impl TelemetrySection {
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.tracing_level.trim().is_empty() {
+        if self.tracing.level.trim().is_empty() {
             return Err(ConfigError::Invalid(
-                "telemetry.tracing_level must not be empty",
+                "telemetry.tracing.level must not be empty",
             ));
+        }
+        if let Some(exporter) = self.metrics.exporter.as_ref() {
+            if exporter.trim().is_empty() {
+                return Err(ConfigError::Invalid(
+                    "telemetry.metrics.exporter must not be empty when set",
+                ));
+            }
         }
         if let Some(interval) = self.system.interval_ms {
             if interval == 0 {
@@ -657,6 +805,7 @@ pub fn validate(cfg: &AppConfig) -> Result<(), ConfigError> {
     cfg.telemetry.validate()?;
     cfg.modules.registry.validate()?;
     cfg.modules.storage.validate()?;
+    cfg.audit.validate()?;
 
     if !matches!(
         cfg.db.default_engine.as_str(),
@@ -713,6 +862,29 @@ pub fn validate(cfg: &AppConfig) -> Result<(), ConfigError> {
 
     if cfg.server.http.port == 0 || cfg.server.ssh.port == 0 {
         return Err(ConfigError::Invalid("server ports must be > 0"));
+    }
+    if cfg.server.http.host.trim().is_empty() {
+        return Err(ConfigError::Invalid("server.http.host must not be empty"));
+    }
+    if cfg.server.enable_grpc {
+        let grpc = cfg.server.grpc.as_ref().ok_or(ConfigError::Invalid(
+            "server.grpc must be configured when server.enable_grpc=true",
+        ))?;
+        if grpc.host.trim().is_empty() {
+            return Err(ConfigError::Invalid("server.grpc.host must not be empty"));
+        }
+        if grpc.port == 0 {
+            return Err(ConfigError::Invalid("server.grpc.port must be > 0"));
+        }
+        validate_grpc_tls(grpc)?;
+    } else if let Some(grpc) = &cfg.server.grpc {
+        if grpc.host.trim().is_empty() {
+            return Err(ConfigError::Invalid("server.grpc.host must not be empty"));
+        }
+        if grpc.port == 0 {
+            return Err(ConfigError::Invalid("server.grpc.port must be > 0"));
+        }
+        validate_grpc_tls(grpc)?;
     }
     if cfg.security.jwt.exp_seconds == 0 {
         return Err(ConfigError::Invalid("security.jwt.exp_seconds must be > 0"));
@@ -796,6 +968,62 @@ fn validate_http_tls(http: &HttpConfig) -> Result<(), ConfigError> {
             if interval == 0 {
                 return Err(ConfigError::Invalid(
                     "server.http.tls.reload_interval_seconds muss > 0 sein",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_grpc_tls(grpc: &GrpcConfig) -> Result<(), ConfigError> {
+    let tls = &grpc.tls;
+    if tls.enabled {
+        let cert = tls
+            .cert_path
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .ok_or(ConfigError::Invalid(
+                "server.grpc.tls.cert_path must be set when TLS is enabled",
+            ))?;
+        let key = tls
+            .key_path
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .ok_or(ConfigError::Invalid(
+                "server.grpc.tls.key_path must be set when TLS is enabled",
+            ))?;
+        if cert == key {
+            return Err(ConfigError::Invalid(
+                "server.grpc.tls.cert_path and key_path must differ",
+            ));
+        }
+        if tls.cipher_suites.is_empty() {
+            return Err(ConfigError::Invalid(
+                "server.grpc.tls.cipher_suites must not be empty when TLS is enabled",
+            ));
+        }
+        if tls
+            .cipher_suites
+            .iter()
+            .any(|suite| suite.trim().is_empty())
+        {
+            return Err(ConfigError::Invalid(
+                "server.grpc.tls.cipher_suites must not contain empty entries",
+            ));
+        }
+        if let Some(ca) = tls.client_ca_path.as_ref() {
+            if ca.trim().is_empty() {
+                return Err(ConfigError::Invalid(
+                    "server.grpc.tls.client_ca_path must not be empty when set",
+                ));
+            }
+        }
+        if let Some(interval) = tls.reload_interval_seconds {
+            if interval == 0 {
+                return Err(ConfigError::Invalid(
+                    "server.grpc.tls.reload_interval_seconds must be > 0",
                 ));
             }
         }

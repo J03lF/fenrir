@@ -32,6 +32,7 @@ allowed_ciphers = ["AES-GCM", "XChaCha20-Poly1305"]
 
 [security.kdf]
 algorithm = "argon2id"
+version = 1
 
 [security.jwt]
 issuer = "fenrir"
@@ -55,13 +56,27 @@ uri = "env:FENRIR_DB_POSTGRES_URI"
 max = 16
 timeout_ms = 5000
 
-[telemetry]
-tracing_level = "error"
-metrics_enabled = false
-health_enabled = true
+
+[telemetry.tracing]
+level = "error"
+
+[telemetry.metrics]
+enabled = false
+
+[telemetry.health]
+enabled = true
+
+[telemetry.system]
+enabled = true
+interval_ms = 5000
 
 [audit]
 enabled = true
+
+[audit.storage]
+path = "runtime/audit/fenrir-audit-history.json"
+retention_hours = 24
+persist_interval_seconds = 30
 
 [cli]
 prompt_theme = "default"

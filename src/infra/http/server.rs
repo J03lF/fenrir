@@ -1,0 +1,385 @@
+use std::sync::{Arc, Mutex, RwLock, Weak};
+use std::time::Duration;
+
+use anyhow::{anyhow, Context, Result};
+use async_trait::async_trait;
+use axum::Router;
+use tokio::net::{lookup_host, TcpListener};
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
+use tracing::{debug, info, warn};
+
+use crate::config::AppConfig;
+use crate::security::auth::{ControlPlaneAuthorizer, Role};
+use crate::services::{AppServices, ManagedService, ServiceRegistry, ServiceStatus};
+
+use super::routes::build_router;
+use super::state::{HttpInfo, HttpState};
+use super::tls::{HttpTlsProvider, HttpTlsRuntime};
+
+/// Identifier used in the service registry for the HTTP server.
+pub const HTTP_SERVICE_ID: &str = "http-server";
+
+#[derive(Clone)]
+struct HttpServerConfig {
+    host: String,
+    port: u16,
+    app_name: String,
+    app_version: String,
+}
+
+struct ServerHandle {
+    join: JoinHandle<()>,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+}
+
+impl ServerHandle {
+    async fn shutdown(mut self, force: bool) -> Result<()> {
+        let mut join = self.join;
+        if force {
+            join.abort();
+            return match join.await {
+                Ok(_) => Ok(()),
+                Err(err) if err.is_cancelled() => Ok(()),
+                Err(err) => Err(anyhow!("HTTP server join error: {err}")),
+            };
+        }
+
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+
+        let timeout = tokio::time::sleep(Duration::from_secs(5));
+        tokio::pin!(timeout);
+        tokio::select! {
+            res = &mut join => {
+                match res {
+                    Ok(_) => Ok(()),
+                    Err(err) if err.is_cancelled() => Ok(()),
+                    Err(err) => Err(anyhow!("HTTP server join error: {err}")),
+                }
+            }
+            _ = &mut timeout => {
+                join.abort();
+                match join.await {
+                    Ok(_) => Err(anyhow!("HTTP server shutdown timed out; task aborted")),
+                    Err(err) if err.is_cancelled() => Err(anyhow!(
+                        "HTTP server shutdown timed out; task aborted"
+                    )),
+                    Err(err) => Err(anyhow!("HTTP server join error after abort: {err}")),
+                }
+            }
+        }
+    }
+}
+
+pub struct HttpServer {
+    config: HttpServerConfig,
+    registry: Arc<ServiceRegistry>,
+    services: Weak<AppServices>,
+    auth: Arc<ControlPlaneAuthorizer>,
+    handle: Mutex<Option<ServerHandle>>,
+    tls_provider: RwLock<Option<Arc<HttpTlsProvider>>>,
+}
+
+pub struct HttpServerControl {
+    server: Arc<HttpServer>,
+}
+
+impl HttpServerControl {
+    pub fn new(server: Arc<HttpServer>) -> Self {
+        Self { server }
+    }
+}
+
+impl HttpServer {
+    pub fn new(
+        cfg: &AppConfig,
+        registry: Arc<ServiceRegistry>,
+        services: Weak<AppServices>,
+    ) -> Result<Self> {
+        let config = HttpServerConfig {
+            host: cfg.server.http.host.clone(),
+            port: cfg.server.http.port,
+            app_name: cfg.app.name.clone(),
+            app_version: cfg.app.version.clone(),
+        };
+        let control_tokens = cfg
+            .security
+            .http
+            .resolve_control_tokens()
+            .map_err(|err| anyhow!(err))?;
+        let entries = control_tokens
+            .into_iter()
+            .map(|token| {
+                let role = match token.role.as_str() {
+                    "admin" => Role::Admin,
+                    "operator" => Role::Operator,
+                    "viewer" => Role::Viewer,
+                    other => {
+                        return Err(anyhow!(
+                            "unbekannte Rolle in security.http.control_tokens: {other}"
+                        ))
+                    }
+                };
+                Ok((role, token.secret))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if entries.is_empty() {
+            return Err(anyhow!(
+                "security.http.control_tokens muss für den HTTP-Transport definiert sein"
+            ));
+        }
+        let auth = Arc::new(ControlPlaneAuthorizer::new(entries));
+        let runtime = HttpTlsRuntime::from(&cfg.server.http.tls);
+        let tls_provider = if runtime.enabled {
+            let provider = Arc::new(HttpTlsProvider::new(runtime.clone())?);
+            provider.init_watchers()?;
+            provider.spawn_auto_reload();
+            Some(provider)
+        } else {
+            None
+        };
+
+        Ok(Self {
+            config,
+            registry,
+            services,
+            auth,
+            handle: Mutex::new(None),
+            tls_provider: RwLock::new(tls_provider),
+        })
+    }
+
+    pub async fn reload_tls(&self, cfg: &crate::config::HttpTlsConfig) -> Result<()> {
+        let new_runtime = HttpTlsRuntime::from(cfg);
+        new_runtime.validate()?;
+        let mut maybe_update: Option<(Arc<HttpTlsProvider>, HttpTlsRuntime)> = None;
+        {
+            let mut guard = self
+                .tls_provider
+                .write()
+                .map_err(|_| anyhow!("tls provider lock poisoned"))?;
+            if new_runtime.enabled {
+                if let Some(provider) = guard.as_ref() {
+                    maybe_update = Some((Arc::clone(provider), new_runtime.clone()));
+                } else {
+                    let provider = Arc::new(HttpTlsProvider::new(new_runtime.clone())?);
+                    provider.init_watchers()?;
+                    provider.spawn_auto_reload();
+                    *guard = Some(Arc::clone(&provider));
+                    info!("HTTP TLS aktiviert und Zertifikate geladen");
+                }
+            } else {
+                *guard = None;
+                info!("HTTP TLS deaktiviert");
+            }
+        }
+
+        if let Some((provider, runtime)) = maybe_update {
+            provider.update_runtime(runtime).await?;
+            info!("HTTP TLS-Konfiguration neu geladen");
+        }
+        Ok(())
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.handle
+            .lock()
+            .map(|guard| guard.is_some())
+            .unwrap_or(false)
+    }
+
+    pub async fn start(self: &Arc<Self>) -> Result<bool> {
+        if self.is_running() {
+            debug!("HTTP server already running");
+            return Ok(false);
+        }
+        self.registry.set_status(
+            HTTP_SERVICE_ID,
+            ServiceStatus::Starting,
+            Some("initialisiere".to_string()),
+        );
+
+        let mut resolved = lookup_host((self.config.host.as_str(), self.config.port))
+            .await
+            .with_context(|| {
+                format!(
+                    "konnte HTTP-Adresse nicht auflösen: {}:{}",
+                    self.config.host, self.config.port
+                )
+            })?;
+        let addr = resolved
+            .next()
+            .ok_or_else(|| anyhow!("keine Adresse für HTTP-Server gefunden"))?;
+        let listener = TcpListener::bind(addr)
+            .await
+            .with_context(|| format!("HTTP-Server konnte nicht binden: {addr}"))?;
+        let actual_addr = listener.local_addr().unwrap_or(addr);
+        let services = self
+            .services
+            .upgrade()
+            .ok_or_else(|| anyhow!("app services reference dropped"))?;
+        let state = HttpState {
+            registry: Arc::clone(&self.registry),
+            services: Arc::clone(&services),
+            auth: Arc::clone(&self.auth),
+            info: HttpInfo {
+                app_name: self.config.app_name.clone(),
+                app_version: self.config.app_version.clone(),
+                host: self.config.host.clone(),
+                port: self.config.port,
+            },
+        };
+        let router = Arc::new(build_router(state));
+        let tls_provider = self
+            .tls_provider
+            .read()
+            .map_err(|_| anyhow!("tls provider lock poisoned"))?
+            .clone();
+        let (tx, rx) = oneshot::channel();
+        let server = Arc::clone(self);
+        let registry = Arc::clone(&self.registry);
+
+        let join = tokio::spawn(async move {
+            registry.set_status(
+                HTTP_SERVICE_ID,
+                ServiceStatus::Active,
+                Some(format!("listening on {actual_addr}")),
+            );
+            let res = if let Some(provider) = tls_provider {
+                server
+                    .serve_tls(listener, Arc::clone(&router), provider, rx)
+                    .await
+            } else {
+                axum::serve(listener, (*router).clone())
+                    .with_graceful_shutdown(async move {
+                        let _ = rx.await;
+                    })
+                    .await
+                    .map_err(|err| anyhow!(err))
+            };
+            server.finish(res).await;
+        });
+
+        let mut guard = self
+            .handle
+            .lock()
+            .map_err(|_| anyhow!("http server handle poisoned"))?;
+        *guard = Some(ServerHandle {
+            join,
+            shutdown_tx: Some(tx),
+        });
+        info!("HTTP server task spawned");
+        Ok(true)
+    }
+
+    pub async fn stop(self: &Arc<Self>, force: bool) -> Result<bool> {
+        let handle = {
+            let mut guard = self
+                .handle
+                .lock()
+                .map_err(|_| anyhow!("http server handle poisoned"))?;
+            guard.take()
+        };
+        let Some(handle) = handle else {
+            debug!("HTTP server stop requested but server not running");
+            return Ok(false);
+        };
+
+        let message = if force {
+            "beende (force)".to_string()
+        } else {
+            "fahre herunter".to_string()
+        };
+        self.registry
+            .set_status(HTTP_SERVICE_ID, ServiceStatus::Degraded, Some(message));
+        match handle.shutdown(force).await {
+            Ok(_) => {
+                self.registry.set_status(
+                    HTTP_SERVICE_ID,
+                    ServiceStatus::Stopped,
+                    Some(if force {
+                        "gestoppt (force)".to_string()
+                    } else {
+                        "gestoppt".to_string()
+                    }),
+                );
+                info!("HTTP server stopped");
+                Ok(true)
+            }
+            Err(err) => {
+                self.registry.set_status(
+                    HTTP_SERVICE_ID,
+                    ServiceStatus::Failed,
+                    Some(format!("Fehler beim Stoppen: {err}")),
+                );
+                Err(err)
+            }
+        }
+    }
+
+    async fn finish(&self, result: Result<(), anyhow::Error>) {
+        if let Err(err) = result {
+            warn!(error = %err, "HTTP server terminated with error");
+            self.registry.set_status(
+                HTTP_SERVICE_ID,
+                ServiceStatus::Failed,
+                Some(format!("Fehler: {err}")),
+            );
+        }
+        if let Ok(mut guard) = self.handle.lock() {
+            if guard.is_some() {
+                *guard = None;
+            }
+        }
+    }
+
+    async fn serve_tls(
+        &self,
+        listener: TcpListener,
+        router: Arc<Router>,
+        provider: Arc<HttpTlsProvider>,
+        mut shutdown: oneshot::Receiver<()>,
+    ) -> Result<(), anyhow::Error> {
+        loop {
+            tokio::select! {
+                _ = &mut shutdown => {
+                    break;
+                }
+                accept_result = listener.accept() => {
+                    match accept_result {
+                        Ok((stream, addr)) => {
+                            let service = router.clone();
+                            let provider = Arc::clone(&provider);
+                            tokio::spawn(async move {
+                                if let Err(err) = provider.serve_connection(stream, service).await {
+                                    tracing::error!(address = %addr, error = %err, "TLS-Verbindung fehlgeschlagen");
+                                }
+                            });
+                        }
+                        Err(err) => {
+                            tracing::error!(error = %err, "Fehler beim Annehmen der TLS-Verbindung");
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ManagedService for HttpServerControl {
+    fn id(&self) -> &'static str {
+        HTTP_SERVICE_ID
+    }
+
+    async fn start(self: Arc<Self>) -> anyhow::Result<bool> {
+        HttpServer::start(&self.server).await
+    }
+
+    async fn stop(self: Arc<Self>, force: bool) -> anyhow::Result<bool> {
+        HttpServer::stop(&self.server, force).await
+    }
+}

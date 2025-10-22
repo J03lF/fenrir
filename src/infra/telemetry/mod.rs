@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs;
 #[cfg(target_os = "linux")]
@@ -41,6 +41,7 @@ struct TelemetryState {
     metrics_enabled: AtomicBool,
     health_enabled: AtomicBool,
     metrics: Mutex<HashMap<String, u64>>,
+    service_resources: Mutex<HashMap<String, ServiceResourceEntry>>,
     readiness_probes: Mutex<Vec<Probe>>, // lazily evaluated health probes
     history: Mutex<VecDeque<MetricHistorySample>>,
     history_path: PathBuf,
@@ -65,6 +66,7 @@ impl TelemetryState {
             metrics_enabled: AtomicBool::new(config.metrics_enabled),
             health_enabled: AtomicBool::new(config.health_enabled),
             metrics: Mutex::new(HashMap::new()),
+            service_resources: Mutex::new(HashMap::new()),
             readiness_probes: Mutex::new(Vec::new()),
             history: Mutex::new(history),
             history_path,
@@ -154,6 +156,59 @@ impl TelemetryState {
             Err(err) => {
                 tracing::debug!(error = %err, "telemetrie-history konnte nicht serialisiert werden");
             }
+        }
+    }
+    fn service_resources(&self) -> Vec<ServiceResourceSnapshot> {
+        match self.service_resources.lock() {
+            Ok(map) => map.iter().map(|(id, entry)| entry.snapshot(id)).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+    fn sync_service_resources(&self, snapshots: &[ServiceSnapshot]) {
+        if let Ok(mut map) = self.service_resources.lock() {
+            let active: HashSet<String> = snapshots
+                .iter()
+                .map(|snapshot| snapshot.descriptor.id.to_string())
+                .collect();
+            for snapshot in snapshots {
+                map.entry(snapshot.descriptor.id.to_string())
+                    .or_insert_with(ServiceResourceEntry::default);
+            }
+            map.retain(|id, _| active.contains(id));
+        }
+    }
+
+    fn update_service_resource(&self, service_id: &str, sample: ServiceResourceSample) {
+        if let Ok(mut map) = self.service_resources.lock() {
+            let entry = map
+                .entry(service_id.to_string())
+                .or_insert_with(ServiceResourceEntry::default);
+            let mut touched = false;
+            if let Some(cpu) = sample.cpu_percent {
+                let clamped = cpu.clamp(0.0, 100.0);
+                entry.cpu_percent = Some(clamped);
+                touched = true;
+            }
+            if let Some(memory) = sample.memory_bytes {
+                entry.memory_bytes = Some(memory);
+                touched = true;
+            }
+            if let Some(peak) = sample.memory_peak_bytes {
+                let next_peak = match entry.memory_peak_bytes {
+                    Some(current) => current.max(peak),
+                    None => peak,
+                };
+                entry.memory_peak_bytes = Some(next_peak);
+                touched = true;
+            }
+            if touched {
+                entry.updated_at = Some(OffsetDateTime::now_utc());
+            }
+        }
+    }
+    fn clear_service_resource(&self, service_id: &str) {
+        if let Ok(mut map) = self.service_resources.lock() {
+            map.remove(service_id);
         }
     }
 }
@@ -275,8 +330,8 @@ struct TelemetryConfig {
 impl From<&AppConfig> for TelemetryConfig {
     fn from(cfg: &AppConfig) -> Self {
         Self {
-            metrics_enabled: cfg.telemetry.metrics_enabled,
-            health_enabled: cfg.telemetry.health_enabled,
+            metrics_enabled: cfg.telemetry.metrics.enabled,
+            health_enabled: cfg.telemetry.health.enabled,
         }
     }
 }
@@ -386,6 +441,28 @@ pub fn set_counter(name: &str, value: u64) {
     }
 }
 
+pub fn update_service_resource(service_id: &str, sample: ServiceResourceSample) {
+    if sample.cpu_percent.is_none()
+        && sample.memory_bytes.is_none()
+        && sample.memory_peak_bytes.is_none()
+    {
+        return;
+    }
+
+    if let Some(state) = TELEMETRY.get() {
+        if !state.metrics_enabled.load(Ordering::Acquire) {
+            return;
+        }
+        state.update_service_resource(service_id, sample);
+    }
+}
+
+pub fn clear_service_resource(service_id: &str) {
+    if let Some(state) = TELEMETRY.get() {
+        state.clear_service_resource(service_id);
+    }
+}
+
 fn record_process_history_sample() {
     if let Some(state) = TELEMETRY.get() {
         if !state.metrics_enabled.load(Ordering::Acquire) {
@@ -405,7 +482,9 @@ pub fn attach_service_registry(registry: Arc<ServiceRegistry>) {
         return;
     }
 
-    update_service_counters(&registry.snapshot());
+    let initial = registry.snapshot();
+    update_service_counters(&initial);
+    sync_service_resource_entries(&initial);
 
     let registry_for_task = Arc::clone(&registry);
     tokio::spawn(async move {
@@ -414,10 +493,14 @@ pub fn attach_service_registry(registry: Arc<ServiceRegistry>) {
             use tokio::sync::broadcast::error::RecvError;
             match receiver.recv().await {
                 Ok(_snapshot) => {
-                    update_service_counters(&registry_for_task.snapshot());
+                    let snapshot = registry_for_task.snapshot();
+                    update_service_counters(&snapshot);
+                    sync_service_resource_entries(&snapshot);
                 }
                 Err(RecvError::Lagged(_)) => {
-                    update_service_counters(&registry_for_task.snapshot());
+                    let snapshot = registry_for_task.snapshot();
+                    update_service_counters(&snapshot);
+                    sync_service_resource_entries(&snapshot);
                 }
                 Err(RecvError::Closed) => break,
             }
@@ -425,9 +508,15 @@ pub fn attach_service_registry(registry: Arc<ServiceRegistry>) {
     });
 }
 
+fn sync_service_resource_entries(snapshots: &[ServiceSnapshot]) {
+    if let Some(state) = TELEMETRY.get() {
+        state.sync_service_resources(snapshots);
+    }
+}
+
 pub fn start_system_metrics_sampler(cfg: &AppConfig) {
-    if !cfg.telemetry.metrics_enabled {
-        tracing::debug!("prozessmetriken deaktiviert (metrics_enabled=false)");
+    if !cfg.telemetry.metrics.enabled {
+        tracing::debug!("prozessmetriken deaktiviert (telemetry.metrics.enabled=false)");
         return;
     }
 
@@ -519,11 +608,13 @@ pub fn uptime() -> Option<Duration> {
 pub fn snapshot() -> Option<TelemetrySnapshot> {
     let state = TELEMETRY.get()?;
     let metrics = state.metrics.lock().ok()?.clone();
+    let service_resources = state.service_resources();
     Some(TelemetrySnapshot {
         ready: state.ready.load(Ordering::Acquire),
         live: state.live.load(Ordering::Acquire),
         uptime: state.start_time.elapsed(),
         metrics,
+        service_resources,
     })
 }
 
@@ -540,6 +631,63 @@ pub struct TelemetrySnapshot {
     pub live: bool,
     pub uptime: Duration,
     pub metrics: HashMap<String, u64>,
+    pub service_resources: Vec<ServiceResourceSnapshot>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ServiceResourceSample {
+    pub cpu_percent: Option<f32>,
+    pub memory_bytes: Option<u64>,
+    pub memory_peak_bytes: Option<u64>,
+}
+
+impl ServiceResourceSample {
+    pub fn cpu_percent(mut self, value: f32) -> Self {
+        self.cpu_percent = Some(value);
+        self
+    }
+
+    pub fn memory_bytes(mut self, value: u64) -> Self {
+        self.memory_bytes = Some(value);
+        self
+    }
+
+    pub fn memory_peak_bytes(mut self, value: u64) -> Self {
+        self.memory_peak_bytes = Some(value);
+        self
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ServiceResourceSnapshot {
+    pub id: String,
+    pub cpu_percent: Option<f32>,
+    pub memory_bytes: Option<u64>,
+    pub memory_peak_bytes: Option<u64>,
+    pub updated_at: Option<OffsetDateTime>,
+    pub reported: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ServiceResourceEntry {
+    cpu_percent: Option<f32>,
+    memory_bytes: Option<u64>,
+    memory_peak_bytes: Option<u64>,
+    updated_at: Option<OffsetDateTime>,
+}
+
+impl ServiceResourceEntry {
+    fn snapshot(&self, id: &str) -> ServiceResourceSnapshot {
+        let reported = self.cpu_percent.is_some() || self.memory_bytes.is_some();
+        ServiceResourceSnapshot {
+            id: id.to_string(),
+            cpu_percent: self.cpu_percent,
+            memory_bytes: self.memory_bytes,
+            memory_peak_bytes: self.memory_peak_bytes,
+            updated_at: self.updated_at,
+            reported,
+        }
+    }
 }
 
 struct ProcessMetricsSampler {
@@ -684,6 +832,48 @@ struct ProcessIoSnapshot {
 
 fn read_process_times(ticks_per_second: u64) -> Result<ProcessCpuSample> {
     read_process_times_impl(ticks_per_second)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn service_resource_reported_flag() {
+        let empty = ServiceResourceEntry::default();
+        let snapshot = empty.snapshot("svc-empty");
+        assert!(!snapshot.reported);
+        assert!(snapshot.cpu_percent.is_none());
+
+        let mut entry = ServiceResourceEntry::default();
+        entry.cpu_percent = Some(12.5);
+        let snapshot = entry.snapshot("svc-cpu");
+        assert!(snapshot.reported);
+        assert_eq!(snapshot.cpu_percent, Some(12.5));
+    }
+
+    #[test]
+    fn update_service_resource_clamps_cpu() {
+        let state = TelemetryState::new(TelemetryConfig {
+            metrics_enabled: true,
+            health_enabled: true,
+        });
+        state.update_service_resource(
+            "svc",
+            ServiceResourceSample {
+                cpu_percent: Some(180.0),
+                memory_bytes: Some(42),
+                memory_peak_bytes: None,
+            },
+        );
+        let resources = state.service_resources();
+        assert_eq!(resources.len(), 1);
+        let svc = &resources[0];
+        assert_eq!(svc.id, "svc");
+        assert_eq!(svc.cpu_percent, Some(100.0));
+        assert_eq!(svc.memory_bytes, Some(42));
+        assert!(svc.reported);
+    }
 }
 
 #[cfg(target_os = "linux")]

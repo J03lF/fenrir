@@ -43,7 +43,7 @@ pub fn init_tracing(cfg: &AppConfig) -> Result<ReloadHandle> {
     prepare_db_log()?;
 
     let filter = EnvFilter::try_from_default_env()
-        .or_else(|_| EnvFilter::try_new(cfg.telemetry.tracing_level.clone()))
+        .or_else(|_| EnvFilter::try_new(cfg.telemetry.tracing.level.clone()))
         .unwrap_or_else(|_| EnvFilter::new("info"));
     let (filter_layer, handle) = reload::Layer::new(filter);
 

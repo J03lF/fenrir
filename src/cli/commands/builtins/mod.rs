@@ -1,6 +1,7 @@
 use super::registry::CommandRegistry;
 
 pub mod audit;
+pub mod clear;
 pub mod db_shell;
 pub mod exit;
 pub mod help;
@@ -12,6 +13,7 @@ pub mod user;
 
 pub fn register_builtins(registry: &mut CommandRegistry) {
     registry.register(help::command());
+    registry.register(clear::command());
     registry.register(audit::command());
     registry.register(db_shell::command());
     registry.register(services::list_command());

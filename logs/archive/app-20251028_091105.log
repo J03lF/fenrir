@@ -1,0 +1,21 @@
+2025-10-28T08:58:12.890032Z  INFO main ThreadId(01) fenrir::infra::logging: dateilogging initialisiert log_path=logs/app.log
+2025-10-28T08:58:12.890112Z  INFO main ThreadId(01) fenrir::infra::logging: db-logdatei vorbereitet log_path=logs/db.log
+2025-10-28T08:58:12.890960Z  INFO main ThreadId(01) fenrir::boot: core services registered in registry
+2025-10-28T08:58:12.891388Z  INFO main ThreadId(01) fenrir::boot: scheduler service started
+2025-10-28T08:58:12.891640Z  INFO tokio-runtime-worker ThreadId(07) fenrir::services::scheduler: scheduler heartbeat loop started
+2025-10-28T08:58:12.891716Z  INFO                 main ThreadId(01) fenrir::boot: audit log persistence configured path=/opt/fenrir/development/tmp/runtime/audit/fenrir-audit-history.json capacity=2048 retention_hours=24 persist_seconds=30
+2025-10-28T08:58:12.906090Z  INFO                 main ThreadId(01) fenrir::infra::http::server: HTTP control-plane authentication via identity broker
+2025-10-28T08:58:12.906180Z  INFO                 main ThreadId(01) fenrir::boot: boot complete app=fenrir version=0.1.4
+2025-10-28T08:58:12.907291Z  INFO                 main ThreadId(01) fenrir::boot: bootstrap module ready module=fenrir-api version="latest" status=AlreadyCurrent
+2025-10-28T08:58:12.907344Z  INFO                 main ThreadId(01) fenrir::boot: transport initialisation triggered
+2025-10-28T08:58:12.907367Z  INFO tokio-runtime-worker ThreadId(03) fenrir::boot: ssh server task spawned
+2025-10-28T08:58:12.907510Z  INFO tokio-runtime-worker ThreadId(03) fenrir::infra::ssh: starting SSH server host=127.0.0.1 port=2222
+2025-10-28T08:58:12.907943Z  INFO tokio-runtime-worker ThreadId(07) fenrir::infra::http::server: HTTP server task spawned
+2025-10-28T08:58:22.049055Z  INFO tokio-runtime-worker ThreadId(13) thrussh::server::encrypted: pty-req: unknown pty code 42
+2025-10-28T08:58:27.912403Z  WARN tokio-runtime-worker ThreadId(07) fenrir::services::scheduler: db ping failed error=DB-Verbindungsfehler: error connecting to server: Connection refused (os error 61)
+2025-10-28T09:00:27.916700Z  WARN tokio-runtime-worker ThreadId(07) fenrir::services::scheduler: db ping failed error=DB-Verbindungsfehler: error connecting to server: Connection refused (os error 61)
+2025-10-28T09:02:27.921017Z  WARN tokio-runtime-worker ThreadId(13) fenrir::services::scheduler: db ping failed error=DB-Verbindungsfehler: error connecting to server: Connection refused (os error 61)
+2025-10-28T09:04:27.924274Z  WARN tokio-runtime-worker ThreadId(07) fenrir::services::scheduler: db ping failed error=DB-Verbindungsfehler: error connecting to server: Connection refused (os error 61)
+2025-10-28T09:06:27.928442Z  WARN tokio-runtime-worker ThreadId(13) fenrir::services::scheduler: db ping failed error=DB-Verbindungsfehler: error connecting to server: Connection refused (os error 61)
+2025-10-28T09:08:27.932181Z  WARN tokio-runtime-worker ThreadId(07) fenrir::services::scheduler: db ping failed error=DB-Verbindungsfehler: error connecting to server: Connection refused (os error 61)
+2025-10-28T09:10:27.937437Z  WARN tokio-runtime-worker ThreadId(13) fenrir::services::scheduler: db ping failed error=DB-Verbindungsfehler: error connecting to server: Connection refused (os error 61)

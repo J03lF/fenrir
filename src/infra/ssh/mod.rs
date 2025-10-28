@@ -4,6 +4,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use thrussh::server::{Auth, Server, Session};
 use thrussh::{server, ChannelId, CryptoVec};
 
@@ -715,7 +716,7 @@ impl Handler {
 
 pub async fn start(cfg: &Arc<AppConfig>, services: &Arc<AppServices>) -> Result<()> {
     let config = server::Config {
-        auth_rejection_time: std::time::Duration::from_secs(1),
+        auth_rejection_time: Duration::from_secs(1),
         ..Default::default()
     };
     let mut config = config;
@@ -781,6 +782,7 @@ pub async fn start(cfg: &Arc<AppConfig>, services: &Arc<AppServices>) -> Result<
         ServiceStatus::Active,
         Some(format!("Lauscht auf {bind_addr}")),
     );
+
     let server = Factory {
         username: cfg.server.ssh.user.clone(),
         password_env: "FENRIR_SSH_PASSWORD".to_string(),

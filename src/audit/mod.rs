@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json;
 use std::collections::VecDeque;
 use std::fmt;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::path::PathBuf;
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -166,13 +166,14 @@ impl InMemoryAuditLog {
         path: PathBuf,
         retention: Duration,
         persist_interval: Duration,
-    ) -> Self {
+    ) -> Result<Self, AuditError> {
         let initial_events = load_persisted_events(&path, retention, capacity);
-        Self {
+        let persistence = PersistenceConfig::new(path, retention, persist_interval)?;
+        Ok(Self {
             capacity,
             events: RwLock::new(initial_events),
-            persistence: Some(PersistenceConfig::new(path, retention, persist_interval)),
-        }
+            persistence: Some(persistence),
+        })
     }
 
     fn prune_retention(&self, events: &mut VecDeque<AuditEvent>) {
@@ -249,16 +250,33 @@ struct PersistenceConfig {
 }
 
 impl PersistenceConfig {
-    fn new(path: PathBuf, retention: Duration, persist_interval: Duration) -> Self {
+    fn new(
+        path: PathBuf,
+        retention: Duration,
+        persist_interval: Duration,
+    ) -> Result<Self, AuditError> {
+        let probe = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .write(true)
+            .open(&path)
+            .map_err(|err| {
+                AuditError::Storage(format!(
+                    "audit persistence path '{}' not writable: {err}",
+                    path.display()
+                ))
+            })?;
+        drop(probe);
+
         let initial = Instant::now()
             .checked_sub(persist_interval)
             .unwrap_or_else(Instant::now);
-        Self {
+        Ok(Self {
             path,
             retention,
             persist_interval,
             last_persist: Mutex::new(initial),
-        }
+        })
     }
 
     fn should_persist(&self) -> bool {
@@ -378,5 +396,41 @@ mod serde_time {
         let raw = String::deserialize(deserializer)?;
         let datetime = OffsetDateTime::parse(&raw, &Rfc3339).map_err(serde::de::Error::custom)?;
         Ok(SystemTime::from(datetime))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    #[cfg(unix)]
+    #[test]
+    fn audit_persistence_errors_when_path_unwritable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp_dir = std::env::temp_dir().join(format!("fenrir_audit_test_{}", Uuid::new_v4()));
+        fs::create_dir_all(&tmp_dir).expect("create temp audit dir");
+        let file_path = tmp_dir.join("audit.json");
+        fs::File::create(&file_path).expect("create temp audit file");
+        let mut perms = fs::metadata(&file_path).expect("read perms").permissions();
+        perms.set_mode(0o400);
+        fs::set_permissions(&file_path, perms).expect("make file read-only");
+
+        let result = InMemoryAuditLog::with_persistence(
+            8,
+            file_path.clone(),
+            Duration::from_secs(60),
+            Duration::from_secs(5),
+        );
+        assert!(matches!(result, Err(AuditError::Storage(_))));
+
+        if let Ok(meta) = fs::metadata(&file_path) {
+            let mut perms = meta.permissions();
+            perms.set_mode(0o600);
+            let _ = fs::set_permissions(&file_path, perms);
+        }
+        let _ = fs::remove_file(&file_path);
+        let _ = fs::remove_dir_all(&tmp_dir);
     }
 }

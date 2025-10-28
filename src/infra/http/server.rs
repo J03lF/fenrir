@@ -1,5 +1,5 @@
 use std::sync::{Arc, Mutex, RwLock, Weak};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -9,13 +9,15 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
+use crate::audit::{AuditActor, AuditEvent, AuditMetadata, AuditOutcome};
 use crate::config::AppConfig;
+use crate::infra::telemetry;
 use crate::security::auth::{ControlPlaneAuthorizer, Role};
 use crate::services::{AppServices, ManagedService, ServiceRegistry, ServiceStatus};
 
 use super::routes::build_router;
 use super::state::{HttpInfo, HttpState};
-use super::tls::{HttpTlsProvider, HttpTlsRuntime};
+use super::tls::{HttpTlsProvider, HttpTlsRuntime, TlsReloadEvent, TlsReloadReason};
 
 /// Identifier used in the service registry for the HTTP server.
 pub const HTTP_SERVICE_ID: &str = "http-server";
@@ -104,33 +106,40 @@ impl HttpServer {
             app_name: cfg.app.name.clone(),
             app_version: cfg.app.version.clone(),
         };
-        let control_tokens = cfg
-            .security
-            .http
-            .resolve_control_tokens()
-            .map_err(|err| anyhow!(err))?;
-        let entries = control_tokens
-            .into_iter()
-            .map(|token| {
-                let role = match token.role.as_str() {
-                    "admin" => Role::Admin,
-                    "operator" => Role::Operator,
-                    "viewer" => Role::Viewer,
-                    other => {
-                        return Err(anyhow!(
-                            "unbekannte Rolle in security.http.control_tokens: {other}"
-                        ))
-                    }
-                };
-                Ok((role, token.secret))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        if entries.is_empty() {
-            return Err(anyhow!(
-                "security.http.control_tokens muss für den HTTP-Transport definiert sein"
-            ));
-        }
-        let auth = Arc::new(ControlPlaneAuthorizer::new(entries));
+        let identity = services.upgrade().and_then(|svc| svc.identity());
+        let auth = if let Some(identity) = identity {
+            info!("HTTP control-plane authentication via identity broker");
+            Arc::new(ControlPlaneAuthorizer::with_identity(identity))
+        } else {
+            let control_tokens = cfg
+                .security
+                .http
+                .resolve_control_tokens()
+                .map_err(|err| anyhow!(err))?;
+            let entries = control_tokens
+                .into_iter()
+                .map(|token| {
+                    let role = match token.role.as_str() {
+                        "admin" => Role::Admin,
+                        "operator" => Role::Operator,
+                        "viewer" => Role::Viewer,
+                        other => {
+                            return Err(anyhow!(
+                                "unbekannte Rolle in security.http.control_tokens: {other}"
+                            ))
+                        }
+                    };
+                    Ok((role, token.secret))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            if entries.is_empty() {
+                return Err(anyhow!(
+                    "keine Kontrollebenen-Authentifizierung konfiguriert (Identity-Service fehlt, security.http.control_tokens leer)"
+                ));
+            }
+            info!("HTTP control-plane authentication via static token fallback");
+            Arc::new(ControlPlaneAuthorizer::with_tokens(entries))
+        };
         let runtime = HttpTlsRuntime::from(&cfg.server.http.tls);
         let tls_provider = if runtime.enabled {
             let provider = Arc::new(HttpTlsProvider::new(runtime.clone())?);
@@ -141,14 +150,23 @@ impl HttpServer {
             None
         };
 
-        Ok(Self {
+        let server = Self {
             config,
             registry,
             services,
             auth,
             handle: Mutex::new(None),
-            tls_provider: RwLock::new(tls_provider),
-        })
+            tls_provider: RwLock::new(tls_provider.clone()),
+        };
+
+        if let Some(provider) = tls_provider.as_ref() {
+            server.attach_tls_hooks(provider);
+            telemetry::set_counter("http.tls.enabled", 1);
+        } else {
+            telemetry::set_counter("http.tls.enabled", 0);
+        }
+
+        Ok(server)
     }
 
     pub async fn reload_tls(&self, cfg: &crate::config::HttpTlsConfig) -> Result<()> {
@@ -168,19 +186,68 @@ impl HttpServer {
                     provider.init_watchers()?;
                     provider.spawn_auto_reload();
                     *guard = Some(Arc::clone(&provider));
+                    self.attach_tls_hooks(&provider);
+                    telemetry::set_counter("http.tls.enabled", 1);
                     info!("HTTP TLS aktiviert und Zertifikate geladen");
                 }
             } else {
                 *guard = None;
+                telemetry::set_counter("http.tls.enabled", 0);
                 info!("HTTP TLS deaktiviert");
             }
         }
 
         if let Some((provider, runtime)) = maybe_update {
-            provider.update_runtime(runtime).await?;
+            provider
+                .update_runtime(runtime, TlsReloadReason::ConfigReload)
+                .await?;
             info!("HTTP TLS-Konfiguration neu geladen");
         }
         Ok(())
+    }
+
+    fn attach_tls_hooks(&self, provider: &Arc<HttpTlsProvider>) {
+        let services = self.services.clone();
+        let endpoint = Arc::new(format!("{}:{}", self.config.host, self.config.port));
+        provider.register_hook(Arc::new(move |event: &TlsReloadEvent| {
+            telemetry::record_counter("http.tls.reloads_total", 1);
+            if let Ok(epoch) = event.timestamp.duration_since(SystemTime::UNIX_EPOCH) {
+                telemetry::set_counter("http.tls.reload_last_epoch", epoch.as_secs());
+            }
+
+            let endpoint_ref = endpoint.as_str();
+            info!(
+                reason = tls_reload_reason_label(&event.reason),
+                cert = %event.cert_path.display(),
+                key = %event.key_path.display(),
+                "HTTP TLS-Zertifikate neu geladen"
+            );
+
+            if let Some(services) = services.upgrade() {
+                let metadata = AuditMetadata::default()
+                    .insert("reason", tls_reload_reason_label(&event.reason))
+                    .insert("endpoint", endpoint_ref)
+                    .insert("cert_path", event.cert_path.display().to_string())
+                    .insert("key_path", event.key_path.display().to_string());
+                match AuditEvent::builder()
+                    .actor(AuditActor::System)
+                    .action("http.tls.reload")
+                    .target(format!("http-tls://{endpoint_ref}"))
+                    .outcome(AuditOutcome::Success)
+                    .metadata(metadata)
+                    .build()
+                {
+                    Ok(event) => {
+                        if let Err(err) = services.record_audit(event) {
+                            tracing::warn!(error = %err, "audit event für TLS-Reload konnte nicht geschrieben werden");
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, "audit event für TLS-Reload konnte nicht erstellt werden");
+                    }
+                }
+            }
+        }));
     }
 
     pub fn is_running(&self) -> bool {
@@ -247,6 +314,7 @@ impl HttpServer {
                 ServiceStatus::Active,
                 Some(format!("listening on {actual_addr}")),
             );
+
             let res = if let Some(provider) = tls_provider {
                 server
                     .serve_tls(listener, Arc::clone(&router), provider, rx)
@@ -381,5 +449,13 @@ impl ManagedService for HttpServerControl {
 
     async fn stop(self: Arc<Self>, force: bool) -> anyhow::Result<bool> {
         HttpServer::stop(&self.server, force).await
+    }
+}
+
+fn tls_reload_reason_label(reason: &TlsReloadReason) -> &'static str {
+    match reason {
+        TlsReloadReason::Filesystem => "filesystem",
+        TlsReloadReason::Interval => "interval",
+        TlsReloadReason::ConfigReload => "config_reload",
     }
 }

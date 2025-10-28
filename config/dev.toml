@@ -40,11 +40,23 @@ audience = "fenrir-clients"
 exp_seconds = 3600
 
 [security.http]
-control_tokens = [
-  "admin:env:FENRIR_HTTP_TOKEN_ADMIN",
-  "operator:env:FENRIR_HTTP_TOKEN_OPERATOR",
-  "viewer:env:FENRIR_HTTP_TOKEN_VIEWER",
-]
+control_tokens = []
+
+[security.identity]
+provider = "embedded"
+environment = "dev"
+instance_id = "local"
+
+[security.identity.embedded]
+store_path = "runtime/identity/store-dev.json"
+audience = "fenrir-control-plane"
+
+[security.identity.external]
+base_url = "https://identity.example.com"
+jwks_url = "https://identity.example.com/jwks.json"
+auth_token = "env:FENRIR_IDENTITY_TOKEN"
+jwks_refresh_seconds = 300
+audience = "fenrir-control-plane"
 
 [db]
 default_engine = "postgres"

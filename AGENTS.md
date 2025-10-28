@@ -87,6 +87,7 @@ src/
   - `telemetry.tracing.level`, `telemetry.metrics.enabled/exporter`, `telemetry.health.enabled`, `telemetry.system.enabled/interval_ms`.
   - `audit.enabled`, `audit.buffer_capacity`, `audit.storage.path|retention_hours|persist_interval_seconds`.
   - `cli.prompt_theme`, `modules.registry` (URL, Auth-Token via ENV, TLS-Settings), `modules.storage`, `modules.trust.require_signature|allowed_signers|keyring_path`.
+  - `modules.registry.offline_dirs` (lokale Modul-Repositories), `modules.runtime.engine ∈ {process, stub}`, `modules.bootstrap` (Auto-Install-Liste – Default `fenrir-api`).
 - Fehlende Secrets/ENV triggern `BootErrorCode::ConfigMissingSecret`.
 
 # Boot & Diagnostics
@@ -105,8 +106,11 @@ src/
 - Completion-Engine in `cli/completion.rs`: Tests sichern Alias-/Prefix-Cycling. Keine Debug-Prints im Commit.
 
 # Module-/Plugin-Ebene
-- Module-Service (`services::module`) verwaltet Registry (`infra::modules::registry`) und Runtime (`infra::modules::runtime`).
-- Trust Layer (`modules.trust`) erzwingt Signaturen; `Ed25519ModuleVerifier` nutzt Allowlist `allowed_signers`.
+- Module-Service (`services::module`) orchestriert Registry (`infra::modules::registry`) und Runtime (`infra::modules::runtime`).
+- Registry ist zusammengesetzt: lokale Quellen (`modules.registry.offline_dirs`) werden vor HTTP abgefragt; so lassen sich Arbeitskopien wie `/opt/fenrir/development/fenrir-api` ohne Netzwerk betreiben.
+- Runtime wählbar per Config (`modules.runtime.engine`): `process` spawnt Binaries, `stub` nutzt die neue In-Process-Runtime für Tests/CI.
+- `modules.bootstrap` listet Module, die beim Boot automatisch installiert/aktualisiert werden (Standard: `fenrir-api`).
+- Trust Layer (`modules.trust`) erzwingt Signaturen, sofern aktiviert; im Dev-Default (`require_signature = false`, leere Allowlist) dürfen Offline-Artefakte ohne Signatur installiert werden.
 - Installationspfade kommen aus Config (`modules.storage.install_dir`).
 
 # Telemetry & Logging

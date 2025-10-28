@@ -88,6 +88,7 @@ impl SchedulerService {
                 Some("Heartbeat aktiv".to_string()),
             );
             info!("scheduler heartbeat loop started");
+
             loop {
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 registry.update_note("scheduler", Some("Heartbeat OK".to_string()));

@@ -1,6 +1,7 @@
 pub mod db_shell;
 pub mod module;
 pub mod scheduler;
+pub mod security;
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -17,12 +18,14 @@ use tokio::task;
 
 use crate::audit::{AuditError, AuditEvent, AuditLog};
 use crate::infra::logging::ReloadHandle;
+use crate::security::identity::IdentityProvider;
 use crate::security::manager::{AuditSink, SecurityManager};
 use once_cell::sync::OnceCell;
 
 pub use db_shell::DbShellService;
 pub use module::ModuleService;
 pub use scheduler::SchedulerService;
+pub use security::SessionService;
 
 #[derive(Debug)]
 pub struct ServiceActionReport {
@@ -350,6 +353,8 @@ pub struct AppServices {
     audit_bus: broadcast::Sender<AuditEvent>,
     module_service: OnceCell<Arc<ModuleService>>,
     security: OnceCell<Arc<SecurityManager>>,
+    session: OnceCell<Arc<SessionService>>,
+    identity: OnceCell<Arc<dyn IdentityProvider>>,
 }
 
 impl AppServices {
@@ -370,6 +375,8 @@ impl AppServices {
             audit_bus,
             module_service: OnceCell::new(),
             security: OnceCell::new(),
+            session: OnceCell::new(),
+            identity: OnceCell::new(),
         }
     }
 
@@ -391,6 +398,26 @@ impl AppServices {
 
     pub fn security_manager(&self) -> Option<Arc<SecurityManager>> {
         self.security.get().cloned()
+    }
+
+    pub fn attach_identity(&self, identity: Arc<dyn IdentityProvider>) -> Result<(), &'static str> {
+        self.identity
+            .set(identity)
+            .map_err(|_| "identity service already attached")
+    }
+
+    pub fn identity(&self) -> Option<Arc<dyn IdentityProvider>> {
+        self.identity.get().cloned()
+    }
+
+    pub fn attach_session(&self, service: Arc<SessionService>) -> Result<(), &'static str> {
+        self.session
+            .set(service)
+            .map_err(|_| "session service already attached")
+    }
+
+    pub fn session_service(&self) -> Option<Arc<SessionService>> {
+        self.session.get().cloned()
     }
 
     pub fn registry(&self) -> Arc<ServiceRegistry> {

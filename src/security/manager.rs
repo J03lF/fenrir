@@ -197,6 +197,10 @@ impl SecurityManager {
         }
     }
 
+    pub fn sessions_active_count(&self) -> Result<usize, SecurityError> {
+        Ok(self.sessions.active_sessions()?)
+    }
+
     pub fn audit_control_plane_token(
         &self,
         token: Option<&str>,

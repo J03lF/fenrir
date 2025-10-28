@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::fs;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
@@ -51,6 +51,13 @@ struct RunningModuleState {
 
 impl ProcessModuleRuntime {
     pub fn new(storage: Arc<dyn ModuleStoragePort>, state_dir: PathBuf) -> Self {
+        if let Err(err) = std::fs::create_dir_all(&state_dir) {
+            warn!(
+                path = %state_dir.display(),
+                error = %err,
+                "failed to prepare module runtime state directory"
+            );
+        }
         Self {
             storage,
             state_dir,
@@ -76,13 +83,9 @@ impl ProcessModuleRuntime {
                         // Check which modules are still running
                         for state in states {
                             if self.is_process_alive(state.pid) {
-                                info!(
-                                    module_id = %state.module_id,
-                                    pid = state.pid,
-                                    "module still running after restart"
-                                );
-
-                                // TODO: Reattach to process
+                                if let Err(err) = self.reattach_running_module(state).await {
+                                    warn!(error = %err, "failed to reattach running module");
+                                }
                             } else {
                                 warn!(
                                     module_id = %state.module_id,
@@ -101,6 +104,70 @@ impl ProcessModuleRuntime {
                 error!("failed to read runtime state file: {}", e);
             }
         }
+
+        Ok(())
+    }
+
+    async fn reattach_running_module(
+        &self,
+        persisted: PersistedModuleState,
+    ) -> Result<(), ModuleRuntimeError> {
+        let module_id = ModuleId::new(&persisted.module_id)
+            .map_err(|err| ModuleRuntimeError::InvalidState(err.to_string()))?;
+        let expected_version = ModuleVersion::parse(&persisted.version)
+            .map_err(|err| ModuleRuntimeError::InvalidState(err.to_string()))?;
+
+        let installed = self
+            .storage
+            .load(&module_id)
+            .await
+            .map_err(|err| ModuleRuntimeError::InvalidState(err.to_string()))?;
+
+        if let Some(installed) = installed {
+            let installed_version = ModuleVersion(installed.manifest.version.clone());
+            if installed_version != expected_version {
+                warn!(
+                    module_id = %module_id,
+                    expected = %expected_version,
+                    actual = %installed_version,
+                    "reattach version mismatch"
+                );
+            }
+        } else {
+            warn!(
+                module_id = %module_id,
+                "installed module missing during runtime reattach"
+            );
+            return Ok(());
+        }
+
+        let started_at = UNIX_EPOCH + Duration::from_secs(persisted.started_at);
+        let state = RunningModuleState {
+            module_id: module_id.clone(),
+            version: expected_version.clone(),
+            pid: persisted.pid,
+            port: persisted.port,
+            started_at,
+            restart_count: persisted.restart_count,
+            log_file: PathBuf::from(&persisted.log_file),
+            child: None,
+        };
+
+        let key = module_id.to_string();
+        {
+            let mut modules = self.running_modules.write().await;
+            modules.insert(key, state);
+        }
+
+        crate::infra::telemetry::register_service_process("module-runtime", persisted.pid);
+        let sample = crate::infra::telemetry::get_service_specific_metrics("module-runtime");
+        crate::infra::telemetry::update_service_resource("module-runtime", sample);
+
+        info!(
+            module_id = %module_id,
+            pid = persisted.pid,
+            "reattached running module process"
+        );
 
         Ok(())
     }
@@ -295,6 +362,12 @@ impl ModuleRuntimePort for ProcessModuleRuntime {
             "module process started"
         );
 
+        // Update telemetry with real module process metrics
+        use crate::infra::telemetry;
+        telemetry::register_service_process("module-runtime", pid);
+        let sample = telemetry::get_service_specific_metrics("module-runtime");
+        telemetry::update_service_resource("module-runtime", sample);
+
         // Store running state
         let state = RunningModuleState {
             module_id: config.module_id.clone(),
@@ -344,6 +417,9 @@ impl ModuleRuntimePort for ProcessModuleRuntime {
             state.pid
         };
 
+        // Remove telemetry process tracking before killing to avoid stale samples
+        crate::infra::telemetry::unregister_service_process("module-runtime", pid);
+
         // Kill the process
         self.kill_process(pid).await?;
 
@@ -353,6 +429,10 @@ impl ModuleRuntimePort for ProcessModuleRuntime {
         }
 
         info!(module_id = %module_id, pid = pid, "module stopped");
+
+        // Refresh telemetry sample after shutdown
+        let sample = crate::infra::telemetry::get_service_specific_metrics("module-runtime");
+        crate::infra::telemetry::update_service_resource("module-runtime", sample);
 
         Ok(())
     }
@@ -487,4 +567,131 @@ struct PersistedModuleState {
     started_at: u64,
     restart_count: u32,
     log_file: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::module::{ChecksumAlgorithm, ModuleBundle, ModuleInstallResult};
+    use crate::domain::module::{
+        InstalledModule, ModuleArtifactDescriptor, ModuleChecksum, ModuleManifest,
+        ModuleSignatureDescriptor, SignatureAlgorithm,
+    };
+    use crate::domain::module::{ModuleStorageError, ModuleStoragePort};
+    use async_trait::async_trait;
+    use semver::Version;
+    use std::sync::Arc;
+    use std::time::SystemTime;
+    use uuid::Uuid;
+
+    struct TestStorage {
+        installed: InstalledModule,
+    }
+
+    #[async_trait]
+    impl ModuleStoragePort for TestStorage {
+        async fn list(&self) -> Result<Vec<InstalledModule>, ModuleStorageError> {
+            Ok(vec![self.installed.clone()])
+        }
+
+        async fn load(&self, id: &ModuleId) -> Result<Option<InstalledModule>, ModuleStorageError> {
+            if &self.installed.manifest.id == id.as_str() {
+                Ok(Some(self.installed.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+
+        async fn stage_and_activate(
+            &self,
+            _bundle: ModuleBundle,
+        ) -> Result<ModuleInstallResult, ModuleStorageError> {
+            Err(ModuleStorageError::InvalidState(
+                "stage not implemented in test".to_string(),
+            ))
+        }
+
+        async fn remove(&self, _id: &ModuleId) -> Result<(), ModuleStorageError> {
+            Err(ModuleStorageError::InvalidState(
+                "remove not implemented in test".to_string(),
+            ))
+        }
+    }
+
+    fn test_manifest() -> InstalledModule {
+        InstalledModule {
+            manifest: ModuleManifest {
+                id: "fenrir-api".to_string(),
+                version: Version::parse("1.2.3").unwrap(),
+                title: None,
+                description: None,
+                fenrir_version: None,
+                authors: vec![],
+                license: None,
+                artifact: ModuleArtifactDescriptor {
+                    download_url: String::new(),
+                    checksum: ModuleChecksum {
+                        algorithm: ChecksumAlgorithm::Sha256,
+                        hash: String::new(),
+                    },
+                    content_type: None,
+                    size_bytes: None,
+                },
+                signature: ModuleSignatureDescriptor {
+                    algorithm: SignatureAlgorithm::Ed25519,
+                    key_id: String::new(),
+                    signature: String::new(),
+                },
+                tags: vec![],
+                published_at: None,
+            },
+            installed_at: SystemTime::now(),
+            path: String::from("/dev/null"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn load_state_reattaches_running_process() {
+        let tmp_dir = std::env::temp_dir().join(format!("fenrir-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let log_dir = tmp_dir.join("logs");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let log_file = log_dir.join("fenrir-api.log");
+        std::fs::write(&log_file, b"boot log").unwrap();
+
+        let storage: Arc<dyn ModuleStoragePort> = Arc::new(TestStorage {
+            installed: test_manifest(),
+        });
+        let runtime = ProcessModuleRuntime::new(Arc::clone(&storage), tmp_dir.clone());
+
+        let state = PersistedModuleState {
+            module_id: "fenrir-api".into(),
+            version: "1.2.3".into(),
+            pid: std::process::id(),
+            port: Some(8080),
+            started_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            restart_count: 2,
+            log_file: log_file.display().to_string(),
+        };
+
+        let state_file = tmp_dir.join(STATE_FILE_NAME);
+        tokio::fs::write(&state_file, serde_json::to_string(&vec![state]).unwrap())
+            .await
+            .unwrap();
+
+        runtime.load_state().await.expect("state loads");
+
+        let module_id = ModuleId::new("fenrir-api").unwrap();
+        let info = runtime.status(&module_id).await.expect("status available");
+        assert!(matches!(info.status, ModuleRuntimeStatus::Running));
+        assert_eq!(info.pid, Some(std::process::id()));
+        assert_eq!(info.port, Some(8080));
+        assert_eq!(info.restart_count, 2);
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
 }

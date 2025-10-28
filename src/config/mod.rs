@@ -100,6 +100,8 @@ pub struct SecuritySection {
     pub http: HttpSecuritySection,
     #[serde(default)]
     pub session: SessionSection,
+    #[serde(default)]
+    pub identity: IdentitySection,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -130,6 +132,68 @@ pub struct JwtConfig {
 pub struct HttpSecuritySection {
     #[serde(default)]
     pub control_tokens: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct IdentitySection {
+    #[serde(default = "default_identity_provider")]
+    pub provider: IdentityProviderKind,
+    #[serde(default = "default_identity_environment")]
+    pub environment: String,
+    #[serde(default = "default_identity_instance_id")]
+    pub instance_id: String,
+    #[serde(default)]
+    pub embedded: IdentityEmbeddedSection,
+    #[serde(default)]
+    pub external: IdentityExternalSection,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct IdentityEmbeddedSection {
+    #[serde(default = "default_identity_store_path")]
+    pub store_path: String,
+    #[serde(default = "default_identity_audience")]
+    pub audience: String,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct IdentityExternalSection {
+    pub base_url: Option<String>,
+    pub jwks_url: Option<String>,
+    #[serde(default)]
+    pub auth_token: Option<String>,
+    #[serde(default = "default_jwks_refresh_seconds")]
+    pub jwks_refresh_seconds: u64,
+    #[serde(default = "default_identity_audience")]
+    pub audience: String,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityProviderKind {
+    Embedded,
+    External,
+}
+
+impl Default for IdentitySection {
+    fn default() -> Self {
+        Self {
+            provider: default_identity_provider(),
+            environment: default_identity_environment(),
+            instance_id: default_identity_instance_id(),
+            embedded: IdentityEmbeddedSection::default(),
+            external: IdentityExternalSection::default(),
+        }
+    }
+}
+
+impl Default for IdentityEmbeddedSection {
+    fn default() -> Self {
+        Self {
+            store_path: default_identity_store_path(),
+            audience: default_identity_audience(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -255,6 +319,10 @@ pub struct ModulesSection {
     pub registry: ModuleRegistrySection,
     pub storage: ModuleStorageSection,
     #[serde(default)]
+    pub runtime: ModuleRuntimeSection,
+    #[serde(default)]
+    pub bootstrap: Vec<String>,
+    #[serde(default)]
     pub trust: ModuleTrustSection,
 }
 
@@ -264,9 +332,32 @@ pub struct ModuleRegistrySection {
     #[serde(default)]
     pub allow_offline: bool,
     #[serde(default)]
+    pub offline_dirs: Vec<String>,
+    #[serde(default)]
     pub auth_token: Option<String>,
     #[serde(default)]
     pub tls: ModuleRegistryTlsSection,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ModuleRuntimeSection {
+    #[serde(default = "default_module_runtime_engine")]
+    pub engine: ModuleRuntimeEngine,
+}
+
+impl Default for ModuleRuntimeSection {
+    fn default() -> Self {
+        Self {
+            engine: default_module_runtime_engine(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModuleRuntimeEngine {
+    Process,
+    Stub,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -313,6 +404,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_module_runtime_engine() -> ModuleRuntimeEngine {
+    ModuleRuntimeEngine::Process
+}
+
 fn default_kdf_version() -> u32 {
     1
 }
@@ -346,6 +441,30 @@ fn default_session_idle_timeout_seconds() -> u64 {
 }
 
 fn default_session_cleanup_interval_seconds() -> u64 {
+    300
+}
+
+fn default_identity_provider() -> IdentityProviderKind {
+    IdentityProviderKind::Embedded
+}
+
+fn default_identity_environment() -> String {
+    "dev".to_string()
+}
+
+fn default_identity_instance_id() -> String {
+    "local".to_string()
+}
+
+fn default_identity_store_path() -> String {
+    "runtime/identity/store.json".to_string()
+}
+
+fn default_identity_audience() -> String {
+    "fenrir-control-plane".to_string()
+}
+
+fn default_jwks_refresh_seconds() -> u64 {
     300
 }
 
@@ -458,7 +577,85 @@ impl SecuritySection {
         self.kdf.validate()?;
         self.http.validate()?;
         self.session.validate()?;
+        self.identity.validate()?;
         Ok(())
+    }
+}
+
+impl IdentitySection {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.environment.trim().is_empty() {
+            return Err(ConfigError::Invalid(
+                "security.identity.environment must not be empty",
+            ));
+        }
+        if self.instance_id.trim().is_empty() {
+            return Err(ConfigError::Invalid(
+                "security.identity.instance_id must not be empty",
+            ));
+        }
+        match self.provider {
+            IdentityProviderKind::Embedded => {
+                if self.embedded.store_path.trim().is_empty() {
+                    return Err(ConfigError::Invalid(
+                        "security.identity.embedded.store_path must not be empty",
+                    ));
+                }
+                if self.embedded.audience.trim().is_empty() {
+                    return Err(ConfigError::Invalid(
+                        "security.identity.embedded.audience must not be empty",
+                    ));
+                }
+            }
+            IdentityProviderKind::External => {
+                let base = self.external.base_url.as_ref().ok_or_else(|| {
+                    ConfigError::Invalid(
+                        "security.identity.external.base_url must be set for external provider",
+                    )
+                })?;
+                if base.trim().is_empty() {
+                    return Err(ConfigError::Invalid(
+                        "security.identity.external.base_url must not be empty",
+                    ));
+                }
+                if let Some(jwks) = &self.external.jwks_url {
+                    if jwks.trim().is_empty() {
+                        return Err(ConfigError::Invalid(
+                            "security.identity.external.jwks_url must not be empty when set",
+                        ));
+                    }
+                }
+                if self.external.jwks_refresh_seconds == 0 {
+                    return Err(ConfigError::Invalid(
+                        "security.identity.external.jwks_refresh_seconds must be > 0",
+                    ));
+                }
+                if self.external.audience.trim().is_empty() {
+                    return Err(ConfigError::Invalid(
+                        "security.identity.external.audience must not be empty",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn audience(&self) -> &str {
+        match self.provider {
+            IdentityProviderKind::Embedded => self.embedded.audience.as_str(),
+            IdentityProviderKind::External => self.external.audience.as_str(),
+        }
+    }
+
+    pub fn store_path(&self) -> PathBuf {
+        PathBuf::from(self.embedded.store_path.clone())
+    }
+
+    pub fn resolve_external_auth_token(&self) -> Result<Option<String>, ConfigError> {
+        resolve_optional_secret(
+            &self.external.auth_token,
+            "security.identity.external.auth_token",
+        )
     }
 }
 
@@ -477,6 +674,13 @@ impl ModuleRegistrySection {
             if token.len() < 16 {
                 return Err(ConfigError::Invalid(
                     "modules.registry.auth_token must be at least 16 characters",
+                ));
+            }
+        }
+        for dir in &self.offline_dirs {
+            if dir.trim().is_empty() {
+                return Err(ConfigError::Invalid(
+                    "modules.registry.offline_dirs must not contain empty paths",
                 ));
             }
         }
@@ -499,6 +703,14 @@ impl ModuleStorageSection {
             }
         }
         Ok(())
+    }
+}
+
+impl ModuleRuntimeSection {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        match self.engine {
+            ModuleRuntimeEngine::Process | ModuleRuntimeEngine::Stub => Ok(()),
+        }
     }
 }
 
@@ -805,6 +1017,7 @@ pub fn validate(cfg: &AppConfig) -> Result<(), ConfigError> {
     cfg.telemetry.validate()?;
     cfg.modules.registry.validate()?;
     cfg.modules.storage.validate()?;
+    cfg.modules.runtime.validate()?;
     cfg.audit.validate()?;
 
     if !matches!(

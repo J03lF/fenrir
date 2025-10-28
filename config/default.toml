@@ -48,11 +48,23 @@ audience = "fenrir-clients"
 exp_seconds = 3600
 
 [security.http]
-control_tokens = [
-  "admin:env:FENRIR_HTTP_TOKEN_ADMIN",
-  "operator:env:FENRIR_HTTP_TOKEN_OPERATOR",
-  "viewer:env:FENRIR_HTTP_TOKEN_VIEWER",
-]
+control_tokens = []
+
+[security.identity]
+provider = "embedded"
+environment = "development"
+instance_id = "local"
+
+[security.identity.embedded]
+store_path = "runtime/identity/store.json"
+audience = "fenrir-control-plane"
+
+[security.identity.external]
+base_url = "https://identity.example.com"
+jwks_url = "https://identity.example.com/jwks.json"
+auth_token = "env:FENRIR_IDENTITY_TOKEN"
+jwks_refresh_seconds = 300
+audience = "fenrir-control-plane"
 
 [security.session]
 lifetime_seconds = 3600
@@ -94,9 +106,13 @@ persist_interval_seconds = 30
 [cli]
 prompt_theme = "default"
 
+[modules]
+bootstrap = ["fenrir-api"]
+
 [modules.registry]
 url = "http://localhost:3001"
 allow_offline = true
+offline_dirs = ["/opt/fenrir/development/fenrir-api"]
 auth_token = "env:FENRIR_REGISTRY_TOKEN"
 
 [modules.registry.tls]
@@ -105,11 +121,14 @@ auth_token = "env:FENRIR_REGISTRY_TOKEN"
 # client_key_path = "config/certs/fenrir-client.key"
 accept_invalid_certs = false
 
+[modules.runtime]
+engine = "stub"
+
 [modules.storage]
 install_dir = "/Users/jfurocket/Documents/personal/modules"
 cache_dir = "/Users/jfurocket/Documents/personal/modules/.cache"
 
 [modules.trust]
-require_signature = true
-allowed_signers = ["fenrir-core", "Fenrir Team"]
+require_signature = false
+allowed_signers = []
 keyring_path = "config/modules/keyring.json"

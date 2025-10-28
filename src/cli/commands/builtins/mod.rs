@@ -8,6 +8,7 @@ pub mod log;
 pub mod modules;
 pub mod services;
 pub mod show;
+pub mod user;
 
 pub fn register_builtins(registry: &mut CommandRegistry) {
     registry.register(help::command());
@@ -24,6 +25,7 @@ pub fn register_builtins(registry: &mut CommandRegistry) {
     registry.register(modules::update_command());
     registry.register(modules::check_command());
     registry.register(modules::logs_command());
+    registry.register(user::command());
     registry.register(show::command());
     registry.register(exit::command());
 }

@@ -21,11 +21,14 @@ use crate::config::AppConfig;
 use crate::services::{ServiceRegistry, ServiceSnapshot, ServiceStatus, ServiceTag};
 use serde::{Deserialize, Serialize};
 use serde_json;
+use sysinfo::{Pid, System};
 use time::OffsetDateTime;
 
 static TELEMETRY: OnceLock<TelemetryState> = OnceLock::new();
 static SERVICE_METRICS_ATTACHED: AtomicBool = AtomicBool::new(false);
 static SYSTEM_METRICS_STARTED: AtomicBool = AtomicBool::new(false);
+static SERVICE_PROCESS_REGISTRY: OnceLock<Mutex<HashMap<String, HashSet<u32>>>> = OnceLock::new();
+static PROCESS_SYSTEM: OnceLock<Mutex<System>> = OnceLock::new();
 
 const HISTORY_FILENAME: &str = "fenrir-telemetry-history.json";
 const HISTORY_RETENTION_SECS: u64 = 24 * 60 * 60; // 24h
@@ -463,6 +466,73 @@ pub fn clear_service_resource(service_id: &str) {
     }
 }
 
+pub fn register_service_process(service_id: impl Into<String>, pid: u32) {
+    if pid == 0 {
+        return;
+    }
+    let registry = service_process_registry();
+    if let Ok(mut guard) = registry.lock() {
+        guard.entry(service_id.into()).or_default().insert(pid);
+    }
+}
+
+pub fn unregister_service_process(service_id: &str, pid: u32) {
+    let registry = service_process_registry();
+    if let Ok(mut guard) = registry.lock() {
+        if let Some(set) = guard.get_mut(service_id) {
+            set.remove(&pid);
+            if set.is_empty() {
+                guard.remove(service_id);
+            }
+        }
+    }
+}
+
+pub fn clear_service_processes(service_id: &str) {
+    let registry = service_process_registry();
+    if let Ok(mut guard) = registry.lock() {
+        guard.remove(service_id);
+    }
+}
+
+/// Get current process CPU and memory metrics for service resource tracking
+pub fn get_current_process_metrics() -> ServiceResourceSample {
+    let mut sample = ServiceResourceSample::default();
+
+    // Get current CPU usage from system metrics
+    if let Some(state) = TELEMETRY.get() {
+        if let Ok(metrics) = state.metrics.lock() {
+            if let Some(&cpu_percent) = metrics.get("process.cpu.usage_percent") {
+                sample.cpu_percent = Some(cpu_percent as f32);
+            }
+            if let Some(&memory_bytes) = metrics.get("process.memory.resident_bytes") {
+                sample.memory_bytes = Some(memory_bytes);
+                sample.memory_peak_bytes = Some(memory_bytes);
+            }
+        }
+    }
+
+    sample
+}
+
+/// Get service-specific metrics based on service type and activity
+pub fn get_service_specific_metrics(service_id: &str) -> ServiceResourceSample {
+    if let Some(pids) = clone_service_process_pids(service_id) {
+        if let Some(mut sample) = collect_process_sample(service_id, &pids) {
+            if sample.memory_peak_bytes.is_none() {
+                sample.memory_peak_bytes = sample.memory_bytes;
+            }
+            return sample;
+        }
+    }
+
+    let mut sample = get_current_process_metrics();
+    if sample.memory_peak_bytes.is_none() {
+        sample.memory_peak_bytes = sample.memory_bytes;
+    }
+    sample
+}
+
 fn record_process_history_sample() {
     if let Some(state) = TELEMETRY.get() {
         if !state.metrics_enabled.load(Ordering::Acquire) {
@@ -512,6 +582,96 @@ fn sync_service_resource_entries(snapshots: &[ServiceSnapshot]) {
     if let Some(state) = TELEMETRY.get() {
         state.sync_service_resources(snapshots);
     }
+}
+
+fn service_process_registry() -> &'static Mutex<HashMap<String, HashSet<u32>>> {
+    SERVICE_PROCESS_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn process_system_handle() -> &'static Mutex<System> {
+    PROCESS_SYSTEM.get_or_init(|| Mutex::new(System::new()))
+}
+
+fn clone_service_process_pids(service_id: &str) -> Option<Vec<u32>> {
+    let registry = service_process_registry();
+    let guard = registry.lock().ok()?;
+    guard
+        .get(service_id)
+        .map(|set| set.iter().copied().collect())
+}
+
+fn prune_missing_pids(service_id: &str, missing: &[u32]) {
+    if missing.is_empty() {
+        return;
+    }
+    let registry = service_process_registry();
+    if let Ok(mut guard) = registry.lock() {
+        if let Some(set) = guard.get_mut(service_id) {
+            for pid in missing {
+                set.remove(pid);
+            }
+            if set.is_empty() {
+                guard.remove(service_id);
+            }
+        }
+    }
+}
+
+fn collect_process_sample(service_id: &str, pids: &[u32]) -> Option<ServiceResourceSample> {
+    if pids.is_empty() {
+        return None;
+    }
+
+    let mut missing = Vec::new();
+    let mut cpu_total = 0.0f32;
+    let mut memory_total = 0u64;
+    let mut found = false;
+
+    let system_lock = process_system_handle();
+    let mut system = match system_lock.lock() {
+        Ok(guard) => guard,
+        Err(_) => return None,
+    };
+
+    for &pid_value in pids {
+        if pid_value == 0 {
+            continue;
+        }
+        let pid = Pid::from_u32(pid_value);
+        if !system.refresh_process(pid) {
+            missing.push(pid_value);
+            continue;
+        }
+        if let Some(process) = system.process(pid) {
+            found = true;
+            cpu_total += process.cpu_usage();
+            memory_total = memory_total.saturating_add(process.memory());
+        } else {
+            missing.push(pid_value);
+        }
+    }
+
+    drop(system);
+
+    if !missing.is_empty() {
+        prune_missing_pids(service_id, &missing);
+    }
+
+    if !found {
+        return None;
+    }
+
+    let mut sample = ServiceResourceSample::default();
+    if cpu_total > 0.0 {
+        sample.cpu_percent = Some(cpu_total.clamp(0.0, 100.0));
+    }
+    if memory_total > 0 {
+        // sysinfo returns memory in bytes
+        sample.memory_bytes = Some(memory_total);
+        sample.memory_peak_bytes = sample.memory_bytes;
+    }
+
+    Some(sample)
 }
 
 pub fn start_system_metrics_sampler(cfg: &AppConfig) {

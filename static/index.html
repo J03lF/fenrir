@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Fenrir Control Plane</title>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+    <link rel="stylesheet" href="/static/css/dashboard.css" />
+</head>
+<body>
+  <main class="shell">
+    <div>
+      <header class="topbar">
+        <div class="brand">
+          <div class="logo">FN</div>
+          <div class="title">
+            <span>operations</span>
+            <span>Fenrir Control Plane</span>
+          </div>
+        </div>
+        <div class="actions">
+          <button type="button" data-test-btn disabled>Token Test</button>
+        </div>
+      </header>
+
+      <nav class="tabbar" role="tablist" aria-label="Bereichsauswahl">
+        <button type="button" role="tab" data-page-trigger="overview" data-active="true" aria-selected="true">Übersicht</button>
+        <button type="button" role="tab" data-page-trigger="services" aria-selected="false">Services</button>
+        <button type="button" role="tab" data-page-trigger="telemetry" aria-selected="false">Telemetry</button>
+        <button type="button" role="tab" data-page-trigger="audit" aria-selected="false">Audit</button>
+      </nav>
+       </div>
+      <section class="page" data-page="overview" data-visible="true">
+        <section class="hero">
+          <h2>Überblick &amp; Steuerung für Fenrir</h2>
+          <p>
+            Echtzeitstatus, geschützte Service-Aktionen und ein aufgeräumtes Interface ermöglichen einen ruhigen Betrieb.
+            Jeder Eingriff läuft über RBAC und Audit-Logs.
+          </p>
+        </section>
+        <div class="alert" data-alert></div>
+        <div class="meta" data-meta>
+          <span>lade Applikationsdaten …</span>
+        </div>
+        <section class="summary-grid">
+          <article class="card metric-card" data-card="app">
+            <h3>Applikation</h3>
+            <div class="metric-value" data-app-name>–</div>
+            <div class="metric-hint" data-app-version>Version wird geladen …</div>
+          </article>
+          <article class="card metric-card" data-card="uptime">
+            <h3>Uptime</h3>
+            <div class="metric-value" data-uptime>–</div>
+            <div class="metric-hint">Quelle: Telemetrie</div>
+          </article>
+          <article class="card metric-card" data-card="health">
+            <h3>Status</h3>
+            <div class="metric-value" data-health>—</div>
+            <div class="metric-hint" data-health-note>Prüfe Readiness-Status …</div>
+          </article>
+        </section>
+        <section class="management-grid">
+          <article class="card token-card">
+            <h3>API Token</h3>
+            <div class="token-input">
+              <input
+                type="password"
+                autocomplete="off"
+                placeholder="Bearer Token hier einfügen"
+                aria-label="Control Plane Token"
+                data-token-input
+              />
+            </div>
+            <div class="token-status" data-token-status>
+              Token nicht gesetzt – Anfragen erfolgen ohne Auth.
+            </div>
+          </article>
+        </section>
+      </section>
+
+      <section class="page" data-page="telemetry" data-visible="false">
+        <div class="telemetry-stats">
+          <article class="card metric-card">
+            <h3>CPU Auslastung</h3>
+            <div class="telemetry-stat-value" data-metric-cpu>–</div>
+            <div class="telemetry-stat-note" data-metric-cpu-note>Keine Daten verfügbar.</div>
+          </article>
+          <article class="card metric-card">
+            <h3>Speichernutzung</h3>
+            <div class="telemetry-stat-value" data-metric-mem>–</div>
+            <div class="telemetry-stat-note" data-metric-mem-note>Keine Daten verfügbar.</div>
+          </article>
+          <article class="card metric-card">
+            <h3>Disk I/O</h3>
+            <div class="telemetry-stat-value" data-metric-io>–</div>
+            <div class="telemetry-stat-note" data-metric-io-note>Keine Daten verfügbar.</div>
+          </article>
+        </div>
+        <div class="telemetry-grid">
+          <article class="card chart-card">
+          <div class="chart-header">
+            <div class="chart-header-left">
+              <h3>Performance Verlauf</h3>
+              <small data-telemetry-note>Telemetrie wird geladen …</small>
+            </div>
+            <div class="chart-range" role="tablist" aria-label="Zeitraum">
+              <button type="button" data-history-range="1h" data-active="true">1h</button>
+              <button type="button" data-history-range="3h">3h</button>
+              <button type="button" data-history-range="24h">24h</button>
+            </div>
+          </div>
+          <div class="chart-series-toggle" data-series-toggle aria-label="Metrikauswahl"></div>
+          <canvas class="metric-chart" data-metric-chart width="960" height="320"></canvas>
+          <div class="chart-legend" data-metric-legend>
+            <span class="legend-empty">Es liegen noch keine Messwerte vor.</span>
+          </div>
+            <div class="chart-tooltip" data-chart-tooltip>
+              <div class="tooltip-header" data-tooltip-time>–</div>
+              <div class="tooltip-body" data-tooltip-body></div>
+            </div>
+            <div class="chart-empty" data-chart-empty data-visible="true">
+              Noch keine Telemetriedaten verfügbar.
+            </div>
+          </article>
+          <article class="card metric-table-card">
+            <h3>Aktuelle Kennzahlen</h3>
+            <div class="metric-table-scroll">
+              <table class="metric-table">
+                <thead>
+                  <tr>
+                    <th>Metrik</th>
+                    <th>Wert</th>
+                  </tr>
+                </thead>
+                <tbody data-metric-list>
+                  <tr>
+                    <td colspan="2">Noch keine Daten geladen.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </article>
+          <article class="card metric-table-card service-resource-card">
+            <div class="metric-table-title">
+              <h3>Service Ressourcen</h3>
+              <label class="metric-sort-control">
+                Sortierung:
+                <select data-service-sort>
+                  <option value="cpu-desc">CPU ↓</option>
+                  <option value="cpu-asc">CPU ↑</option>
+                  <option value="memory-desc">RAM ↓</option>
+                  <option value="memory-asc">RAM ↑</option>
+                  <option value="updated-desc">Aktualisiert ↓</option>
+                  <option value="updated-asc">Aktualisiert ↑</option>
+                  <option value="id-asc">Service A→Z</option>
+                  <option value="id-desc">Service Z→A</option>
+                </select>
+              </label>
+            </div>
+            <div class="metric-table-scroll">
+              <table class="metric-table service-metrics-table">
+                <thead>
+                  <tr>
+                    <th>Service</th>
+                    <th class="numeric">CPU %</th>
+                    <th class="numeric">RAM</th>
+                    <th class="numeric">Peak</th>
+                    <th>Aktualisiert</th>
+                  </tr>
+                </thead>
+                <tbody data-service-metrics>
+                  <tr>
+                    <td colspan="5">Keine Ressourcen-Metriken gemeldet.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <small class="metric-table-meta" data-service-metrics-meta>–</small>
+          </article>
+        </div>
+      </section>
+
+      <section class="page" data-page="services" data-visible="false">
+        <section class="management-grid service-actions-grid">
+          <article class="card control-card">
+            <h3>Service Aktionen</h3>
+            <div class="button-row">
+              <button type="button" data-bulk-start>Start All</button>
+              <button type="button" data-bulk-stop>Stop All</button>
+              <button type="button" data-bulk-restart>Restart All</button>
+            </div>
+            <div class="metric-hint">Nur nicht-core Services werden beeinflusst.</div>
+          </article>
+        </section>
+
+        <section class="services">
+          <div class="service-header">
+            <h2>Registrierte Services</h2>
+            <small data-service-meta>lade Registry …</small>
+          </div>
+          <div class="service-board">
+            <table class="service-table">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Name</th>
+                  <th>Status</th>
+                  <th>Tags</th>
+                  <th>Hinweis</th>
+                  <th>Aktionen</th>
+                </tr>
+              </thead>
+              <tbody data-services>
+                <tr>
+                  <td colspan="6">Service-Registry wird abgefragt …</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+    </section>
+
+    <section class="page" data-page="audit" data-visible="false">
+      <section class="audit">
+        <div class="audit-board">
+          <div class="audit-meta">
+            <div>
+              <h2>Audit Log</h2>
+              <small data-audit-meta>–</small>
+            </div>
+            <div class="chart-range audit-range" role="tablist" aria-label="Audit-Zeitraum">
+              <button type="button" data-audit-range="1h" data-active="true">1h</button>
+              <button type="button" data-audit-range="3h">3h</button>
+              <button type="button" data-audit-range="24h">24h</button>
+            </div>
+            <button type="button" data-audit-refresh>Refresh</button>
+          </div>
+          <table class="audit-table">
+            <thead>
+              <tr>
+                <th>Zeitpunkt</th>
+                <th>Aktion</th>
+                <th>Ziel</th>
+                <th>Ergebnis</th>
+                <th>Akteur</th>
+                <th>Details</th>
+              </tr>
+            </thead>
+            <tbody data-audit-events>
+              <tr>
+                <td colspan="6">Keine Audit-Ereignisse geladen.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+
+      <footer class="note">
+        Zugriff auf erweiterte Aktionen erfolgt über die CLI oder autorisierte API-Clients. Alle
+        Eingriffe werden auditierbar festgehalten.
+      </footer>
+    </main>
+    <script src="/static/js/dashboard.js"></script>
+</body>
+</html>

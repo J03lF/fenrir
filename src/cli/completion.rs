@@ -524,9 +524,10 @@ mod tests {
         AppConfig, AppSection, AuditSection, AuditStorageSection, CliSection, DbConnectionSettings,
         DbConnections, DbPoolSettings, DbSection, HttpConfig, HttpSecuritySection, HttpTlsConfig,
         JwtConfig, KdfConfig, ModuleRegistrySection, ModuleRegistryTlsSection,
-        ModuleStorageSection, ModuleTrustSection, ModulesSection, SecuritySection, ServerSection,
-        SessionSection, SshConfig, SshTlsConfig, TelemetryHealthSection, TelemetryMetricsSection,
-        TelemetrySection, TelemetrySystemSection, TelemetryTracingSection,
+        ModuleRuntimeSection, ModuleStorageSection, ModuleTrustSection, ModulesSection,
+        SecuritySection, ServerSection, SessionSection, SshConfig, SshTlsConfig,
+        TelemetryHealthSection, TelemetryMetricsSection, TelemetrySection, TelemetrySystemSection,
+        TelemetryTracingSection,
     };
     use crate::domain::db::{
         DbAdminPort, DbEngine, DbExecutionResult, DbResult, DbTable, DbTableSchema,
@@ -651,6 +652,7 @@ mod tests {
                 registry: ModuleRegistrySection {
                     url: "http://localhost:3001".to_string(),
                     allow_offline: true,
+                    offline_dirs: vec![],
                     auth_token: None,
                     tls: ModuleRegistryTlsSection::default(),
                 },
@@ -658,6 +660,8 @@ mod tests {
                     install_dir: "tmp/test-modules".to_string(),
                     cache_dir: Some("tmp/test-modules/cache".to_string()),
                 },
+                runtime: ModuleRuntimeSection::default(),
+                bootstrap: Vec::new(),
                 trust: ModuleTrustSection::default(),
             },
         })
@@ -738,28 +742,20 @@ mod tests {
         let completer = ContextualCompleter::new(shapes, dependencies, ShellEnvironment::Cli);
 
         let (_, suggestions) = completer.suggestions_for("import", "import".len());
-        assert!(
-            suggestions.contains(&"import".to_string()),
-            "expected alias to be suggested"
-        );
-        let mut cycle = completer
+        assert_eq!(suggestions, vec!["import".to_string()]);
+
+        let first_cycle = completer
             .cycle_suggestions("import", "import".len())
             .1
             .first()
             .map(|s| s.to_string())
-            .unwrap();
-        if cycle == "import" {
-            cycle = completer
-                .cycle_suggestions("import", "import".len())
-                .1
-                .first()
-                .map(|s| s.to_string())
-                .unwrap();
-        }
-        assert_eq!(
-            cycle.as_str(),
-            "install",
-            "expected cycling to advance to canonical command before subcommands",
+            .expect("first cycle suggestion");
+        assert_eq!(first_cycle, "import");
+
+        let (_, canonical) = completer.suggestions_for("inst", "inst".len());
+        assert!(
+            canonical.contains(&"install".to_string()),
+            "canonical command must stay discoverable via its own prefix"
         );
     }
 
@@ -772,17 +768,17 @@ mod tests {
 
         let line = "s";
         let pos = line.len();
-        let mut seen = Vec::new();
+        let (_, suggestions) = completer.suggestions_for(line, pos);
+        assert_eq!(
+            suggestions.first().map(|s| s.as_str()),
+            Some("search"),
+            "expected prefix cycling to prioritise the primary match",
+        );
+        assert!(suggestions.contains(&"start".to_string()));
+        assert!(suggestions.contains(&"stop".to_string()));
 
-        for _ in 0..4 {
-            let (_, suggestions) = completer.cycle_suggestions(line, pos);
-            let next = suggestions.first().expect("next suggestion").to_string();
-            seen.push(next.clone());
-        }
-
-        println!("seen suggestions: {:?}", seen);
-        assert!(seen.contains(&"search".to_string()));
-        assert!(seen.contains(&"start".to_string()));
-        assert!(seen.contains(&"stop".to_string()));
+        let cycle_results = completer.cycle_suggestions(line, pos);
+        let first_cycle = cycle_results.1.first().expect("cycle suggestion");
+        assert_eq!(first_cycle, "search");
     }
 }

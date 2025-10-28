@@ -1,8 +1,9 @@
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{anyhow, Context, Result};
 use arc_swap::ArcSwap;
@@ -23,6 +24,23 @@ use tower::service_fn;
 use tower::util::ServiceExt;
 
 use crate::config::HttpTlsConfig;
+
+type TlsReloadHook = dyn Fn(&TlsReloadEvent) + Send + Sync + 'static;
+
+#[derive(Clone, Debug)]
+pub(super) enum TlsReloadReason {
+    Filesystem,
+    Interval,
+    ConfigReload,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct TlsReloadEvent {
+    pub reason: TlsReloadReason,
+    pub timestamp: SystemTime,
+    pub cert_path: PathBuf,
+    pub key_path: PathBuf,
+}
 
 #[derive(Clone)]
 pub(super) struct HttpTlsRuntime {
@@ -74,6 +92,7 @@ pub(super) struct HttpTlsProvider {
     config: ArcSwap<RustlsServerConfig>,
     next_reload: Mutex<Option<Instant>>,
     watcher: Mutex<Option<TlsFileWatcher>>,
+    hooks: RwLock<Vec<Arc<TlsReloadHook>>>,
 }
 
 struct TlsFileWatcher {
@@ -101,6 +120,7 @@ impl HttpTlsProvider {
             runtime: RwLock::new(runtime),
             config: ArcSwap::from_pointee(config),
             watcher: Mutex::new(None),
+            hooks: RwLock::new(Vec::new()),
         };
         Ok(provider)
     }
@@ -186,7 +206,7 @@ impl HttpTlsProvider {
                         Ok(Ok(event)) => {
                             if tls_event_requires_reload(&event.kind) {
                                 if let Some(provider) = weak.upgrade() {
-                                    if let Err(err) = provider.refresh_sync() {
+                                    if let Err(err) = provider.refresh_sync(TlsReloadReason::Filesystem) {
                                         tracing::warn!(
                                             error = %err,
                                             "TLS-Zertifikate konnten nicht neu geladen werden"
@@ -228,7 +248,7 @@ impl HttpTlsProvider {
         }
     }
 
-    fn refresh_sync(&self) -> Result<()> {
+    fn refresh_sync(&self, reason: TlsReloadReason) -> Result<()> {
         let runtime = self
             .runtime
             .read()
@@ -241,6 +261,7 @@ impl HttpTlsProvider {
                 .reload_interval
                 .map(|interval| Instant::now() + interval);
         }
+        self.notify_hooks(runtime, reason);
         Ok(())
     }
 
@@ -254,7 +275,7 @@ impl HttpTlsProvider {
             tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(interval).await;
-                    if let Err(err) = this.reload_now().await {
+                    if let Err(err) = this.reload_now(TlsReloadReason::Interval).await {
                         tracing::warn!(error = %err, "TLS-Zertifikate konnten nicht neu geladen werden");
                     }
                 }
@@ -306,7 +327,7 @@ impl HttpTlsProvider {
         Ok(())
     }
 
-    pub(super) async fn reload_now(&self) -> Result<()> {
+    pub(super) async fn reload_now(&self, reason: TlsReloadReason) -> Result<()> {
         let runtime = self
             .runtime
             .read()
@@ -319,6 +340,7 @@ impl HttpTlsProvider {
                 .reload_interval
                 .map(|interval| Instant::now() + interval);
         }
+        self.notify_hooks(runtime, reason);
         Ok(())
     }
 
@@ -340,12 +362,16 @@ impl HttpTlsProvider {
             }
         };
         if reload_due {
-            self.reload_now().await?;
+            self.reload_now(TlsReloadReason::Interval).await?;
         }
         Ok(())
     }
 
-    pub(super) async fn update_runtime(self: &Arc<Self>, runtime: HttpTlsRuntime) -> Result<()> {
+    pub(super) async fn update_runtime(
+        self: &Arc<Self>,
+        runtime: HttpTlsRuntime,
+        reason: TlsReloadReason,
+    ) -> Result<()> {
         runtime.validate()?;
         {
             let mut guard = self
@@ -361,8 +387,43 @@ impl HttpTlsProvider {
         }
         let config = load_server_config_async(&runtime).await?;
         self.config.store(Arc::new(config));
-        self.restart_watcher(runtime)?;
+        self.restart_watcher(runtime.clone())?;
+        self.notify_hooks(runtime, reason);
         Ok(())
+    }
+
+    pub(super) fn register_hook(&self, hook: Arc<TlsReloadHook>) {
+        if let Ok(mut guard) = self.hooks.write() {
+            guard.push(hook);
+        } else {
+            tracing::warn!("TLS reload hooks poisoned; unable to register new hook");
+        }
+    }
+
+    fn notify_hooks(&self, runtime: HttpTlsRuntime, reason: TlsReloadReason) {
+        let event = TlsReloadEvent {
+            reason,
+            timestamp: SystemTime::now(),
+            cert_path: runtime.cert_path,
+            key_path: runtime.key_path,
+        };
+        let hooks = match self.hooks.read() {
+            Ok(guard) => guard.clone(),
+            Err(_) => {
+                tracing::warn!("TLS reload hooks poisoned; skipping notifications");
+                return;
+            }
+        };
+        for hook in hooks {
+            let snapshot = event.clone();
+            if std::panic::catch_unwind(AssertUnwindSafe(|| {
+                (hook)(&snapshot);
+            }))
+            .is_err()
+            {
+                tracing::warn!("TLS reload hook panicked");
+            }
+        }
     }
 }
 

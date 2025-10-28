@@ -73,6 +73,7 @@ impl ModuleService {
         let bundle = self.registry.download(&manifest).await?;
         self.verifier.verify(&bundle).await?;
         let result = self.storage.stage_and_activate(bundle).await?;
+
         Ok(result)
     }
 

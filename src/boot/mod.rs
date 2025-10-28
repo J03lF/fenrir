@@ -7,23 +7,26 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::audit::InMemoryAuditLog;
-use crate::config::{self, AppConfig, ConfigError};
+use crate::config::{self, AppConfig, ConfigError, ModuleRuntimeEngine};
 use crate::domain::db::DbEngine;
+use crate::domain::module::{ModuleId, ModuleVersion};
 use crate::infra::http::{HttpServer, HTTP_SERVICE_ID};
 use crate::infra::modules::{
-    registry::HttpModuleRegistry, Ed25519ModuleVerifier, FilesystemModuleStorage,
-    ProcessModuleRuntime,
+    CompositeModuleRegistry, Ed25519ModuleVerifier, FilesystemModuleStorage, HttpModuleRegistry,
+    InProcessModuleRuntime, LocalModuleRegistry, ProcessModuleRuntime,
 };
 use crate::infra::{db, logging, ssh, telemetry};
+use crate::security::identity::build_identity_provider;
 use crate::security::manager::{AuditSink, SecurityManager};
 use crate::services::scheduler::install_default_jobs;
 use crate::services::{
     AppServices, DbShellService, ModuleService, SchedulerService, ServiceDescriptor, ServiceKind,
-    ServiceRegistry, ServiceStatus, ServiceTag,
+    ServiceRegistry, ServiceStatus, ServiceTag, SessionService,
 };
 use anyhow::{anyhow, Result};
 use thiserror::Error;
-use tracing::{debug, info};
+use tokio::runtime::Handle;
+use tracing::{debug, info, warn};
 
 pub struct BootContext {
     pub config: Arc<AppConfig>,
@@ -48,8 +51,10 @@ pub enum BootErrorCode {
     ModuleStorage,
     ModuleVerifier,
     ModuleAttach,
+    IdentityInit,
     SecurityInit,
     SecurityAttach,
+    SessionAttach,
     SchedulerJobs,
     HttpServerInit,
 }
@@ -71,8 +76,10 @@ impl BootErrorCode {
             BootErrorCode::ModuleStorage => "BOOT-MODULE-STORAGE",
             BootErrorCode::ModuleVerifier => "BOOT-MODULE-VERIFIER",
             BootErrorCode::ModuleAttach => "BOOT-MODULE-ATTACH",
+            BootErrorCode::IdentityInit => "BOOT-IDENTITY-INIT",
             BootErrorCode::SecurityInit => "BOOT-SECURITY-INIT",
             BootErrorCode::SecurityAttach => "BOOT-SECURITY-ATTACH",
+            BootErrorCode::SessionAttach => "BOOT-SESSION-ATTACH",
             BootErrorCode::SchedulerJobs => "BOOT-SCHEDULER-JOBS",
             BootErrorCode::HttpServerInit => "BOOT-HTTP-INIT",
         }
@@ -310,12 +317,17 @@ pub fn boot() -> Result<BootContext, BootError> {
         let retention_seconds = retention_hours.checked_mul(3600).unwrap_or(u64::MAX);
         let persist_seconds = cfg.audit.storage.persist_interval_seconds().unwrap_or(30);
         let log_path = resolved_path.clone();
-        let audit = InMemoryAuditLog::with_persistence(
-            audit_capacity,
-            resolved_path,
-            Duration::from_secs(retention_seconds),
-            Duration::from_secs(persist_seconds),
-        );
+        let audit = wrap_boot(
+            InMemoryAuditLog::with_persistence(
+                audit_capacity,
+                resolved_path,
+                Duration::from_secs(retention_seconds),
+                Duration::from_secs(persist_seconds),
+            )
+            .map_err(anyhow::Error::new),
+            BootErrorCode::AuditInit,
+            "failed to initialize audit persistence",
+        )?;
         tracing::info!(
             path = %log_path.display(),
             capacity = audit_capacity,
@@ -326,11 +338,29 @@ pub fn boot() -> Result<BootContext, BootError> {
         Arc::new(audit)
     };
 
-    let module_registry: Arc<dyn crate::domain::module::ModuleRegistryPort> = Arc::new(wrap_boot(
+    let remote_registry: Arc<dyn crate::domain::module::ModuleRegistryPort> = Arc::new(wrap_boot(
         HttpModuleRegistry::new(&cfg.modules.registry),
         BootErrorCode::ModuleRegistry,
         "failed to initialize module registry",
     )?);
+
+    let mut registry_chain: Vec<Arc<dyn crate::domain::module::ModuleRegistryPort>> = Vec::new();
+    if cfg.modules.registry.allow_offline {
+        if let Some(local) = LocalModuleRegistry::try_new(&cfg.modules.registry) {
+            let local_arc: Arc<dyn crate::domain::module::ModuleRegistryPort> = Arc::new(local);
+            registry_chain.push(local_arc);
+        }
+    }
+    registry_chain.push(Arc::clone(&remote_registry));
+
+    let module_registry: Arc<dyn crate::domain::module::ModuleRegistryPort> =
+        if registry_chain.len() == 1 {
+            registry_chain
+                .pop()
+                .expect("registry_chain contains remote registry")
+        } else {
+            Arc::new(CompositeModuleRegistry::new(registry_chain))
+        };
     let module_storage: Arc<dyn crate::domain::module::ModuleStoragePort> = Arc::new(wrap_boot(
         FilesystemModuleStorage::new(&cfg.modules.storage),
         BootErrorCode::ModuleStorage,
@@ -341,10 +371,30 @@ pub fn boot() -> Result<BootContext, BootError> {
         BootErrorCode::ModuleVerifier,
         "failed to initialize module verifier",
     )?);
-    let runtime_state_dir = PathBuf::from(&cfg.modules.storage.install_dir).join("runtime");
-    let module_runtime: Arc<dyn crate::domain::module::ModuleRuntimePort> = Arc::new(
-        ProcessModuleRuntime::new(Arc::clone(&module_storage), runtime_state_dir),
-    );
+    let module_runtime: Arc<dyn crate::domain::module::ModuleRuntimePort> =
+        match cfg.modules.runtime.engine {
+            ModuleRuntimeEngine::Process => {
+                let runtime_state_dir =
+                    PathBuf::from(&cfg.modules.storage.install_dir).join("runtime");
+                let runtime = Arc::new(ProcessModuleRuntime::new(
+                    Arc::clone(&module_storage),
+                    runtime_state_dir,
+                ));
+
+                if let Ok(handle) = Handle::try_current() {
+                    if let Err(err) = handle.block_on(runtime.load_state()) {
+                        warn!(error = %err, "failed to restore module runtime state");
+                    }
+                } else {
+                    warn!("tokio runtime not available, skipping module state restore");
+                }
+
+                runtime
+            }
+            ModuleRuntimeEngine::Stub => {
+                Arc::new(InProcessModuleRuntime::new(Arc::clone(&module_storage)))
+            }
+        };
     let module_service = Arc::new(ModuleService::new(
         Arc::clone(&module_registry),
         Arc::clone(&module_storage),
@@ -369,6 +419,31 @@ pub fn boot() -> Result<BootContext, BootError> {
             )
         })?;
     let audit_sink: Arc<dyn AuditSink> = Arc::clone(&services) as Arc<dyn AuditSink>;
+    let identity_service = wrap_boot(
+        build_identity_provider(&cfg, runtime_dir.as_path(), Arc::clone(&audit_sink)),
+        BootErrorCode::IdentityInit,
+        "failed to initialize identity provider",
+    )?;
+    services
+        .attach_identity(Arc::clone(&identity_service))
+        .map_err(|err| {
+            BootError::new(
+                BootErrorCode::IdentityInit,
+                "failed to attach identity service",
+                anyhow!(err),
+            )
+        })?;
+    registry.register(
+        ServiceDescriptor::new(
+            "identity-service",
+            "Identity Broker",
+            "Ausstellung und Prüfung von Control-Plane-Token",
+            ServiceKind::Security,
+        )
+        .with_tags(&[ServiceTag::Core]),
+        ServiceStatus::Active,
+        Some("bereit".to_string()),
+    );
     let _security_manager = Arc::new(wrap_boot(
         SecurityManager::new(&cfg.security, audit_sink),
         BootErrorCode::SecurityInit,
@@ -380,6 +455,16 @@ pub fn boot() -> Result<BootContext, BootError> {
             BootError::new(
                 BootErrorCode::SecurityAttach,
                 "failed to attach security manager",
+                anyhow!(err),
+            )
+        })?;
+    let session_service = Arc::new(SessionService::new(Arc::clone(&_security_manager)));
+    services
+        .attach_session(Arc::clone(&session_service))
+        .map_err(|err| {
+            BootError::new(
+                BootErrorCode::SessionAttach,
+                "failed to attach session service",
                 anyhow!(err),
             )
         })?;
@@ -511,6 +596,17 @@ pub fn boot() -> Result<BootContext, BootError> {
 }
 
 pub async fn start_transports(ctx: &BootContext) -> Result<()> {
+    if !ctx.config.modules.bootstrap.is_empty() {
+        match ctx.services.module_service() {
+            Some(module_service) => {
+                bootstrap_modules(Arc::clone(&ctx.config), module_service).await;
+            }
+            None => {
+                warn!("module service not attached; skipping bootstrap modules");
+            }
+        }
+    }
+
     // Start SSH server (blocking future) on its own task
     let cfg = Arc::clone(&ctx.config);
     let services = Arc::clone(&ctx.services);
@@ -553,6 +649,97 @@ pub async fn start_transports(ctx: &BootContext) -> Result<()> {
     spawn_config_reloader(ctx)?;
     info!("transport initialisation triggered");
     Ok(())
+}
+
+async fn bootstrap_modules(config: Arc<AppConfig>, service: Arc<ModuleService>) {
+    for entry in &config.modules.bootstrap {
+        let module_spec = entry.trim();
+        if module_spec.is_empty() {
+            continue;
+        }
+        let (module_id, version) = match parse_bootstrap_spec(module_spec) {
+            Ok(spec) => spec,
+            Err(err) => {
+                warn!(module = %module_spec, error = %err, "invalid bootstrap module spec");
+                continue;
+            }
+        };
+
+        match service.install(&module_id, version.as_ref()).await {
+            Ok(result) => {
+                info!(
+                    module = %module_id,
+                    version = version
+                        .as_ref()
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "latest".to_string()),
+                    status = ?result.status,
+                    "bootstrap module ready"
+                );
+            }
+            Err(err) => {
+                warn!(module = %module_id, error = %err, "bootstrap module install failed");
+            }
+        }
+    }
+}
+
+fn parse_bootstrap_spec(spec: &str) -> Result<(ModuleId, Option<ModuleVersion>), String> {
+    let trimmed = spec.trim();
+    if trimmed.is_empty() {
+        return Err("empty module spec".to_string());
+    }
+
+    let (id_part, version_part) = match trimmed.split_once('@') {
+        Some((_id, version)) if version.trim().is_empty() => {
+            return Err("empty version segment".to_string());
+        }
+        Some((id, version)) => (id, Some(version.trim())),
+        None => (trimmed, None),
+    };
+
+    let module_id = ModuleId::new(id_part.trim()).map_err(|err| err.to_string())?;
+    let version = if let Some(version_raw) = version_part {
+        Some(ModuleVersion::parse(version_raw).map_err(|err| err.to_string())?)
+    } else {
+        None
+    };
+
+    Ok((module_id, version))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_bootstrap_spec;
+    use crate::domain::module::ModuleId;
+
+    #[test]
+    fn parses_module_without_version() {
+        let expected_id = ModuleId::new("fenrir-api").unwrap();
+        let (id, version) = parse_bootstrap_spec("fenrir-api").expect("spec parses");
+
+        assert_eq!(id, expected_id);
+        assert!(version.is_none());
+    }
+
+    #[test]
+    fn parses_module_with_version() {
+        let (id, version) = parse_bootstrap_spec("fenrir-api@1.2.3").expect("spec parses");
+
+        assert_eq!(id, ModuleId::new("fenrir-api").unwrap());
+        let version = version.expect("version present");
+        assert_eq!(version.to_string(), "1.2.3");
+    }
+
+    #[test]
+    fn rejects_missing_version_segment() {
+        assert!(parse_bootstrap_spec("fenrir-api@").is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_version() {
+        assert!(parse_bootstrap_spec("fenrir-api@not-a-version").is_err());
+    }
 }
 
 fn resolve_runtime_dir() -> PathBuf {

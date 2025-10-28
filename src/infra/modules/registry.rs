@@ -5,9 +5,14 @@ use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use reqwest::{Certificate, Identity, Url};
 use semver::{Version, VersionReq};
 use serde::Deserialize;
-use sha2::Digest;
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::task;
+use tracing::warn;
 
 use crate::config::ModuleRegistrySection;
 use crate::domain::module::{
@@ -351,6 +356,459 @@ impl ModuleRegistryPort for HttpModuleRegistry {
 pub enum ModuleRegistryInitError {
     #[error("Configuration error: {0}")]
     InvalidConfig(String),
+}
+
+#[derive(Clone)]
+pub struct LocalModuleRegistry {
+    roots: Arc<Vec<PathBuf>>,
+}
+
+impl LocalModuleRegistry {
+    pub fn try_new(config: &ModuleRegistrySection) -> Option<Self> {
+        if config.offline_dirs.is_empty() {
+            return None;
+        }
+
+        let mut valid = Vec::new();
+        for raw in &config.offline_dirs {
+            if raw.trim().is_empty() {
+                continue;
+            }
+            let path = PathBuf::from(raw);
+            if path.exists() {
+                valid.push(path);
+            } else {
+                warn!(root = %path.display(), "offline registry root missing, skipping");
+            }
+        }
+
+        if valid.is_empty() {
+            None
+        } else {
+            Some(Self {
+                roots: Arc::new(valid),
+            })
+        }
+    }
+
+    async fn load_modules(&self) -> Result<Vec<LocalModule>, ModuleRegistryError> {
+        let roots = Arc::clone(&self.roots);
+        task::spawn_blocking(move || {
+            let mut modules = Vec::new();
+            for root in roots.iter() {
+                match LocalManifestFile::load(root) {
+                    Ok(file) => match LocalModule::from_manifest(root, file) {
+                        Ok(module) => modules.push(module),
+                        Err(err) => warn!(root = %root.display(), error = %err, "invalid local module manifest"),
+                    },
+                    Err(err) => warn!(root = %root.display(), error = %err, "failed to load local module manifest"),
+                }
+            }
+            Ok(modules)
+        })
+        .await
+        .map_err(|err| ModuleRegistryError::Unavailable(err.to_string()))?
+    }
+
+    async fn find_module(&self, id: &ModuleId) -> Result<LocalModule, ModuleRegistryError> {
+        let needle = id.to_string();
+        let modules = self.load_modules().await?;
+        modules
+            .into_iter()
+            .find(|module| module.id.to_string() == needle)
+            .ok_or_else(|| ModuleRegistryError::NotFound { module: needle })
+    }
+}
+
+#[async_trait]
+impl ModuleRegistryPort for LocalModuleRegistry {
+    async fn search(
+        &self,
+        query: ModuleSearchQuery,
+    ) -> Result<Vec<ModuleSummary>, ModuleRegistryError> {
+        let modules = self.load_modules().await?;
+        let pattern = query.pattern.map(|p| p.to_ascii_lowercase());
+        let mut summaries = Vec::new();
+
+        for module in modules {
+            if let Some(ref pat) = pattern {
+                let matches_id = module.id.to_string().contains(pat);
+                let matches_title = module.title.to_ascii_lowercase().contains(pat);
+                if !matches_id && !matches_title {
+                    continue;
+                }
+            }
+
+            summaries.push(ModuleSummary {
+                id: module.id.clone(),
+                version: module.latest.version.clone(),
+                title: Some(module.title.clone()),
+                description: module.description.clone(),
+                tags: module.tags.clone(),
+            });
+        }
+
+        Ok(summaries)
+    }
+
+    async fn fetch_manifest(
+        &self,
+        id: &ModuleId,
+        version: Option<&ModuleVersion>,
+    ) -> Result<ModuleManifest, ModuleRegistryError> {
+        let module = self.find_module(id).await?;
+        let selected = module.pick_version(version)?;
+        Ok(selected.into_manifest(&module))
+    }
+
+    async fn download(
+        &self,
+        manifest: &ModuleManifest,
+    ) -> Result<ModuleBundle, ModuleRegistryError> {
+        let module_id = ModuleId::new(&manifest.id)
+            .map_err(|err| ModuleRegistryError::Protocol(format!("invalid module id: {err}")))?;
+        let module = self.find_module(&module_id).await?;
+        let version = module.pick_version(Some(&ModuleVersion(manifest.version.clone())))?;
+        version.load_bundle(&module).await
+    }
+}
+
+#[derive(Clone)]
+pub struct CompositeModuleRegistry {
+    sources: Vec<Arc<dyn ModuleRegistryPort>>,
+}
+
+impl CompositeModuleRegistry {
+    pub fn new(mut sources: Vec<Arc<dyn ModuleRegistryPort>>) -> Self {
+        sources.retain(|_| true);
+        debug_assert!(
+            !sources.is_empty(),
+            "composite registry requires at least one source"
+        );
+        Self { sources }
+    }
+}
+
+#[async_trait]
+impl ModuleRegistryPort for CompositeModuleRegistry {
+    async fn search(
+        &self,
+        query: ModuleSearchQuery,
+    ) -> Result<Vec<ModuleSummary>, ModuleRegistryError> {
+        let mut seen = HashSet::new();
+        let mut results = Vec::new();
+
+        for source in &self.sources {
+            let entries = source.search(query.clone()).await?;
+            for summary in entries {
+                let key = summary.id.to_string();
+                if seen.insert(key) {
+                    results.push(summary);
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
+    async fn fetch_manifest(
+        &self,
+        id: &ModuleId,
+        version: Option<&ModuleVersion>,
+    ) -> Result<ModuleManifest, ModuleRegistryError> {
+        for source in &self.sources {
+            match source.fetch_manifest(id, version).await {
+                Ok(manifest) => return Ok(manifest),
+                Err(ModuleRegistryError::NotFound { .. }) => continue,
+                Err(err) => return Err(err),
+            }
+        }
+        Err(ModuleRegistryError::NotFound {
+            module: id.to_string(),
+        })
+    }
+
+    async fn download(
+        &self,
+        manifest: &ModuleManifest,
+    ) -> Result<ModuleBundle, ModuleRegistryError> {
+        for source in &self.sources {
+            match source.download(manifest).await {
+                Ok(bundle) => return Ok(bundle),
+                Err(ModuleRegistryError::NotFound { .. }) => continue,
+                Err(err) => return Err(err),
+            }
+        }
+        Err(ModuleRegistryError::NotFound {
+            module: manifest.id.clone(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LocalModule {
+    id: ModuleId,
+    title: String,
+    description: Option<String>,
+    author: Vec<String>,
+    tags: Vec<String>,
+    versions: Vec<LocalModuleVersion>,
+    latest: LocalModuleVersion,
+}
+
+impl LocalModule {
+    fn from_manifest(root: &Path, manifest: LocalManifestFile) -> Result<Self, LocalManifestError> {
+        let module_id = ModuleId::new(&manifest.id)
+            .map_err(|err| LocalManifestError::InvalidField(err.to_string()))?;
+        let title = manifest.name.unwrap_or_else(|| manifest.id.clone());
+        let author = manifest.author.map(|a| vec![a]).unwrap_or_default();
+        let tags = manifest.tags.unwrap_or_default();
+
+        let mut versions = Vec::new();
+        for version in manifest.versions {
+            match LocalModuleVersion::from_entry(root, &manifest.id, version) {
+                Ok(entry) => versions.push(entry),
+                Err(err) => {
+                    warn!(module = %module_id, error = %err, "skipping local module version")
+                }
+            }
+        }
+
+        if versions.is_empty() {
+            return Err(LocalManifestError::InvalidField("no valid versions".into()));
+        }
+
+        let latest = versions
+            .iter()
+            .max_by(|a, b| a.version.cmp(&b.version))
+            .cloned()
+            .ok_or_else(|| LocalManifestError::InvalidField("no versions".into()))?;
+
+        Ok(Self {
+            id: module_id,
+            title,
+            description: manifest.description,
+            author,
+            tags,
+            versions,
+            latest,
+        })
+    }
+
+    fn pick_version(
+        &self,
+        version: Option<&ModuleVersion>,
+    ) -> Result<LocalModuleVersion, ModuleRegistryError> {
+        if let Some(requested) = version {
+            self.versions
+                .iter()
+                .find(|entry| &entry.version == requested)
+                .cloned()
+                .ok_or_else(|| ModuleRegistryError::NotFound {
+                    module: format!("{}@{}", self.id, requested),
+                })
+        } else {
+            Ok(self.latest.clone())
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LocalModuleVersion {
+    version: ModuleVersion,
+    artifact_path: PathBuf,
+    artifact_url: String,
+    checksum_hex: String,
+    published_at: Option<u64>,
+    fenrir_req: Option<VersionReq>,
+    signature: Option<String>,
+    signer: Option<String>,
+}
+
+impl LocalModuleVersion {
+    fn from_entry(
+        root: &Path,
+        module_id: &str,
+        version: LocalManifestVersion,
+    ) -> Result<Self, LocalManifestError> {
+        let parsed_version = ModuleVersion::parse(&version.version)
+            .map_err(|err| LocalManifestError::InvalidField(err.to_string()))?;
+        let artifact_url = version.artifact_url.unwrap_or_default();
+        let file_name = artifact_file_name(&artifact_url, module_id, &version.version);
+        let artifact_path = root.join(file_name);
+        if !artifact_path.exists() {
+            return Err(LocalManifestError::MissingArtifact(artifact_path));
+        }
+        let checksum_hex = version
+            .checksum
+            .ok_or_else(|| LocalManifestError::InvalidField("checksum missing".into()))?;
+        let fenrir_req =
+            parse_fenrir_version_req(version.fenrir_min.as_deref(), version.fenrir_max.as_deref());
+        let published_at = version.released.and_then(|raw| parse_timestamp(&raw).ok());
+
+        Ok(Self {
+            version: parsed_version,
+            artifact_path,
+            artifact_url,
+            checksum_hex,
+            published_at,
+            fenrir_req,
+            signature: version.signature,
+            signer: version.signer,
+        })
+    }
+
+    fn into_manifest(&self, module: &LocalModule) -> ModuleManifest {
+        ModuleManifest {
+            id: module.id.to_string(),
+            version: self.version.0.clone(),
+            title: Some(module.title.clone()),
+            description: module.description.clone(),
+            fenrir_version: self.fenrir_req.clone(),
+            authors: module.author.clone(),
+            license: None,
+            artifact: ModuleArtifactDescriptor {
+                download_url: self.artifact_url.clone(),
+                checksum: ModuleChecksum {
+                    algorithm: ChecksumAlgorithm::Sha256,
+                    hash: self.checksum_hex.clone(),
+                },
+                content_type: Some(DEFAULT_CONTENT_TYPE.to_string()),
+                size_bytes: None,
+            },
+            signature: ModuleSignatureDescriptor {
+                algorithm: SignatureAlgorithm::Ed25519,
+                key_id: self
+                    .signer
+                    .clone()
+                    .unwrap_or_else(|| "local-dev".to_string()),
+                signature: self.signature.clone().unwrap_or_default(),
+            },
+            tags: module.tags.clone(),
+            published_at: self.published_at,
+        }
+    }
+
+    async fn load_bundle(&self, module: &LocalModule) -> Result<ModuleBundle, ModuleRegistryError> {
+        let manifest = self.into_manifest(module);
+        let artifact_path = self.artifact_path.clone();
+        let checksum_hex = self.checksum_hex.clone();
+        let signature = self.signature.clone().unwrap_or_default();
+
+        task::spawn_blocking(move || {
+            let bytes = std::fs::read(&artifact_path).map_err(|err| {
+                ModuleRegistryError::Unavailable(format!(
+                    "failed to read artifact {}: {}",
+                    artifact_path.display(),
+                    err
+                ))
+            })?;
+            let expected = hex::decode(checksum_hex).map_err(|err| {
+                ModuleRegistryError::Protocol(format!("invalid checksum hex: {err}"))
+            })?;
+            let mut hasher = Sha256::new();
+            hasher.update(&bytes);
+            let digest = hasher.finalize();
+            if digest.as_slice() != expected.as_slice() {
+                return Err(ModuleRegistryError::Protocol(format!(
+                    "checksum mismatch for artifact {}",
+                    artifact_path.display()
+                )));
+            }
+            let signature_bytes = if signature.is_empty() {
+                Vec::new()
+            } else {
+                BASE64.decode(signature.as_bytes()).map_err(|err| {
+                    ModuleRegistryError::Protocol(format!("invalid signature encoding: {err}"))
+                })?
+            };
+            Ok(ModuleBundle {
+                manifest,
+                archive: bytes,
+                signature: signature_bytes,
+                checksum: expected,
+            })
+        })
+        .await
+        .map_err(|err| ModuleRegistryError::Unavailable(err.to_string()))?
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct LocalManifestFile {
+    id: String,
+    name: Option<String>,
+    description: Option<String>,
+    author: Option<String>,
+    tags: Option<Vec<String>>,
+    #[serde(default)]
+    versions: Vec<LocalManifestVersion>,
+}
+
+impl LocalManifestFile {
+    fn load(root: &Path) -> Result<Self, LocalManifestError> {
+        let manifest_path = root.join("module-manifest.toml");
+        let contents = std::fs::read_to_string(&manifest_path)
+            .map_err(|err| LocalManifestError::Io(manifest_path.clone(), err))?;
+        toml::from_str(&contents).map_err(|err| LocalManifestError::Parse(manifest_path, err))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct LocalManifestVersion {
+    version: String,
+    released: Option<String>,
+    #[allow(dead_code)]
+    release_notes: Option<String>,
+    fenrir_min: Option<String>,
+    fenrir_max: Option<String>,
+    artifact_url: Option<String>,
+    checksum: Option<String>,
+    #[allow(dead_code)]
+    checksum_algorithm: Option<String>,
+    signature: Option<String>,
+    signer: Option<String>,
+}
+
+#[derive(Debug)]
+enum LocalManifestError {
+    Io(PathBuf, std::io::Error),
+    Parse(PathBuf, toml::de::Error),
+    InvalidField(String),
+    MissingArtifact(PathBuf),
+}
+
+impl std::fmt::Display for LocalManifestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LocalManifestError::Io(path, err) => {
+                write!(f, "cannot read {}: {}", path.display(), err)
+            }
+            LocalManifestError::Parse(path, err) => {
+                write!(f, "cannot parse {}: {}", path.display(), err)
+            }
+            LocalManifestError::InvalidField(msg) => write!(f, "invalid manifest: {msg}"),
+            LocalManifestError::MissingArtifact(path) => {
+                write!(f, "missing artifact at {}", path.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for LocalManifestError {}
+
+fn artifact_file_name(artifact_url: &str, module_id: &str, version: &str) -> String {
+    if let Some(segment) = artifact_url.split('/').rev().find(|part| !part.is_empty()) {
+        segment.to_string()
+    } else {
+        format!("{}-{}.tar.gz", module_id, version)
+    }
+}
+
+fn parse_timestamp(raw: &str) -> Result<u64, time::error::Parse> {
+    use time::format_description::well_known::Rfc3339;
+    let dt = time::OffsetDateTime::parse(raw, &Rfc3339)?;
+    Ok(dt.unix_timestamp() as u64)
 }
 
 #[derive(Debug, Deserialize)]

@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-features -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Unit and integration tests
+        run: cargo test --workspace --all-features
+
+  package:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Build release artifacts
+        run: cargo build --workspace --release
+      - name: Bundle distribution
+        run: |
+          mkdir -p dist/config
+          cp target/release/fenrir dist/
+          cp config/*.toml dist/config/
+          tar -czf fenrir-${{ github.sha }}.tar.gz -C dist .
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: fenrir-${{ github.sha }}
+          path: fenrir-${{ github.sha }}.tar.gz

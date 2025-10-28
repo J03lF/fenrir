@@ -1,0 +1,68 @@
+name: Promote
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version (e.g. v2.3.1)
+        required: true
+      deploy_target:
+        description: Deployment target
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  stage:
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Test release build
+        run: cargo test --workspace --all-features
+      - name: Build release artifacts
+        run: cargo build --workspace --release
+      - name: Bundle distribution
+        run: |
+          mkdir -p dist/config
+          cp target/release/fenrir dist/
+          cp config/*.toml dist/config/
+          tar -czf fenrir-${{ inputs.version }}.tar.gz -C dist .
+      - name: Upload staged artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fenrir-${{ inputs.version }}-staging
+          path: fenrir-${{ inputs.version }}.tar.gz
+
+  promote_production:
+    runs-on: ubuntu-latest
+    needs: stage
+    if: inputs.deploy_target == 'production'
+    environment: production
+    steps:
+      - name: Download staged artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: fenrir-${{ inputs.version }}-staging
+          path: release
+      - name: Publish production artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fenrir-${{ inputs.version }}-production
+          path: release/fenrir-${{ inputs.version }}.tar.gz
+      - name: Deployment placeholder
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          echo "Promoting fenrir ${RELEASE_VERSION} to production"
+          ls -al release

@@ -26,6 +26,7 @@ use crate::services::{
 use anyhow::{anyhow, Result};
 use thiserror::Error;
 use tokio::runtime::Handle;
+use tokio::task;
 use tracing::{debug, info, warn};
 
 pub struct BootContext {
@@ -382,7 +383,12 @@ pub fn boot() -> Result<BootContext, BootError> {
                 ));
 
                 if let Ok(handle) = Handle::try_current() {
-                    if let Err(err) = handle.block_on(runtime.load_state()) {
+                    let handle_clone = handle.clone();
+                    let runtime_for_load = Arc::clone(&runtime);
+                    let load_result = task::block_in_place(move || {
+                        handle_clone.block_on(runtime_for_load.load_state())
+                    });
+                    if let Err(err) = load_result {
                         warn!(error = %err, "failed to restore module runtime state");
                     }
                 } else {

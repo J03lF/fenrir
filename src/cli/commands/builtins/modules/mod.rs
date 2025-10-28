@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::io::{self, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::TryRecvError;
 use std::sync::{mpsc, Arc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::runtime::{Handle, Runtime};
 use tracing::{info, warn};
@@ -11,15 +13,15 @@ use whoami;
 
 use crate::audit::{AuditActor, AuditEvent, AuditMetadata, AuditOutcome};
 use crate::cli::commands::registry::{
-    CliDependencies, CommandArgument, CommandEntry, CommandOutcome, CommandRegistry, CommandShape,
-    CommandSubcommand, CompletionContext, CompletionKind, ShellEnvironment,
+    CliDependencies, CommandArgument, CommandEntry, CommandOutcome, CommandOutput, CommandRegistry,
+    CommandShape, CommandSubcommand, CompletionContext, CompletionKind, ShellEnvironment,
 };
 use crate::cli::commands::table::Table;
 use crate::domain::module::{
     ModuleId, ModuleInstallStatus, ModuleManifest, ModuleRegistryError, ModuleRuntimeError,
     ModuleServiceError, ModuleStorageError, ModuleVerificationError, ModuleVersion,
 };
-use crate::services::ModuleService;
+use crate::services::{AppServices, ModuleService};
 use crate::utils;
 
 const DETAILS: &[&str] = &[
@@ -774,20 +776,124 @@ fn handle_install(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -
         }
     };
 
+    if let Some(_) = ctx.deps.output() {
+        let job_module = module_id.clone();
+        let job_version = version.clone();
+        if spawn_install_job(ctx, job_module, job_version).is_ok() {
+            writeln!(
+                out,
+                "Installation von '{}' läuft im Hintergrund – Fortschritt folgt unten.",
+                module_id
+            )?;
+            out.flush()?;
+            return Ok(());
+        } else {
+            writeln!(
+                out,
+                "Hintergrundauftrag konnte nicht gestartet werden – starte synchrone Installation."
+            )?;
+        }
+    }
+
     let module_id_for_call = module_id.clone();
     let version_for_call = version.clone();
 
-    let spinner = CliSpinner::start(format!("Lade Modul {} herunter", module_id));
-    let install_result = ctx.module_call(|service| async move {
-        service
-            .install(&module_id_for_call, version_for_call.as_ref())
-            .await
+    writeln!(out, "Lade Modul {} herunter …", module_id)?;
+    out.flush()?;
+
+    let service_for_thread = ctx.service();
+    let module_id_for_thread = Arc::new(module_id_for_call);
+    let version_for_thread = version_for_call;
+    let (result_tx, result_rx) = mpsc::channel();
+
+    let install_join = thread::spawn(move || {
+        let service = Arc::clone(&service_for_thread);
+        let module_id = Arc::clone(&module_id_for_thread);
+        let version = version_for_thread;
+        let result = run_module_future(move || {
+            let service = Arc::clone(&service);
+            let module_id = Arc::clone(&module_id);
+            async move { service.install(module_id.as_ref(), version.as_ref()).await }
+        });
+        let _ = result_tx.send(result);
     });
-    spinner.finish();
+
+    const BAR_WIDTH: usize = 28;
+    let emit_interval = Duration::from_millis(200);
+    let mut last_emit = Instant::now();
+    let mut simulated_progress = 0usize;
+    let frames = ['|', '/', '-', '\\'];
+    let mut frame_index = 0usize;
+
+    let render_line = |out: &mut dyn Write, text: &str| -> io::Result<()> {
+        write!(out, "\x1b[2K\r{text}")?;
+        out.flush()?;
+        Ok(())
+    };
+
+    render_line(
+        out,
+        &format!(
+            "[download] {} [{}] {:>3}% {}",
+            module_id,
+            " ".repeat(BAR_WIDTH),
+            0,
+            frames[frame_index]
+        ),
+    )?;
+
+    let install_result;
+    loop {
+        match result_rx.try_recv() {
+            Ok(result) => {
+                install_result = result;
+                let line = format!(
+                    "[download] {} [{}] {:>3}% ✓",
+                    module_id,
+                    "#".repeat(BAR_WIDTH),
+                    100
+                );
+                render_line(out, &line)?;
+                writeln!(out)?;
+                break;
+            }
+            Err(TryRecvError::Empty) => {
+                if last_emit.elapsed() >= emit_interval {
+                    simulated_progress = (simulated_progress + 3).min(95);
+                    let filled = (simulated_progress * BAR_WIDTH) / 100;
+                    let frame = frames[frame_index % frames.len()];
+                    frame_index = (frame_index + 1) % frames.len();
+                    let line = format!(
+                        "[download] {} [{}] {:>3}% {}",
+                        module_id,
+                        format!(
+                            "{}{}",
+                            "#".repeat(filled),
+                            " ".repeat(BAR_WIDTH.saturating_sub(filled))
+                        ),
+                        simulated_progress,
+                        frame
+                    );
+                    render_line(out, &line)?;
+                    last_emit = Instant::now();
+                }
+                thread::sleep(Duration::from_millis(120));
+            }
+            Err(TryRecvError::Disconnected) => {
+                render_line(out, "")?;
+                writeln!(out, "Download fehlgeschlagen – interner Fehler.")?;
+                out.flush()?;
+                return Ok(());
+            }
+        }
+    }
+
+    let _ = install_join.join();
+    writeln!(out)?;
 
     match install_result {
         Ok(result) => {
-            writeln!(out, "Download abgeschlossen.")?;
+            writeln!(out, "")?;
             let status_message = match result.status {
                 ModuleInstallStatus::Installed => "installiert",
                 ModuleInstallStatus::Updated => "aktualisiert",
@@ -815,7 +921,7 @@ fn handle_install(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -
             );
         }
         Err(err) => {
-            writeln!(out, "Download fehlgeschlagen.")?;
+            writeln!(out, "")?;
             render_service_error(out, "Installation fehlgeschlagen", &err)?;
             ctx.record_audit(
                 "module::install",
@@ -1402,75 +1508,188 @@ fn runtime_error_message(err: &ModuleRuntimeError) -> String {
     }
 }
 
-struct CliSpinner {
-    sender: Option<mpsc::Sender<()>>,
-    handle: Option<thread::JoinHandle<()>>,
-}
-
-impl CliSpinner {
-    fn start(message: impl Into<String>) -> Self {
-        let message = message.into();
-        let (sender, receiver) = mpsc::channel();
-
-        let handle = thread::spawn(move || {
-            let frames = ['|', '/', '-', '\\'];
-            let mut index = 0;
-            let mut stdout = io::stdout();
-
-            loop {
-                match receiver.recv_timeout(Duration::from_millis(120)) {
-                    Ok(_) => {
-                        let width = message.len() + 2;
-                        let _ = write!(stdout, "\r{:<width$}\r", "", width = width);
-                        let _ = stdout.flush();
-                        break;
-                    }
-                    Err(mpsc::RecvTimeoutError::Timeout) => {
-                        let frame = frames[index % frames.len()];
-                        index = (index + 1) % frames.len();
-                        let _ = write!(stdout, "\r{} {}", message, frame);
-                        let _ = stdout.flush();
-                    }
-                    Err(mpsc::RecvTimeoutError::Disconnected) => {
-                        let width = message.len() + 2;
-                        let _ = write!(stdout, "\r{:<width$}\r", "", width = width);
-                        let _ = stdout.flush();
-                        break;
-                    }
-                }
-            }
-        });
-
-        Self {
-            sender: Some(sender),
-            handle: Some(handle),
-        }
-    }
-
-    fn finish(mut self) {
-        if let Some(sender) = self.sender.take() {
-            let _ = sender.send(());
-        }
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
-    }
-}
-
-impl Drop for CliSpinner {
-    fn drop(&mut self) {
-        if let Some(sender) = self.sender.take() {
-            let _ = sender.send(());
-        }
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
-    }
-}
-
 fn module_cli_actor() -> AuditActor {
     AuditActor::User {
         user_id: format!("cli::{}", whoami::username()),
         role: "operator".to_string(),
+    }
+}
+
+fn spawn_install_job(
+    ctx: &ModulesCommandCtx,
+    module_id: ModuleId,
+    version: Option<ModuleVersion>,
+) -> io::Result<()> {
+    let Some(output) = ctx.deps.output() else {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "kein Output-Sink verfügbar",
+        ));
+    };
+    let output = Arc::clone(&output);
+    let service = ctx.service();
+    let services = Arc::clone(&ctx.deps.services);
+    let module_label = module_id.to_string();
+    let (tx, rx) = mpsc::channel::<Vec<String>>();
+    let done = Arc::new(AtomicBool::new(false));
+    let progress_output = Arc::clone(&output);
+    let progress_done = Arc::clone(&done);
+    thread::spawn(move || progress_loop(rx, progress_output, module_label, progress_done));
+
+    thread::spawn(move || {
+        run_install_worker(service, services, module_id, version, tx, done);
+    });
+    Ok(())
+}
+
+fn run_install_worker(
+    service: Arc<ModuleService>,
+    services: Arc<AppServices>,
+    module_id: ModuleId,
+    version: Option<ModuleVersion>,
+    tx: mpsc::Sender<Vec<String>>,
+    done: Arc<AtomicBool>,
+) {
+    let module_id_for_call = module_id.clone();
+    let version_for_call = version.clone();
+    let install_result = run_module_future(move || {
+        let service = Arc::clone(&service);
+        async move {
+            service
+                .install(&module_id_for_call, version_for_call.as_ref())
+                .await
+        }
+    });
+
+    let mut metadata = AuditMetadata::default()
+        .insert("transport", "ssh")
+        .insert("command", "modules install");
+    if let Some(ref version) = version {
+        metadata = metadata.insert("version", version.to_string());
+    }
+
+    let lines = match &install_result {
+        Ok(result) => {
+            let status_message = match result.status {
+                ModuleInstallStatus::Installed => "installiert",
+                ModuleInstallStatus::Updated => "aktualisiert",
+                ModuleInstallStatus::AlreadyCurrent => "bereits aktuell",
+            };
+            metadata = metadata
+                .insert("status", status_message)
+                .insert("path", result.path.clone());
+            let event = AuditEvent::builder()
+                .actor(module_cli_actor())
+                .action("module::install")
+                .target(module_id.to_string())
+                .outcome(AuditOutcome::Success)
+                .metadata(metadata)
+                .build();
+            if let Ok(event) = event {
+                if let Err(err) = services.record_audit(event) {
+                    warn!(error = %err, "module audit append failed (async install)");
+                }
+            }
+            vec![
+                String::new(),
+                format!(
+                    "✓ Modul {} ({}) {} – Pfad: {}",
+                    result.manifest.id, result.manifest.version, status_message, result.path
+                ),
+            ]
+        }
+        Err(err) => {
+            let failure_metadata = metadata
+                .insert("error_code", module_error_code(err))
+                .insert("error", err.to_string());
+            let event = AuditEvent::builder()
+                .actor(module_cli_actor())
+                .action("module::install")
+                .target(module_id.to_string())
+                .outcome(AuditOutcome::Failure)
+                .metadata(failure_metadata)
+                .build();
+            if let Ok(event) = event {
+                if let Err(record_err) = services.record_audit(event) {
+                    warn!(error = %record_err, "module audit append failed (async install)");
+                }
+            }
+            vec![
+                String::new(),
+                format!(
+                    "✗ Installation fehlgeschlagen ({}): {}",
+                    module_error_code(err),
+                    module_error_message(err)
+                ),
+            ]
+        }
+    };
+
+    let _ = tx.send(lines);
+    done.store(true, Ordering::Relaxed);
+}
+
+fn progress_loop(
+    rx: mpsc::Receiver<Vec<String>>,
+    output: Arc<dyn CommandOutput>,
+    module_label: String,
+    done: Arc<AtomicBool>,
+) {
+    const BAR_WIDTH: usize = 28;
+    let frames = ['|', '/', '-', '\\'];
+    let mut frame_index = 0usize;
+    let mut percent = 0usize;
+
+    output.push("\n");
+    output.push(&format!(
+        "\r[download] {} [{}] {:>3}% {}   ",
+        module_label,
+        " ".repeat(BAR_WIDTH),
+        percent,
+        frames[frame_index]
+    ));
+
+    loop {
+        match rx.try_recv() {
+            Ok(lines) => {
+                output.push(&format!(
+                    "\r[download] {} [{}] {:>3}% ✓\n",
+                    module_label,
+                    "#".repeat(BAR_WIDTH),
+                    100
+                ));
+                for line in lines {
+                    if line.is_empty() {
+                        output.push("\n");
+                    } else {
+                        output.push(&format!("{line}\n"));
+                    }
+                }
+                done.store(true, Ordering::Relaxed);
+                break;
+            }
+            Err(TryRecvError::Empty) => {
+                if done.load(Ordering::Relaxed) {
+                    break;
+                }
+                percent = (percent + 3).min(95);
+                let filled = (percent * BAR_WIDTH) / 100;
+                let frame = frames[frame_index % frames.len()];
+                frame_index = (frame_index + 1) % frames.len();
+                let bar = format!(
+                    "{}{}",
+                    "#".repeat(filled),
+                    " ".repeat(BAR_WIDTH.saturating_sub(filled))
+                );
+                output.push(&format!(
+                    "\r[download] {} [{}] {:>3}% {}   ",
+                    module_label, bar, percent, frame
+                ));
+                thread::sleep(Duration::from_millis(200));
+            }
+            Err(TryRecvError::Disconnected) => {
+                break;
+            }
+        }
     }
 }

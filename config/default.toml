@@ -111,8 +111,8 @@ bootstrap = ["fenrir-api"]
 
 [modules.registry]
 url = "http://localhost:3001"
-allow_offline = true
-offline_dirs = ["/opt/fenrir/development/fenrir-api"]
+allow_offline = false
+offline_dirs = []
 auth_token = "env:FENRIR_REGISTRY_TOKEN"
 
 [modules.registry.tls]
@@ -122,7 +122,9 @@ auth_token = "env:FENRIR_REGISTRY_TOKEN"
 accept_invalid_certs = false
 
 [modules.runtime]
-engine = "stub"
+# stub = expiremtel (fake engine)
+engine = "process"
+
 
 [modules.storage]
 install_dir = "/Users/jfurocket/Documents/personal/modules"

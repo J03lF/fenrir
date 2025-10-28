@@ -1,8 +1,0 @@
-2025-10-28T08:57:51.950819Z  INFO main ThreadId(01) fenrir::infra::logging: dateilogging initialisiert log_path=logs/app.log
-2025-10-28T08:57:51.950924Z  INFO main ThreadId(01) fenrir::infra::logging: db-logdatei vorbereitet log_path=logs/db.log
-2025-10-28T08:57:51.951753Z  INFO main ThreadId(01) fenrir::boot: core services registered in registry
-2025-10-28T08:57:51.952154Z  INFO main ThreadId(01) fenrir::boot: scheduler service started
-2025-10-28T08:57:51.952381Z  INFO tokio-runtime-worker ThreadId(11) fenrir::services::scheduler: scheduler heartbeat loop started
-2025-10-28T08:57:51.952625Z  INFO                 main ThreadId(01) fenrir::boot: audit log persistence configured path=/opt/fenrir/development/tmp/runtime/audit/fenrir-audit-history.json capacity=2048 retention_hours=24 persist_seconds=30
-2025-10-28T08:57:51.953252Z  INFO                 main ThreadId(01) fenrir::services::scheduler: scheduler heartbeat stopped
-2025-10-28T08:57:51.953319Z  INFO                 main ThreadId(01) fenrir::services::scheduler: scheduler service dropped and resources cleaned up

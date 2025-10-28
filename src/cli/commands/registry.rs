@@ -4,6 +4,10 @@ use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::sync::Arc;
 
+pub trait CommandOutput: Send + Sync + 'static {
+    fn push(&self, text: &str);
+}
+
 pub type CommandHandler = fn(
     &CliDependencies,
     &[&str],
@@ -254,10 +258,27 @@ impl CommandRegistry {
 pub struct CliDependencies {
     pub config: Arc<AppConfig>,
     pub services: Arc<AppServices>,
+    output: Option<Arc<dyn CommandOutput>>,
 }
 
 impl CliDependencies {
     pub fn new(config: Arc<AppConfig>, services: Arc<AppServices>) -> Self {
-        Self { config, services }
+        Self {
+            config,
+            services,
+            output: None,
+        }
+    }
+
+    pub fn with_output(&self, output: Arc<dyn CommandOutput>) -> Self {
+        Self {
+            config: Arc::clone(&self.config),
+            services: Arc::clone(&self.services),
+            output: Some(output),
+        }
+    }
+
+    pub fn output(&self) -> Option<Arc<dyn CommandOutput>> {
+        self.output.clone()
     }
 }

@@ -42,6 +42,9 @@ fn handle(
             Some(entry) => {
                 writeln!(out, "{} - {}", entry.name, entry.description)?;
                 writeln!(out, "Usage: {}", entry.usage)?;
+                if !entry.aliases.is_empty() {
+                    writeln!(out, "Aliase: {}", entry.aliases.join(", "))?;
+                }
                 if !entry.details.is_empty() {
                     writeln!(out, "Details:")?;
                     for line in entry.details {
@@ -61,8 +64,13 @@ fn handle(
             "Beschreibung".to_string(),
         ]);
         for entry in registry.entries() {
+            let command_name = if entry.aliases.is_empty() {
+                entry.name.clone()
+            } else {
+                format!("{} [{}]", entry.name, entry.aliases.join(", "))
+            };
             table.add_row(vec![
-                entry.name.clone(),
+                command_name,
                 entry.usage.to_string(),
                 entry.description.clone(),
             ]);

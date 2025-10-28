@@ -1,17 +1,20 @@
 use anyhow::{anyhow, Context, Result};
+use futures::executor::block_on;
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use thrussh::server::{Auth, Server, Session};
+use thrussh::server::{Auth, Handle as SessionHandle, Server, Session};
 use thrussh::{server, ChannelId, CryptoVec};
+use tokio::runtime::Handle as TokioHandle;
 
 use crate::cli::commands::builtins;
 use crate::cli::commands::builtins::db_shell::{self, RuntimeExecutor};
 use crate::cli::commands::registry::{
-    CliDependencies, CommandOutcome, CommandRegistry, CommandStatus, ShellEnvironment,
+    CliDependencies, CommandOutcome, CommandOutput, CommandRegistry, CommandStatus,
+    ShellEnvironment,
 };
 use crate::cli::completion::{self, ContextualCompleter};
 use crate::config::AppConfig;
@@ -213,14 +216,13 @@ impl Handler {
         let mut parts = cmd.split_whitespace();
         if let Some(name) = parts.next() {
             let args: Vec<&str> = parts.collect();
+            let output = Arc::new(SshCommandOutput::new(session.handle(), channel));
+            let deps = self.dependencies.with_output(output);
             let mut writer = SessionWriter::new(session, channel);
-            match self.registry.execute(
-                name,
-                &args,
-                &self.dependencies,
-                &mut writer,
-                ShellEnvironment::Ssh,
-            ) {
+            match self
+                .registry
+                .execute(name, &args, &deps, &mut writer, ShellEnvironment::Ssh)
+            {
                 Ok(CommandStatus::Executed(CommandOutcome::Continue)) => {
                     Handler::send_prompt(session, channel, self.current_prompt());
                     true
@@ -873,10 +875,54 @@ impl Write for SessionWriter<'_> {
         }
         self.session
             .data(self.channel, CryptoVec::from_slice(&converted));
+        self.session
+            .flush()
+            .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
         Ok(buf.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        Ok(())
+        self.session
+            .flush()
+            .map_err(|err| io::Error::new(io::ErrorKind::Other, err))
+    }
+}
+
+#[derive(Clone)]
+struct SshCommandOutput {
+    handle: SessionHandle,
+    channel: ChannelId,
+}
+
+impl SshCommandOutput {
+    fn new(handle: SessionHandle, channel: ChannelId) -> Self {
+        Self { handle, channel }
+    }
+}
+
+impl CommandOutput for SshCommandOutput {
+    fn push(&self, text: &str) {
+        let channel = self.channel;
+        let mut converted = Vec::with_capacity(text.len() * 2);
+        for &byte in text.as_bytes() {
+            if byte == b'\n' {
+                converted.push(b'\r');
+                converted.push(b'\n');
+            } else {
+                converted.push(byte);
+            }
+        }
+        let mut handle = self.handle.clone();
+        if let Ok(runtime) = TokioHandle::try_current() {
+            runtime.spawn(async move {
+                let mut payload = CryptoVec::new();
+                payload.extend(&converted);
+                let _ = handle.data(channel, payload).await;
+            });
+        } else {
+            let mut payload = CryptoVec::new();
+            payload.extend(&converted);
+            let _ = block_on(handle.data(channel, payload));
+        }
     }
 }

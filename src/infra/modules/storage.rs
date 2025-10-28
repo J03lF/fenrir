@@ -357,6 +357,19 @@ fn flatten_module_root(destination: &std::path::Path) -> Result<(), ModuleStorag
                 destination.display()
             ))
         })?;
+        let name = entry.file_name();
+        let Some(name_str) = name.to_str() else {
+            continue;
+        };
+        if name_str == ".DS_Store" || name_str.starts_with("._") {
+            let path = entry.path();
+            if path.is_dir() {
+                let _ = std::fs::remove_dir_all(&path);
+            } else {
+                let _ = std::fs::remove_file(&path);
+            }
+            continue;
+        }
         entries.push(entry);
     }
 

@@ -1,0 +1,52 @@
+2025-10-28T12:49:01.346789Z  INFO main ThreadId(01) fenrir::infra::logging: dateilogging initialisiert log_path=logs/app.log
+2025-10-28T12:49:01.346893Z  INFO main ThreadId(01) fenrir::infra::logging: db-logdatei vorbereitet log_path=logs/db.log
+2025-10-28T12:49:01.365763Z  INFO main ThreadId(01) fenrir::boot: core services registered in registry
+2025-10-28T12:49:01.366666Z  INFO main ThreadId(01) fenrir::boot: scheduler service started
+2025-10-28T12:49:01.366750Z  INFO tokio-runtime-worker ThreadId(15) fenrir::services::scheduler: scheduler heartbeat loop started
+2025-10-28T12:49:01.367491Z  INFO                 main ThreadId(01) fenrir::boot: audit log persistence configured path=/opt/fenrir/development/tmp/runtime/audit/fenrir-audit-history.json capacity=2048 retention_hours=24 persist_seconds=30
+2025-10-28T12:49:01.372776Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: loaded 1 module states from disk
+2025-10-28T12:49:01.372813Z  WARN                 main ThreadId(01) fenrir::infra::modules::runtime::process: module was running but process no longer exists module_id=fenrir-api pid=64862
+2025-10-28T12:49:01.385006Z  INFO                 main ThreadId(01) fenrir::infra::http::server: HTTP control-plane authentication via identity broker
+2025-10-28T12:49:01.385084Z  INFO                 main ThreadId(01) fenrir::boot: boot complete app=fenrir version=0.1.4
+2025-10-28T12:49:01.385857Z  WARN tokio-runtime-worker ThreadId(17) fenrir::infra::modules::registry: skipping local module version module=fenrir-api error=missing artifact at /opt/fenrir/development/fenrir-api/fenrir-api-0.0.4.tar.gz
+2025-10-28T12:49:01.385882Z  WARN tokio-runtime-worker ThreadId(17) fenrir::infra::modules::registry: skipping local module version module=fenrir-api error=missing artifact at /opt/fenrir/development/fenrir-api/fenrir-api-0.0.5.tar.gz
+2025-10-28T12:49:01.385891Z  WARN tokio-runtime-worker ThreadId(17) fenrir::infra::modules::registry: skipping local module version module=fenrir-api error=missing artifact at /opt/fenrir/development/fenrir-api/fenrir-api-0.1.0.tar.gz
+2025-10-28T12:49:01.386471Z  WARN tokio-runtime-worker ThreadId(17) fenrir::infra::modules::registry: skipping local module version module=fenrir-api error=missing artifact at /opt/fenrir/development/fenrir-api/fenrir-api-0.0.4.tar.gz
+2025-10-28T12:49:01.386484Z  WARN tokio-runtime-worker ThreadId(17) fenrir::infra::modules::registry: skipping local module version module=fenrir-api error=missing artifact at /opt/fenrir/development/fenrir-api/fenrir-api-0.0.5.tar.gz
+2025-10-28T12:49:01.386492Z  WARN tokio-runtime-worker ThreadId(17) fenrir::infra::modules::registry: skipping local module version module=fenrir-api error=missing artifact at /opt/fenrir/development/fenrir-api/fenrir-api-0.1.0.tar.gz
+2025-10-28T12:49:16.387898Z  WARN tokio-runtime-worker ThreadId(03) fenrir::services::scheduler: db ping failed error=DB-Verbindungsfehler: error connecting to server: Connection refused (os error 61)
+2025-10-28T12:49:24.734153Z  INFO                 main ThreadId(01) fenrir::boot: bootstrap module ready module=fenrir-api version="latest" status=Installed
+2025-10-28T12:49:24.734248Z  INFO                 main ThreadId(01) fenrir::boot: transport initialisation triggered
+2025-10-28T12:49:24.734277Z  INFO tokio-runtime-worker ThreadId(03) fenrir::boot: ssh server task spawned
+2025-10-28T12:49:24.734463Z  INFO tokio-runtime-worker ThreadId(03) fenrir::infra::ssh: starting SSH server host=127.0.0.1 port=2222
+2025-10-28T12:49:24.734829Z  INFO tokio-runtime-worker ThreadId(15) fenrir::infra::http::server: HTTP server task spawned
+2025-10-28T12:49:45.384791Z  INFO tokio-runtime-worker ThreadId(12) thrussh::server::encrypted: pty-req: unknown pty code 42
+2025-10-28T12:49:49.531586Z  WARN ThreadId(19) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-10-28T12:49:50.653447Z  WARN tokio-runtime-worker ThreadId(45) fenrir::infra::modules::registry: skipping local module version module=fenrir-api error=missing artifact at /opt/fenrir/development/fenrir-api/fenrir-api-0.0.4.tar.gz
+2025-10-28T12:49:50.653752Z  WARN tokio-runtime-worker ThreadId(45) fenrir::infra::modules::registry: skipping local module version module=fenrir-api error=missing artifact at /opt/fenrir/development/fenrir-api/fenrir-api-0.0.5.tar.gz
+2025-10-28T12:49:50.653849Z  WARN tokio-runtime-worker ThreadId(45) fenrir::infra::modules::registry: skipping local module version module=fenrir-api error=missing artifact at /opt/fenrir/development/fenrir-api/fenrir-api-0.1.0.tar.gz
+2025-10-28T12:49:57.581326Z  WARN ThreadId(52) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-10-28T12:50:02.491090Z  WARN ThreadId(84) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-10-28T12:50:02.493591Z  WARN ThreadId(100) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-10-28T12:50:03.194510Z  WARN ThreadId(116) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-10-28T12:50:03.197756Z  WARN ThreadId(132) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-10-28T12:50:05.079018Z  WARN tokio-runtime-worker ThreadId(157) fenrir::infra::modules::registry: skipping local module version module=fenrir-api error=missing artifact at /opt/fenrir/development/fenrir-api/fenrir-api-0.0.4.tar.gz
+2025-10-28T12:50:05.079224Z  WARN tokio-runtime-worker ThreadId(157) fenrir::infra::modules::registry: skipping local module version module=fenrir-api error=missing artifact at /opt/fenrir/development/fenrir-api/fenrir-api-0.0.5.tar.gz
+2025-10-28T12:50:05.079304Z  WARN tokio-runtime-worker ThreadId(157) fenrir::infra::modules::registry: skipping local module version module=fenrir-api error=missing artifact at /opt/fenrir/development/fenrir-api/fenrir-api-0.1.0.tar.gz
+2025-10-28T12:50:05.082212Z  WARN tokio-runtime-worker ThreadId(157) fenrir::infra::modules::registry: skipping local module version module=fenrir-api error=missing artifact at /opt/fenrir/development/fenrir-api/fenrir-api-0.0.4.tar.gz
+2025-10-28T12:50:05.082355Z  WARN tokio-runtime-worker ThreadId(157) fenrir::infra::modules::registry: skipping local module version module=fenrir-api error=missing artifact at /opt/fenrir/development/fenrir-api/fenrir-api-0.0.5.tar.gz
+2025-10-28T12:50:05.082432Z  WARN tokio-runtime-worker ThreadId(157) fenrir::infra::modules::registry: skipping local module version module=fenrir-api error=missing artifact at /opt/fenrir/development/fenrir-api/fenrir-api-0.1.0.tar.gz
+2025-10-28T12:51:16.391264Z  WARN tokio-runtime-worker ThreadId(03) fenrir::services::scheduler: db ping failed error=DB-Verbindungsfehler: error connecting to server: Connection refused (os error 61)
+2025-10-28T12:52:53.340941Z  WARN ThreadId(166) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-10-28T12:52:53.343836Z  WARN tokio-runtime-worker ThreadId(180) fenrir::infra::modules::registry: skipping local module version module=fenrir-api error=missing artifact at /opt/fenrir/development/fenrir-api/fenrir-api-0.0.4.tar.gz
+2025-10-28T12:52:53.344014Z  WARN tokio-runtime-worker ThreadId(180) fenrir::infra::modules::registry: skipping local module version module=fenrir-api error=missing artifact at /opt/fenrir/development/fenrir-api/fenrir-api-0.0.5.tar.gz
+2025-10-28T12:52:53.344098Z  WARN tokio-runtime-worker ThreadId(180) fenrir::infra::modules::registry: skipping local module version module=fenrir-api error=missing artifact at /opt/fenrir/development/fenrir-api/fenrir-api-0.1.0.tar.gz
+2025-10-28T12:53:07.023390Z  WARN ThreadId(182) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-10-28T12:53:07.025479Z  WARN tokio-runtime-worker ThreadId(184) fenrir::infra::modules::registry: skipping local module version module=fenrir-api error=missing artifact at /opt/fenrir/development/fenrir-api/fenrir-api-0.0.4.tar.gz
+2025-10-28T12:53:07.025629Z  WARN tokio-runtime-worker ThreadId(184) fenrir::infra::modules::registry: skipping local module version module=fenrir-api error=missing artifact at /opt/fenrir/development/fenrir-api/fenrir-api-0.0.5.tar.gz
+2025-10-28T12:53:07.025697Z  WARN tokio-runtime-worker ThreadId(184) fenrir::infra::modules::registry: skipping local module version module=fenrir-api error=missing artifact at /opt/fenrir/development/fenrir-api/fenrir-api-0.1.0.tar.gz
+2025-10-28T12:53:10.354815Z  WARN ThreadId(198) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-10-28T12:53:10.840458Z  WARN tokio-runtime-worker ThreadId(225) fenrir::infra::modules::registry: skipping local module version module=fenrir-api error=missing artifact at /opt/fenrir/development/fenrir-api/fenrir-api-0.0.4.tar.gz
+2025-10-28T12:53:10.840682Z  WARN tokio-runtime-worker ThreadId(225) fenrir::infra::modules::registry: skipping local module version module=fenrir-api error=missing artifact at /opt/fenrir/development/fenrir-api/fenrir-api-0.0.5.tar.gz
+2025-10-28T12:53:10.840765Z  WARN tokio-runtime-worker ThreadId(225) fenrir::infra::modules::registry: skipping local module version module=fenrir-api error=missing artifact at /opt/fenrir/development/fenrir-api/fenrir-api-0.1.0.tar.gz
+2025-10-28T12:53:16.395132Z  WARN tokio-runtime-worker ThreadId(12) fenrir::services::scheduler: db ping failed error=DB-Verbindungsfehler: error connecting to server: Connection refused (os error 61)

@@ -52,8 +52,8 @@ store_path = "runtime/identity/store-dev.json"
 audience = "fenrir-control-plane"
 
 [security.identity.external]
-base_url = "https://identity.example.com"
-jwks_url = "https://identity.example.com/jwks.json"
+base_url = "https://127.0.0.1:8081"
+jwks_url = "https://127.0.0.1:8081/jwks.json"
 auth_token = "env:FENRIR_IDENTITY_TOKEN"
 jwks_refresh_seconds = 300
 audience = "fenrir-control-plane"
@@ -70,7 +70,7 @@ timeout_ms = 5000
 
 
 [telemetry.tracing]
-level = "error"
+level = "info"
 
 [telemetry.metrics]
 enabled = false

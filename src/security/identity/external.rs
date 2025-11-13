@@ -6,14 +6,14 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use ed25519_dalek::{PublicKey, Verifier};
 use reqwest::blocking::{Client, RequestBuilder};
-use reqwest::Url;
+use reqwest::{Certificate, Identity, Url};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use tracing::{debug, warn};
 
 use super::{
     fingerprint_token, parse_jwt, Claims, IdentityClaims, IdentityError, IdentityProvider,
-    IdentityUserRecord, IssueTokenRequest, IssuedToken,
+    IdentityTokenRecord, IdentityUserProfile, IdentityUserRecord, IssueTokenRequest, IssuedToken,
 };
 use crate::audit::{AuditActor, AuditEvent, AuditMetadata};
 use crate::security::auth::Role;
@@ -21,9 +21,9 @@ use crate::security::manager::AuditSink;
 
 const TOKENS_ISSUE_PATH: &str = "tokens/issue";
 const USERS_LIST_PATH: &str = "users";
+const LOGIN_PATH: &str = "sessions/login";
 
 pub struct ExternalIdentityProvider {
-    client: Client,
     base_url: Url,
     jwks_url: Url,
     auth_token: Option<String>,
@@ -34,11 +34,33 @@ pub struct ExternalIdentityProvider {
     audit: Arc<dyn AuditSink>,
     jwks_cache: RwLock<Option<JwksCache>>,
     jwks_ttl: Duration,
+    tls: ExternalIdentityTlsOptions,
 }
 
 struct JwksCache {
     keys: HashMap<String, PublicKey>,
     expires_at: Instant,
+}
+
+#[derive(Clone, Default)]
+pub struct ExternalIdentityTlsOptions {
+    ca_certificate: Option<Certificate>,
+    client_identity: Option<Identity>,
+    accept_invalid_certs: bool,
+}
+
+impl ExternalIdentityTlsOptions {
+    pub fn set_ca_certificate(&mut self, certificate: Certificate) {
+        self.ca_certificate = Some(certificate);
+    }
+
+    pub fn set_client_identity(&mut self, identity: Identity) {
+        self.client_identity = Some(identity);
+    }
+
+    pub fn set_accept_invalid_certs(&mut self, accept: bool) {
+        self.accept_invalid_certs = accept;
+    }
 }
 
 impl ExternalIdentityProvider {
@@ -51,16 +73,10 @@ impl ExternalIdentityProvider {
         audience: String,
         app_version: String,
         jwks_refresh_seconds: u64,
+        tls: ExternalIdentityTlsOptions,
         audit: Arc<dyn AuditSink>,
     ) -> Result<Self, IdentityError> {
-        let client = Client::builder()
-            .user_agent(format!("fenrir-identity-client/{}", app_version))
-            .build()
-            .map_err(|err| {
-                IdentityError::Invalid(format!("failed to build identity client: {err}"))
-            })?;
         Ok(Self {
-            client,
             base_url,
             jwks_url,
             auth_token,
@@ -71,6 +87,7 @@ impl ExternalIdentityProvider {
             audit,
             jwks_cache: RwLock::new(None),
             jwks_ttl: Duration::from_secs(jwks_refresh_seconds),
+            tls,
         })
     }
 
@@ -93,14 +110,17 @@ impl ExternalIdentityProvider {
             instance_id: self.instance_id.as_str(),
             app_version: self.app_version.as_str(),
         };
+        let client = self.build_client()?;
         let response = self
-            .send(self.client.post(url).json(&body))?
+            .send(client.post(url).json(&body))?
             .json::<IssueTokenResponse>()
             .map_err(|err| IdentityError::Invalid(format!("invalid identity response: {err}")))?;
 
         let (header, raw_claims, _) = parse_jwt(&response.token)?;
         let claims: Claims = serde_json::from_slice(&raw_claims.decoded)
             .map_err(|err| IdentityError::Invalid(format!("invalid token claims: {err}")))?;
+        let issued_at = OffsetDateTime::from_unix_timestamp(claims.iat)
+            .map_err(|_| IdentityError::Invalid("token issued-at timestamp out of range".into()))?;
         let expires_at = OffsetDateTime::from_unix_timestamp(claims.exp)
             .map_err(|_| IdentityError::Invalid("token expiry timestamp out of range".into()))?;
         let fingerprint = response
@@ -109,6 +129,7 @@ impl ExternalIdentityProvider {
 
         let issued = IssuedToken {
             token: response.token,
+            issued_at,
             token_id: response.token_id.unwrap_or_else(|| claims.jti.clone()),
             user_id: user_id.clone(),
             expires_at,
@@ -122,8 +143,9 @@ impl ExternalIdentityProvider {
 
     fn list_users_internal(&self) -> Result<Vec<IdentityUserRecord>, IdentityError> {
         let url = self.join_path(USERS_LIST_PATH)?;
+        let client = self.build_client()?;
         let response = self
-            .send(self.client.get(url))?
+            .send(client.get(url))?
             .json::<ListUsersResponse>()
             .map_err(|err| {
                 IdentityError::Invalid(format!("invalid identity users response: {err}"))
@@ -150,9 +172,49 @@ impl ExternalIdentityProvider {
                 last_issued_at: user.last_issued_at.and_then(|ts| parse_timestamp(&ts)),
                 token_count: user.token_count.unwrap_or(0),
                 last_token_fingerprint: user.last_token_fingerprint,
+                tokens: user
+                    .tokens
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|token| IdentityTokenRecord::try_from(token).ok())
+                    .collect(),
+                password_hash: None,
+                password_updated_at: user
+                    .password_updated_at
+                    .and_then(|ts| parse_timestamp(&ts)),
+                last_login_at: user.last_login_at.and_then(|ts| parse_timestamp(&ts)),
             })
             .collect();
         Ok(users)
+    }
+
+    fn authenticate_internal(
+        &self,
+        user_id: &str,
+        password: &str,
+    ) -> Result<IdentityUserProfile, IdentityError> {
+        let url = self.join_path(LOGIN_PATH)?;
+        let client = self.build_client()?;
+        let payload = LoginRequest { user_id, password };
+        let response = self
+            .send(client.post(url).json(&payload))?
+            .json::<LoginResponse>()
+            .map_err(|err| {
+                IdentityError::Invalid(format!("invalid identity login response: {err}"))
+            })?;
+        let role = parse_role(&response.role)?;
+        let last_login_at = response.last_login_at.as_deref().and_then(parse_timestamp);
+        let password_updated_at = response
+            .password_updated_at
+            .as_deref()
+            .and_then(parse_timestamp);
+        Ok(IdentityUserProfile {
+            user_id: response.user_id,
+            display_name: response.display_name,
+            role,
+            password_updated_at,
+            last_login_at,
+        })
     }
 
     fn verify_internal(&self, token: &str) -> Result<IdentityClaims, IdentityError> {
@@ -200,6 +262,7 @@ impl ExternalIdentityProvider {
             .insert("key_id", issued.key_id.clone())
             .insert("token_id", issued.token_id.clone())
             .insert("expires_at", issued.expires_at.to_string())
+            .insert("issued_at", issued.issued_at.to_string())
             .insert("fingerprint", issued.fingerprint.clone())
             .insert("role", role.as_str())
             .insert("audience", self.audience.clone());
@@ -246,7 +309,8 @@ impl ExternalIdentityProvider {
             .jwks_cache
             .write()
             .map_err(|_| IdentityError::StatePoisoned)?;
-        let response = match self.send(self.client.get(self.jwks_url.clone())) {
+        let client = self.build_client()?;
+        let response = match self.send(client.get(self.jwks_url.clone())) {
             Ok(resp) => resp,
             Err(err) => {
                 if guard.is_some() {
@@ -295,6 +359,27 @@ impl ExternalIdentityProvider {
         Ok(())
     }
 
+    fn build_client(&self) -> Result<Client, IdentityError> {
+        let mut builder =
+            Client::builder().user_agent(format!("fenrir-identity-client/{}", self.app_version));
+
+        if let Some(cert) = self.tls.ca_certificate.clone() {
+            builder = builder.add_root_certificate(cert);
+        }
+
+        if let Some(identity) = self.tls.client_identity.clone() {
+            builder = builder.identity(identity);
+        }
+
+        if self.tls.accept_invalid_certs {
+            builder = builder.danger_accept_invalid_certs(true);
+        }
+
+        builder.build().map_err(|err| {
+            IdentityError::Invalid(format!("failed to build identity client: {err}"))
+        })
+    }
+
     fn send(&self, request: RequestBuilder) -> Result<reqwest::blocking::Response, IdentityError> {
         let request = if let Some(token) = &self.auth_token {
             request.bearer_auth(token)
@@ -334,6 +419,14 @@ impl IdentityProvider for ExternalIdentityProvider {
 
     fn verify(&self, token: &str) -> Result<IdentityClaims, IdentityError> {
         self.verify_internal(token)
+    }
+
+    fn authenticate_user(
+        &self,
+        user_id: &str,
+        password: &str,
+    ) -> Result<IdentityUserProfile, IdentityError> {
+        self.authenticate_internal(user_id, password)
     }
 }
 
@@ -376,6 +469,66 @@ struct ListUserEntry {
     token_count: Option<u64>,
     #[serde(default)]
     last_token_fingerprint: Option<String>,
+    #[serde(default)]
+    tokens: Option<Vec<ListUserTokenEntry>>,
+    #[serde(default)]
+    password_updated_at: Option<String>,
+    #[serde(default)]
+    last_login_at: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ListUserTokenEntry {
+    token_id: String,
+    fingerprint: String,
+    #[serde(default)]
+    issued_at: Option<String>,
+    #[serde(default)]
+    expires_at: Option<String>,
+    #[serde(default)]
+    key_id: Option<String>,
+}
+
+#[derive(Serialize)]
+struct LoginRequest<'a> {
+    user_id: &'a str,
+    password: &'a str,
+}
+
+#[derive(Deserialize)]
+struct LoginResponse {
+    user_id: String,
+    #[serde(default)]
+    display_name: Option<String>,
+    role: String,
+    #[serde(default)]
+    last_login_at: Option<String>,
+    #[serde(default)]
+    password_updated_at: Option<String>,
+}
+
+impl TryFrom<ListUserTokenEntry> for IdentityTokenRecord {
+    type Error = IdentityError;
+
+    fn try_from(entry: ListUserTokenEntry) -> Result<Self, Self::Error> {
+        let issued_at = entry
+            .issued_at
+            .as_deref()
+            .and_then(parse_timestamp)
+            .unwrap_or_else(OffsetDateTime::now_utc);
+        let expires_at = entry
+            .expires_at
+            .as_deref()
+            .and_then(parse_timestamp)
+            .unwrap_or(issued_at);
+        Ok(Self {
+            token_id: entry.token_id,
+            fingerprint: entry.fingerprint,
+            issued_at,
+            expires_at,
+            key_id: entry.key_id.unwrap_or_default(),
+        })
+    }
 }
 
 #[derive(Deserialize)]

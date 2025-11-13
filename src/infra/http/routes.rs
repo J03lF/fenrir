@@ -174,6 +174,17 @@ struct IdentityUserView {
     created_at: String,
     last_issued_at: Option<String>,
     token_count: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tokens: Vec<IdentityUserTokenView>,
+}
+
+#[derive(Serialize)]
+struct IdentityUserTokenView {
+    token_id: String,
+    fingerprint: String,
+    issued_at: String,
+    expires_at: String,
+    key_id: String,
 }
 
 #[derive(Deserialize)]
@@ -191,6 +202,7 @@ struct IssueIdentityTokenResponse {
     role: String,
     expires_at: String,
     fingerprint: String,
+    issued_at: String,
 }
 
 #[derive(Serialize)]
@@ -1073,6 +1085,17 @@ async fn list_identity_users(State(state): State<HttpState>, headers: HeaderMap)
                             created_at: format_offset_datetime(user.created_at),
                             last_issued_at: user.last_issued_at.map(format_offset_datetime),
                             token_count: user.token_count,
+                            tokens: user
+                                .tokens
+                                .into_iter()
+                                .map(|token| IdentityUserTokenView {
+                                    token_id: token.token_id,
+                                    fingerprint: token.fingerprint,
+                                    issued_at: format_offset_datetime(token.issued_at),
+                                    expires_at: format_offset_datetime(token.expires_at),
+                                    key_id: token.key_id,
+                                })
+                                .collect(),
                         })
                         .collect(),
                 };
@@ -1131,6 +1154,7 @@ async fn issue_identity_token(
                         role: role.as_str().to_string(),
                         expires_at: format_offset_datetime(issued.expires_at),
                         fingerprint: issued.fingerprint,
+                        issued_at: format_offset_datetime(issued.issued_at),
                     };
                     (StatusCode::OK, Json(response)).into_response()
                 }

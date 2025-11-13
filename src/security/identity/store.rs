@@ -71,6 +71,10 @@ pub struct IdentityUserRecord {
     pub last_issued_at: Option<OffsetDateTime>,
     pub token_count: u64,
     pub last_token_fingerprint: Option<String>,
+    pub tokens: Vec<IdentityTokenRecord>,
+    pub password_hash: Option<String>,
+    pub password_updated_at: Option<OffsetDateTime>,
+    pub last_login_at: Option<OffsetDateTime>,
 }
 
 #[derive(Clone)]
@@ -286,6 +290,14 @@ struct PersistedIdentityUser {
     last_issued_at: Option<OffsetDateTime>,
     token_count: u64,
     last_token_fingerprint: Option<String>,
+    #[serde(default)]
+    tokens: Vec<PersistedIdentityToken>,
+    #[serde(default)]
+    password_hash: Option<String>,
+    #[serde(default, with = "option_rfc3339")]
+    password_updated_at: Option<OffsetDateTime>,
+    #[serde(default, with = "option_rfc3339")]
+    last_login_at: Option<OffsetDateTime>,
 }
 
 impl From<IdentityUserRecord> for PersistedIdentityUser {
@@ -298,6 +310,14 @@ impl From<IdentityUserRecord> for PersistedIdentityUser {
             last_issued_at: record.last_issued_at,
             token_count: record.token_count,
             last_token_fingerprint: record.last_token_fingerprint,
+            tokens: record
+                .tokens
+                .into_iter()
+                .map(PersistedIdentityToken::from)
+                .collect(),
+            password_hash: record.password_hash,
+            password_updated_at: record.password_updated_at,
+            last_login_at: record.last_login_at,
         }
     }
 }
@@ -314,6 +334,60 @@ impl TryFrom<PersistedIdentityUser> for IdentityUserRecord {
             last_issued_at: value.last_issued_at,
             token_count: value.token_count,
             last_token_fingerprint: value.last_token_fingerprint,
+            tokens: value
+                .tokens
+                .into_iter()
+                .map(IdentityTokenRecord::try_from)
+                .collect::<Result<_, _>>()?,
+            password_hash: value.password_hash,
+            password_updated_at: value.password_updated_at,
+            last_login_at: value.last_login_at,
+        })
+    }
+}
+
+#[derive(Clone)]
+pub struct IdentityTokenRecord {
+    pub token_id: String,
+    pub fingerprint: String,
+    pub issued_at: OffsetDateTime,
+    pub expires_at: OffsetDateTime,
+    pub key_id: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PersistedIdentityToken {
+    token_id: String,
+    fingerprint: String,
+    #[serde(with = "time::serde::rfc3339")]
+    issued_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    expires_at: OffsetDateTime,
+    key_id: String,
+}
+
+impl From<IdentityTokenRecord> for PersistedIdentityToken {
+    fn from(record: IdentityTokenRecord) -> Self {
+        Self {
+            token_id: record.token_id,
+            fingerprint: record.fingerprint,
+            issued_at: record.issued_at,
+            expires_at: record.expires_at,
+            key_id: record.key_id,
+        }
+    }
+}
+
+impl TryFrom<PersistedIdentityToken> for IdentityTokenRecord {
+    type Error = IdentityError;
+
+    fn try_from(value: PersistedIdentityToken) -> Result<Self, Self::Error> {
+        Ok(Self {
+            token_id: value.token_id,
+            fingerprint: value.fingerprint,
+            issued_at: value.issued_at,
+            expires_at: value.expires_at,
+            key_id: value.key_id,
         })
     }
 }

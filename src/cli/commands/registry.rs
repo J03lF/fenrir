@@ -1,3 +1,4 @@
+use crate::audit::AuditActor;
 use crate::config::AppConfig;
 use crate::services::AppServices;
 use std::collections::BTreeMap;
@@ -259,6 +260,7 @@ pub struct CliDependencies {
     pub config: Arc<AppConfig>,
     pub services: Arc<AppServices>,
     output: Option<Arc<dyn CommandOutput>>,
+    session_actor: Option<AuditActor>,
 }
 
 impl CliDependencies {
@@ -267,6 +269,7 @@ impl CliDependencies {
             config,
             services,
             output: None,
+            session_actor: None,
         }
     }
 
@@ -275,10 +278,24 @@ impl CliDependencies {
             config: Arc::clone(&self.config),
             services: Arc::clone(&self.services),
             output: Some(output),
+            session_actor: self.session_actor.clone(),
+        }
+    }
+
+    pub fn with_actor(&self, actor: AuditActor) -> Self {
+        Self {
+            config: Arc::clone(&self.config),
+            services: Arc::clone(&self.services),
+            output: self.output.clone(),
+            session_actor: Some(actor),
         }
     }
 
     pub fn output(&self) -> Option<Arc<dyn CommandOutput>> {
         self.output.clone()
+    }
+
+    pub fn session_actor(&self) -> Option<&AuditActor> {
+        self.session_actor.as_ref()
     }
 }

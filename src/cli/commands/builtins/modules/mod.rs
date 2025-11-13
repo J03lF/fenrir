@@ -501,7 +501,7 @@ impl<'a> ModulesCommandCtx<'a> {
 
         let target = module.as_str().to_string();
         let event = AuditEvent::builder()
-            .actor(module_cli_actor())
+            .actor(module_cli_actor(self.deps.session_actor()))
             .action(action)
             .target(target)
             .outcome(outcome)
@@ -637,9 +637,6 @@ fn handle_list(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> i
                 .collect(),
             Err(_) => HashMap::new(),
         };
-
-    writeln!(out, "Installierte Module (mit Runtime-Status)")?;
-    writeln!(out, "==========================================")?;
 
     let mut table = Table::new(vec![
         "Modul".to_string(),
@@ -1508,7 +1505,10 @@ fn runtime_error_message(err: &ModuleRuntimeError) -> String {
     }
 }
 
-fn module_cli_actor() -> AuditActor {
+fn module_cli_actor(actor: Option<&AuditActor>) -> AuditActor {
+    if let Some(actor) = actor {
+        return actor.clone();
+    }
     AuditActor::User {
         user_id: format!("cli::{}", whoami::username()),
         role: "operator".to_string(),
@@ -1529,6 +1529,7 @@ fn spawn_install_job(
     let output = Arc::clone(&output);
     let service = ctx.service();
     let services = Arc::clone(&ctx.deps.services);
+    let session_actor = ctx.deps.session_actor().cloned();
     let module_label = module_id.to_string();
     let (tx, rx) = mpsc::channel::<Vec<String>>();
     let done = Arc::new(AtomicBool::new(false));
@@ -1537,7 +1538,15 @@ fn spawn_install_job(
     thread::spawn(move || progress_loop(rx, progress_output, module_label, progress_done));
 
     thread::spawn(move || {
-        run_install_worker(service, services, module_id, version, tx, done);
+        run_install_worker(
+            service,
+            services,
+            module_id,
+            version,
+            tx,
+            done,
+            session_actor,
+        );
     });
     Ok(())
 }
@@ -1549,6 +1558,7 @@ fn run_install_worker(
     version: Option<ModuleVersion>,
     tx: mpsc::Sender<Vec<String>>,
     done: Arc<AtomicBool>,
+    session_actor: Option<AuditActor>,
 ) {
     let module_id_for_call = module_id.clone();
     let version_for_call = version.clone();
@@ -1579,7 +1589,7 @@ fn run_install_worker(
                 .insert("status", status_message)
                 .insert("path", result.path.clone());
             let event = AuditEvent::builder()
-                .actor(module_cli_actor())
+                .actor(module_cli_actor(session_actor.as_ref()))
                 .action("module::install")
                 .target(module_id.to_string())
                 .outcome(AuditOutcome::Success)
@@ -1603,7 +1613,7 @@ fn run_install_worker(
                 .insert("error_code", module_error_code(err))
                 .insert("error", err.to_string());
             let event = AuditEvent::builder()
-                .actor(module_cli_actor())
+                .actor(module_cli_actor(session_actor.as_ref()))
                 .action("module::install")
                 .target(module_id.to_string())
                 .outcome(AuditOutcome::Failure)

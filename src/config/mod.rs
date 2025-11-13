@@ -166,6 +166,28 @@ pub struct IdentityExternalSection {
     pub jwks_refresh_seconds: u64,
     #[serde(default = "default_identity_audience")]
     pub audience: String,
+    #[serde(default)]
+    pub tls: IdentityExternalTlsSection,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct IdentityExternalTlsSection {
+    #[serde(default)]
+    pub ca_cert_path: Option<String>,
+    #[serde(default)]
+    pub client_cert_path: Option<String>,
+    #[serde(default)]
+    pub client_key_path: Option<String>,
+    #[serde(default)]
+    pub accept_invalid_certs: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct IdentityExternalTlsResolved {
+    pub ca_cert_path: Option<String>,
+    pub client_cert_path: Option<String>,
+    pub client_key_path: Option<String>,
+    pub accept_invalid_certs: bool,
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -618,10 +640,19 @@ impl IdentitySection {
                         "security.identity.external.base_url must not be empty",
                     ));
                 }
+                let env_lower = self.environment.trim().to_ascii_lowercase();
+                validate_identity_tls(&self.external.tls, env_lower.as_str())?;
                 if let Some(jwks) = &self.external.jwks_url {
                     if jwks.trim().is_empty() {
                         return Err(ConfigError::Invalid(
                             "security.identity.external.jwks_url must not be empty when set",
+                        ));
+                    }
+                    if matches!(env_lower.as_str(), "prod" | "production")
+                        && !jwks.trim().to_ascii_lowercase().starts_with("https://")
+                    {
+                        return Err(ConfigError::Invalid(
+                            "security.identity.external.jwks_url must use https:// in production",
                         ));
                     }
                 }
@@ -634,6 +665,25 @@ impl IdentitySection {
                     return Err(ConfigError::Invalid(
                         "security.identity.external.audience must not be empty",
                     ));
+                }
+                if matches!(env_lower.as_str(), "prod" | "production") {
+                    if !base.trim().to_ascii_lowercase().starts_with("https://") {
+                        return Err(ConfigError::Invalid(
+                            "security.identity.external.base_url must use https:// in production",
+                        ));
+                    }
+                    if self
+                        .external
+                        .auth_token
+                        .as_ref()
+                        .map(|s| s.trim())
+                        .filter(|s| !s.is_empty())
+                        .is_none()
+                    {
+                        return Err(ConfigError::Invalid(
+                            "security.identity.external.auth_token must be configured in production",
+                        ));
+                    }
                 }
             }
         }
@@ -656,6 +706,30 @@ impl IdentitySection {
             &self.external.auth_token,
             "security.identity.external.auth_token",
         )
+    }
+
+    pub fn resolve_external_tls(&self) -> Result<IdentityExternalTlsResolved, ConfigError> {
+        self.external.resolve_tls()
+    }
+}
+
+impl IdentityExternalSection {
+    pub fn resolve_tls(&self) -> Result<IdentityExternalTlsResolved, ConfigError> {
+        Ok(IdentityExternalTlsResolved {
+            ca_cert_path: resolve_optional_secret(
+                &self.tls.ca_cert_path,
+                "security.identity.external.tls.ca_cert_path",
+            )?,
+            client_cert_path: resolve_optional_secret(
+                &self.tls.client_cert_path,
+                "security.identity.external.tls.client_cert_path",
+            )?,
+            client_key_path: resolve_optional_secret(
+                &self.tls.client_key_path,
+                "security.identity.external.tls.client_key_path",
+            )?,
+            accept_invalid_certs: self.tls.accept_invalid_certs,
+        })
     }
 }
 
@@ -980,7 +1054,7 @@ fn local_override_path() -> Option<PathBuf> {
 
 pub fn load() -> Result<AppConfig, ConfigError> {
     let mut builder =
-        config::Config::builder().add_source(config::File::from(Path::new("config/default.toml")));
+        config::Config::builder().add_source(config::File::from(Path::new("config/prod.toml")));
 
     if let Some(profile) = detect_config_profile()? {
         let profile_path = Path::new("config").join(format!("{}.toml", profile));
@@ -1262,6 +1336,46 @@ fn validate_ssh_tls(ssh: &SshConfig) -> Result<(), ConfigError> {
             "server.ssh.tls.allowed_ciphers darf keine leeren Einträge enthalten",
         ));
     }
+    Ok(())
+}
+
+fn validate_identity_tls(
+    tls: &IdentityExternalTlsSection,
+    environment: &str,
+) -> Result<(), ConfigError> {
+    if let Some(ca) = tls.ca_cert_path.as_ref() {
+        if ca.trim().is_empty() {
+            return Err(ConfigError::Invalid(
+                "security.identity.external.tls.ca_cert_path must not be empty when set",
+            ));
+        }
+    }
+
+    match (
+        tls.client_cert_path.as_ref().map(|s| s.trim()),
+        tls.client_key_path.as_ref().map(|s| s.trim()),
+    ) {
+        (Some(cert), Some(key)) => {
+            if cert.is_empty() || key.is_empty() {
+                return Err(ConfigError::Invalid(
+                    "security.identity.external.tls.client_cert_path and client_key_path must not be empty",
+                ));
+            }
+        }
+        (None, None) => {}
+        _ => {
+            return Err(ConfigError::Invalid(
+                "security.identity.external.tls.client_cert_path and client_key_path must be provided together",
+            ));
+        }
+    }
+
+    if matches!(environment, "prod" | "production") && tls.accept_invalid_certs {
+        return Err(ConfigError::Invalid(
+            "security.identity.external.tls.accept_invalid_certs must be false in production",
+        ));
+    }
+
     Ok(())
 }
 

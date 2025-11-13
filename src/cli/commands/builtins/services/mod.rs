@@ -574,7 +574,7 @@ fn record_cli_service_action(
     force: bool,
     result: &Result<ServiceControlOutcome, ServiceControlError>,
 ) {
-    let actor = cli_actor();
+    let actor = cli_actor(deps);
     let mut metadata = base_metadata(action, force);
     let outcome = match result {
         Ok(control) => {
@@ -599,7 +599,7 @@ fn record_cli_bulk_action(
     failure_count: usize,
     failures: Vec<(String, String)>,
 ) {
-    let actor = cli_actor();
+    let actor = cli_actor(deps);
     let mut metadata = base_metadata(action, force)
         .insert("mode", "bulk")
         .insert("success", success.to_string())
@@ -619,7 +619,10 @@ fn record_cli_bulk_action(
     push_audit_event(deps, actor, action, "--all", outcome, metadata);
 }
 
-fn cli_actor() -> AuditActor {
+fn cli_actor(deps: &CliDependencies) -> AuditActor {
+    if let Some(actor) = deps.session_actor() {
+        return actor.clone();
+    }
     AuditActor::User {
         user_id: format!("cli::{}", whoami::username()),
         role: "operator".to_string(),

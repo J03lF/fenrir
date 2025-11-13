@@ -10,6 +10,7 @@ use thrussh::server::{Auth, Handle as SessionHandle, Server, Session};
 use thrussh::{server, ChannelId, CryptoVec};
 use tokio::runtime::Handle as TokioHandle;
 
+use crate::audit::AuditActor;
 use crate::cli::commands::builtins;
 use crate::cli::commands::builtins::db_shell::{self, RuntimeExecutor};
 use crate::cli::commands::registry::{
@@ -17,20 +18,30 @@ use crate::cli::commands::registry::{
     ShellEnvironment,
 };
 use crate::cli::completion::{self, ContextualCompleter};
-use crate::config::AppConfig;
+use crate::config::{AppConfig, IdentityProviderKind};
 use crate::prompts::{self, PromptContext};
+use crate::security::auth::Role;
+use crate::security::identity::{IdentityError, IdentityUserProfile};
 use crate::services::db_shell::DbShellSession;
 use crate::services::{AppServices, ServiceStatus};
+use semver::Version;
+use tracing::warn;
 
 const HISTORY_MAX: usize = 200;
 const COMPLETION_DISPLAY_WIDTH: usize = 80;
 const COMPLETION_PADDING: usize = 2;
 const COMPLETION_MAX_VISIBLE: usize = 24;
+const SSH_TRANSPORT: &str = "ssh";
+const SSH_DEFAULT_ROLE: &str = "ssh";
+const SSH_PASSWORD_ENV: &str = "FENRIR_SSH_PASSWORD";
 
 #[derive(Clone)]
 struct Handler {
     username: String,
-    password_env: String,
+    password_env: Option<String>,
+    identity_required: bool,
+    identity_profile: Option<IdentityUserProfile>,
+    role_label: String,
     buffer: String,
     main_prompt: String,
     db_prompt: String,
@@ -79,8 +90,22 @@ impl server::Handler for Handler {
         futures::future::ready(Ok((self, session, b)))
     }
 
-    fn auth_password(self, user: &str, password: &str) -> Self::FutureAuth {
-        let env_pw = std::env::var(&self.password_env).unwrap_or_default();
+    fn auth_password(mut self, user: &str, password: &str) -> Self::FutureAuth {
+        if self.identity_required {
+            match self.authenticate_identity(user, password) {
+                Ok(()) => return self.finished_auth(Auth::Accept),
+                Err(err) => {
+                    warn!(ssh_user = %user, error = %err, "identity authentication rejected");
+                    return self.finished_auth(Auth::Reject);
+                }
+            }
+        }
+
+        let env_pw = self
+            .password_env
+            .as_ref()
+            .and_then(|key| std::env::var(key).ok())
+            .unwrap_or_default();
         if user == self.username && !env_pw.is_empty() && password == env_pw {
             self.finished_auth(Auth::Accept)
         } else {
@@ -198,6 +223,54 @@ impl server::Handler for Handler {
 }
 
 impl Handler {
+    fn refresh_prompts(&mut self) {
+        let prompt_ctx = PromptContext {
+            user: self.username.clone(),
+            host: self.config.server.ssh.server_name.clone(),
+            role: self.role_label.clone(),
+            transport: SSH_TRANSPORT.to_string(),
+        };
+        let prompts = prompts::prompt_set(self.config.as_ref(), &prompt_ctx);
+        self.main_prompt = prompts.main_transport;
+        self.db_prompt = prompts.db_transport;
+    }
+
+    fn set_identity_context(&mut self, profile: IdentityUserProfile) {
+        let display = profile
+            .display_name
+            .clone()
+            .filter(|label| !label.trim().is_empty())
+            .unwrap_or_else(|| profile.user_id.clone());
+        self.username = display;
+        self.role_label = profile.role.as_str().to_string();
+        self.identity_profile = Some(profile.clone());
+        let actor = AuditActor::User {
+            user_id: profile.user_id.clone(),
+            role: profile.role.as_str().to_string(),
+        };
+        self.dependencies = self.dependencies.with_actor(actor);
+        self.refresh_prompts();
+    }
+
+    fn authenticate_identity(&mut self, user: &str, password: &str) -> Result<(), IdentityError> {
+        let identity = self
+            .services
+            .identity()
+            .ok_or_else(|| IdentityError::Invalid("identity provider not available".into()))?;
+        let profile = if TokioHandle::try_current().is_ok() {
+            tokio::task::block_in_place(|| identity.authenticate_user(user, password))?
+        } else {
+            identity.authenticate_user(user, password)?
+        };
+        if !matches!(profile.role, Role::Admin) {
+            return Err(IdentityError::Unauthorized(
+                "insufficient role for SSH access".into(),
+            ));
+        }
+        self.set_identity_context(profile);
+        Ok(())
+    }
+
     fn process_buffer(&mut self, channel: ChannelId, session: &mut Session) -> bool {
         let cmd = self.buffer.trim().to_string();
         self.buffer.clear();
@@ -729,20 +802,14 @@ pub async fn start(cfg: &Arc<AppConfig>, services: &Arc<AppServices>) -> Result<
 
     struct Factory {
         username: String,
-        password_env: String,
+        password_env: Option<String>,
+        identity_required: bool,
         config: Arc<AppConfig>,
         services: Arc<AppServices>,
     }
     impl Server for Factory {
         type Handler = Handler;
         fn new(&mut self, _peer_addr: Option<std::net::SocketAddr>) -> Self::Handler {
-            let prompt_ctx = PromptContext {
-                user: self.username.clone(),
-                host: self.config.server.ssh.server_name.clone(),
-                role: "ssh".to_string(),
-                transport: "ssh".to_string(),
-            };
-            let prompts = prompts::prompt_set(self.config.as_ref(), &prompt_ctx);
             let services = Arc::clone(&self.services);
             let config = Arc::clone(&self.config);
             let dependencies =
@@ -754,12 +821,15 @@ pub async fn start(cfg: &Arc<AppConfig>, services: &Arc<AppServices>) -> Result<
                 ShellEnvironment::Ssh,
             );
             completer.update_catalog(registry.shapes());
-            Handler {
+            let mut handler = Handler {
                 username: self.username.clone(),
                 password_env: self.password_env.clone(),
+                identity_required: self.identity_required,
+                identity_profile: None,
+                role_label: SSH_DEFAULT_ROLE.to_string(),
                 buffer: String::new(),
-                main_prompt: prompts.main_transport,
-                db_prompt: prompts.db_transport,
+                main_prompt: String::new(),
+                db_prompt: String::new(),
                 skip_next_lf: false,
                 escape_state: EscapeState::None,
                 config,
@@ -773,7 +843,9 @@ pub async fn start(cfg: &Arc<AppConfig>, services: &Arc<AppServices>) -> Result<
                 db_session: None,
                 db_executor: None,
                 cursor: 0,
-            }
+            };
+            handler.refresh_prompts();
+            handler
         }
     }
 
@@ -785,9 +857,15 @@ pub async fn start(cfg: &Arc<AppConfig>, services: &Arc<AppServices>) -> Result<
         Some(format!("Lauscht auf {bind_addr}")),
     );
 
+    let identity_required = should_enforce_identity(cfg.as_ref());
     let server = Factory {
         username: cfg.server.ssh.user.clone(),
-        password_env: "FENRIR_SSH_PASSWORD".to_string(),
+        password_env: if identity_required {
+            None
+        } else {
+            Some(SSH_PASSWORD_ENV.to_string())
+        },
+        identity_required,
         config: Arc::clone(cfg),
         services: Arc::clone(services),
     };
@@ -808,6 +886,21 @@ pub async fn start(cfg: &Arc<AppConfig>, services: &Arc<AppServices>) -> Result<
             );
             Err(err.into())
         }
+    }
+}
+
+fn should_enforce_identity(cfg: &AppConfig) -> bool {
+    if cfg.security.identity.provider != IdentityProviderKind::External {
+        return false;
+    }
+    let environment = cfg.security.identity.environment.to_ascii_lowercase();
+    let is_prod_env = matches!(environment.as_str(), "prod" | "production");
+    if !is_prod_env {
+        return false;
+    }
+    match Version::parse(&cfg.app.version) {
+        Ok(version) => version >= Version::new(1, 0, 0),
+        Err(_) => false,
     }
 }
 

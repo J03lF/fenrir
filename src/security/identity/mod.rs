@@ -1,6 +1,7 @@
 mod external;
 mod store;
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -14,18 +15,23 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::audit::{AuditActor, AuditEvent, AuditMetadata};
-use crate::config::{AppConfig, IdentityProviderKind};
+use crate::config::{AppConfig, IdentityExternalTlsResolved, IdentityProviderKind};
 use crate::security::auth::{AuthError, Role};
 use crate::security::manager::AuditSink;
-use reqwest::Url;
+use external::{ExternalIdentityProvider, ExternalIdentityTlsOptions};
+use reqwest::{Certificate, Identity, Url};
 
-use external::ExternalIdentityProvider;
-pub use store::{IdentityKeyMaterial, IdentityStore, IdentityUserRecord};
+pub use store::{IdentityKeyMaterial, IdentityStore, IdentityTokenRecord, IdentityUserRecord};
 
 pub trait IdentityProvider: Send + Sync {
     fn issue_token(&self, request: IssueTokenRequest) -> Result<IssuedToken, IdentityError>;
     fn list_users(&self) -> Result<Vec<IdentityUserRecord>, IdentityError>;
     fn verify(&self, token: &str) -> Result<IdentityClaims, IdentityError>;
+    fn authenticate_user(
+        &self,
+        user_id: &str,
+        password: &str,
+    ) -> Result<IdentityUserProfile, IdentityError>;
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -62,6 +68,8 @@ pub struct IdentityAuthority {
     audit: Arc<dyn AuditSink>,
 }
 
+const MAX_TOKENS_PER_USER: usize = 20;
+
 #[derive(Clone)]
 pub struct IssueTokenRequest {
     pub actor: AuditActor,
@@ -73,6 +81,7 @@ pub struct IssueTokenRequest {
 #[derive(Clone, Debug)]
 pub struct IssuedToken {
     pub token: String,
+    pub issued_at: OffsetDateTime,
     pub expires_at: OffsetDateTime,
     pub user_id: String,
     pub key_id: String,
@@ -91,6 +100,15 @@ pub struct IdentityClaims {
     pub expires_at: OffsetDateTime,
     pub key_id: String,
     pub token_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct IdentityUserProfile {
+    pub user_id: String,
+    pub display_name: Option<String>,
+    pub role: Role,
+    pub password_updated_at: Option<OffsetDateTime>,
+    pub last_login_at: Option<OffsetDateTime>,
 }
 
 impl IdentityAuthority {
@@ -150,6 +168,10 @@ impl IdentityAuthority {
                     last_issued_at: None,
                     token_count: 0,
                     last_token_fingerprint: None,
+                    tokens: Vec::new(),
+                    password_hash: None,
+                    password_updated_at: None,
+                    last_login_at: None,
                 });
             record.role = role.clone();
             if let Some(name) = display_name
@@ -178,8 +200,22 @@ impl IdentityAuthority {
             let token = encode_jwt(&key, &claims)?;
             let fingerprint = fingerprint_token(&token);
             record.last_token_fingerprint = Some(fingerprint.clone());
+            record.tokens.insert(
+                0,
+                IdentityTokenRecord {
+                    token_id: token_id.clone(),
+                    fingerprint: fingerprint.clone(),
+                    issued_at: now,
+                    expires_at,
+                    key_id: key.key_id.clone(),
+                },
+            );
+            if record.tokens.len() > MAX_TOKENS_PER_USER {
+                record.tokens.truncate(MAX_TOKENS_PER_USER);
+            }
             Ok::<_, IdentityError>(IssuedToken {
                 token,
+                issued_at: now,
                 expires_at,
                 user_id: user_id.clone(),
                 key_id: key.key_id.clone(),
@@ -256,8 +292,17 @@ impl IdentityAuthority {
     }
 
     pub fn list_users(&self) -> Result<Vec<IdentityUserRecord>, IdentityError> {
-        self.store
-            .read(|state| state.users.values().cloned().collect())
+        self.store.read(|state| {
+            state
+                .users
+                .values()
+                .cloned()
+                .map(|mut record| {
+                    record.password_hash = None;
+                    record
+                })
+                .collect()
+        })
     }
 
     pub fn current_key(&self) -> Result<IdentityKeyMaterial, IdentityError> {
@@ -275,6 +320,7 @@ impl IdentityAuthority {
             .insert("instance", self.instance_id.clone())
             .insert("key_id", issued.key_id.clone())
             .insert("fingerprint", issued.fingerprint.clone())
+            .insert("issued_at", issued.issued_at.to_string())
             .insert("expires_at", issued.expires_at.to_string())
             .insert("token_id", issued.token_id.clone());
         let metadata = metadata.insert(
@@ -335,6 +381,10 @@ pub fn build_identity_provider(
             let auth_token = identity_cfg
                 .resolve_external_auth_token()
                 .map_err(|err| IdentityError::Invalid(format!("{err}")))?;
+            let tls_resolved = identity_cfg
+                .resolve_external_tls()
+                .map_err(|err| IdentityError::Invalid(format!("{err}")))?;
+            let tls_options = build_identity_tls_options(&tls_resolved)?;
             let provider = ExternalIdentityProvider::new(
                 base_url,
                 jwks_url,
@@ -344,11 +394,74 @@ pub fn build_identity_provider(
                 identity_cfg.external.audience.clone(),
                 cfg.app.version.clone(),
                 identity_cfg.external.jwks_refresh_seconds,
+                tls_options,
                 audit,
             )?;
             Ok(Arc::new(provider))
         }
     }
+}
+
+fn build_identity_tls_options(
+    tls: &IdentityExternalTlsResolved,
+) -> Result<ExternalIdentityTlsOptions, IdentityError> {
+    let mut options = ExternalIdentityTlsOptions::default();
+
+    if let Some(ca_path) = &tls.ca_cert_path {
+        let pem = fs::read(ca_path).map_err(|err| {
+            IdentityError::Invalid(format!(
+                "failed to read identity TLS CA certificate '{}': {err}",
+                ca_path
+            ))
+        })?;
+        let cert = Certificate::from_pem(&pem).map_err(|err| {
+            IdentityError::Invalid(format!(
+                "identity TLS CA certificate is not valid PEM: {err}"
+            ))
+        })?;
+        options.set_ca_certificate(cert);
+    }
+
+    match (&tls.client_cert_path, &tls.client_key_path) {
+        (Some(cert_path), Some(key_path)) => {
+            let cert_pem = fs::read(cert_path).map_err(|err| {
+                IdentityError::Invalid(format!(
+                    "failed to read identity client certificate '{}': {err}",
+                    cert_path
+                ))
+            })?;
+            let key_pem = fs::read(key_path).map_err(|err| {
+                IdentityError::Invalid(format!(
+                    "failed to read identity client key '{}': {err}",
+                    key_path
+                ))
+            })?;
+            let mut identity_pem = Vec::with_capacity(cert_pem.len() + key_pem.len() + 1);
+            identity_pem.extend_from_slice(&cert_pem);
+            if !identity_pem.ends_with(b"\n") {
+                identity_pem.push(b'\n');
+            }
+            identity_pem.extend_from_slice(&key_pem);
+            let identity = Identity::from_pem(&identity_pem).map_err(|err| {
+                IdentityError::Invalid(format!(
+                    "identity client certificate/key is not valid PEM: {err}"
+                ))
+            })?;
+            options.set_client_identity(identity);
+        }
+        (None, None) => {}
+        _ => {
+            return Err(IdentityError::Invalid(
+                "identity client certificate configuration is incomplete".into(),
+            ))
+        }
+    }
+
+    if tls.accept_invalid_certs {
+        options.set_accept_invalid_certs(true);
+    }
+
+    Ok(options)
 }
 
 impl IdentityProvider for IdentityAuthority {
@@ -362,6 +475,16 @@ impl IdentityProvider for IdentityAuthority {
 
     fn verify(&self, token: &str) -> Result<IdentityClaims, IdentityError> {
         IdentityAuthority::verify(self, token)
+    }
+
+    fn authenticate_user(
+        &self,
+        _user_id: &str,
+        _password: &str,
+    ) -> Result<IdentityUserProfile, IdentityError> {
+        Err(IdentityError::Unauthorized(
+            "password authentication not supported for embedded identity provider".into(),
+        ))
     }
 }
 

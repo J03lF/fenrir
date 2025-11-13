@@ -75,6 +75,8 @@ src/
 - Sitzungen (`SessionStore`) werden zentral verwaltet; Services erhalten nur geprüfte Sessions/Rollen via `ensure_role` oder `validate_session`.
 - Audit-Events (RBAC, Session, Control-Plane) laufen über `AuditSink`; fehlgeschlagene Writes werden geloggt, aber dürfen keine Panics auslösen.
 - HTTP-Control-Plane Tokens kommen aus `security.http.control_tokens` und müssen Rollen-Prefix `admin|operator|viewer` besitzen.
+- Produktions-SSH (`security.identity.provider = external`, `security.identity.environment = prod`, `app.version >= 1.0.0`) authentifiziert ausschließlich via Identity-Broker `POST /sessions/login`; `FENRIR_SSH_PASSWORD` wird ignoriert. Nur Identity-Admins dürfen sich anmelden, CLI-Audits übernehmen danach den Identity-Actor. Passwort-Setups laufen über den Identity-Service (`POST /users/password`) und werden Argon2-gehasht + auditiert.
+- Produktions-Identity-Verkehr läuft über einen vorgelagerten TLS-Proxy/Load Balancer; `security.identity.external.tls.ca_cert_path` (optional `client_cert_path`+`client_key_path` für mTLS) müssen gültige PEM-Pfade referenzieren, `accept_invalid_certs` ist in prod verboten.
 
 # Konfiguration (fail-fast)
 - Quellen: `config/default.toml` → profile (`config/<env>.toml`, via `FENRIR_CONFIG_ENV`/`FENRIR_ENV`) → `config/local.toml` → `FENRIR_CONFIG_FILE` (explizit) → ENV Overrides `FENRIR__...`.
@@ -83,6 +85,8 @@ src/
   - `app.name`, `app.version`.
   - `server.enable_http|enable_grpc`, `server.ssh`, `server.http`, optional `server.grpc` (inkl. TLS-Subsektionen).
   - `security.kdf` (Algorithmus, Versionierung, Argon2-Parameter), `security.allowed_ciphers`, `security.jwt`, `security.session`, `security.http.control_tokens` (ENV-Resolver).
+  - In `prod`-Umgebungen mit `identity.external` müssen `base_url`/`jwks_url` HTTPS nutzen und `auth_token` gesetzt sein; Verstöße führen zu `CFG-INVALID`.
+  - `security.identity.external.tls.ca_cert_path|client_cert_path|client_key_path` verweisen auf PEM-Dateien (oft via `env:`); `client_*` müssen gemeinsam gesetzt werden. `accept_invalid_certs` ist nur für lokale Tests erlaubt.
   - `db.default_engine ∈ {postgres, mysql, sqlite, mongodb}`, `db.connections.<engine>.uri`, optional `pool.max|timeout_ms`.
   - `telemetry.tracing.level`, `telemetry.metrics.enabled/exporter`, `telemetry.health.enabled`, `telemetry.system.enabled/interval_ms`.
   - `audit.enabled`, `audit.buffer_capacity`, `audit.storage.path|retention_hours|persist_interval_seconds`.

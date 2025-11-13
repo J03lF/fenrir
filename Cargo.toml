@@ -33,7 +33,7 @@ tokio-rustls = "0.24"
 rustls = "0.21"
 rustls-pemfile = "1.0"
 libc = "0.2"
-hyper-util = { version = "0.1", features = ["tokio"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 hyper = { version = "1.7", features = ["http1", "http2", "server"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 http-body-util = "0.1"

@@ -51,7 +51,7 @@ exp_seconds = 3600
 control_tokens = []
 
 [security.identity]
-provider = "embedded"
+provider = "external"
 environment = "development"
 instance_id = "local"
 
@@ -60,8 +60,8 @@ store_path = "runtime/identity/store.json"
 audience = "fenrir-control-plane"
 
 [security.identity.external]
-base_url = "https://identity.example.com"
-jwks_url = "https://identity.example.com/jwks.json"
+base_url = "http://127.0.0.1:8081"
+jwks_url = "http://127.0.0.1:8081/jwks.json"
 auth_token = "env:FENRIR_IDENTITY_TOKEN"
 jwks_refresh_seconds = 300
 audience = "fenrir-control-plane"

@@ -53,8 +53,10 @@ impl ControlPlaneAuthorizer {
     pub fn authorize_token(&self, bearer: Option<&str>) -> Result<Role, AuthError> {
         match &self.backend {
             ControlPlaneBackend::Identity(identity) => {
-                let token = bearer.ok_or(AuthError::Unauthorized)?.trim();
-                let claims = identity.verify(token).map_err(AuthError::from)?;
+                let token = bearer.ok_or(AuthError::Unauthorized)?.trim().to_owned();
+                let identity = Arc::clone(identity);
+                let claims = tokio::task::block_in_place(|| identity.verify(&token))
+                    .map_err(AuthError::from)?;
                 Ok(claims.role)
             }
             ControlPlaneBackend::Static(tokens) => {

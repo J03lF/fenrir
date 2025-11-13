@@ -17,3 +17,10 @@
 2025-11-13T07:04:06.233737Z  WARN ThreadId(51) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
 2025-11-13T07:04:06.236886Z  WARN ThreadId(67) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
 2025-11-13T07:04:22.539219Z  WARN ThreadId(117) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-11-13T09:33:32.129135Z  INFO tokio-runtime-worker ThreadId(08) thrussh::server::encrypted: pty-req: unknown pty code 42
+2025-11-13T09:33:54.620276Z  INFO tokio-runtime-worker ThreadId(05) fenrir::infra::http::server: HTTP server task spawned
+2025-11-13T09:36:59.352886Z  WARN ThreadId(221) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-11-13T09:37:02.929133Z  WARN ThreadId(252) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-11-13T09:37:03.183617Z  INFO ThreadId(269) fenrir::infra::modules::runtime::process: module process started module_id=fenrir-api pid=25264 port=None
+2025-11-13T09:37:03.186015Z  INFO ThreadId(269) fenrir::services::module: module started successfully module_id=fenrir-api pid=Some(25264) port=None
+2025-11-13T09:37:07.777548Z  WARN ThreadId(285) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"

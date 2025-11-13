@@ -3,6 +3,7 @@
 /target/
 /test/
 /benches/
+config/certs/
 ../target/
 target/
 /.idea/workspace.xml

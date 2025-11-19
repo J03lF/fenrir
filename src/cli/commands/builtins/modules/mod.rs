@@ -1054,6 +1054,7 @@ fn handle_update(
 
         // Show table with updates
         let mut table = Table::new(vec![
+            "Aktion".to_string(),
             "Modul".to_string(),
             "Aktuelle Version".to_string(),
             "Verfügbare Version".to_string(),
@@ -1061,14 +1062,22 @@ fn handle_update(
 
         let mut has_updates = false;
         for update in &updates {
-            let available_version = if update.has_update && update.compatible {
-                has_updates = true;
-                update.latest_version.to_string()
+            let (action, available_version) = if update.has_update {
+                if update.compatible {
+                    has_updates = true;
+                    ("Update".to_string(), update.latest_version.to_string())
+                } else {
+                    (
+                        "Skip (Inkompatibel)".to_string(),
+                        update.latest_version.to_string(),
+                    )
+                }
             } else {
-                String::new() // Leave empty if no update
+                ("Skip".to_string(), String::new())
             };
 
             table.add_row(vec![
+                action,
                 update.module_id.to_string(),
                 update.current_version.to_string(),
                 available_version,

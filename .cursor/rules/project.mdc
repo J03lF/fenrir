@@ -1,158 +1,113 @@
 ---
 description: "Projektregeln & Architekturleitplanken für Tickets-Backend (Rust-Monolith, SSH + CLI, Multi-DB, dynamische Commands, Verschlüsselung)."
 alwaysApply: true
-version: 1
+version: 2
 ---
 
 # Zielbild
-Ein modularer **Rust-Monolith** für ein Ticketsystem:
-- **Transports**: SSH (interaktive Shell), optional HTTP/gRPC.
-- **CLI**: Eigene Shell mit dynamisch registrierten Commands; `db`-Subshell mit Prompt `db:`.
-- **Multi-DB**: Postgres/MySQL/SQLite/Mongo per Adaptern, **keine** DB-Engine hart verdrahtet.
-- **Security First**: KDF/AEAD, RBAC, Sessions, Audit, keine Secrets im Code.
-- **Saubere Layer**: Domain → Services → Infra → (CLI/Transports). UI (Angular) getrennt.
+- Modularer **Rust-Monolith** mit klaren Layern und starker Security-Basis.
+- **Transports**: Pflicht-SSH mit eigener Shell; HTTP/gRPC optional per Feature/Config.
+- **CLI**: Dynamische Command-Registry, Subshell `db:` mit Guards für destruktive Befehle.
+- **Multi-DB**: Postgres/MySQL/SQLite/Mongo per Adaptern; Services bleiben engine-agnostisch.
+- **Security First**: KDF/AEAD, RBAC, Sessions, Audit; Secrets nur aus ENV/Secret-Store.
+- **Module-fähig**: Registry + Runtime + Trust-Gates (Signaturen); API-Module wie `fenrir-api` laufen extern.
 
-# Ordnerstruktur (Monolith / alles im Repo-Crate)
+# Ordnerstruktur (Monolith)
 src/
   main.rs
   lib.rs
   boot/            # Start/Init (Config, Logging, Registry, Transports)
-  config/          # TOML+ENV Lader, Schema, Validierung (fail-fast)
-  domain/          # Entities, Value Objects, Errors, Ports (traits). Kein IO!
-  services/        # Use-Cases (ticket/, user/). Nur Ports aus domain nutzen.
+  config/          # Loader, Schema, Validierung (fail-fast)
+  domain/          # Entities, Value Objects, Ports (Traits). Kein IO!
+  services/        # Use-Cases via Ports + SecurityManager; kein direkter DB-Zugriff
   security/
-    crypto/        # AEAD, RNG, KDF/Hash, Key-Handling
-    auth/          # Login, RBAC, Passwort-Policy, Lockouts
-  session/         # Session-Modelle, TTL, Storage (in-memory, später persist.)
-  protocol/        # Frames/Messages, Wire-Contracts Server↔CLI
+    crypto/        # AEAD, RNG, KDF/Hash
+    auth/          # RBAC, Password-Policy
+    session/       # (via manager)
+  session/         # Session-Modelle/Store
   infra/
     db/
       adapters/    # postgres/, mysql/, sqlite/, mongodb/
-      migrations/  # helpers/runner
-    ssh/           # SSH-Server, PTY, Shell-Anbindung
+      migrations/  # engine-spezifische Migrationspfade/Runner
+    ssh/           # SSH-Server, PTY, Shell-Bindung
     http/          # optional: Router, DTOs, Controller
     grpc/          # optional
-    storage/       # FS/S3/MinIO
-    cache/         # Redis u.ä.
-    mq/            # NATS/Kafka/Rabbit
-    scheduler/     # Tasks/Timer
     logging/       # tracing setup
     telemetry/     # metrics, health, trace-export
-  audit/           # Append-only Audit-Events
+    modules/       # registry/runtime/storage/verifier
   cli/
-    shell/         # Prompt, Readline, Dispatcher, Registry
+    shell/         # Prompt, Dispatcher
     commands/
       builtins/    # help/, modules/, services/, user/, db-shell/, exit/
-      plugin_sdk/  # API/ABI für externe Commands
-    plugins_runtime/ # Loader, Signaturen, Allowlist
-  prompts/         # Prompt-Themes, Formatierer
-  utils/           # kleine Hilfen (ohne IO)
-  prelude/         # zentrale Re-Exports (optional)
+  audit/           # Append-only Audit-Events
+  prompts/         # Prompt-Themes
+  utils/, prelude/ # Hilfen/Re-Exports
 
 # Architekturrichtlinien (Do/Don't)
-- ✅ **Domain**: reine Logik, **keine** Abhängigkeit auf `infra`, `cli`, `http`, `ssh`.
-- ✅ **Services**: orchestrieren Domain-Use-Cases via Ports/Repos (Traits); **keine** direkten DB-Queries.
-- ✅ **Infra** implementiert Ports (z. B. Repo für Tickets), wählt Adapter per Config/Feature-Flags.
-- ✅ **CLI/Transports** sind nur dünne Schichten: Parsing/IO/DTO ↔ Services.
-- ❌ **Nie** Secrets, Keys, PII in Code/Repo/Logs. **Nur** ENV/Secret-Store.
-- ❌ **Nie** DB-spezifische Typen in Domain/Services leaken.
-- ❌ **Keine** globalen Singletons; Abhängigkeiten injizieren (Constructor/Builder).
+- ✅ Domain nur Traits/Value Objects/Logik; keine Abhängigkeiten auf Infra/CLI/Security.
+- ✅ Services injizieren Ports + SecurityManager; kein IO/DB direkt.
+- ✅ Infra implementiert Ports, wählt Adapter via Config/Feature-Flags.
+- ✅ CLI/Transports sind IO-only, mappen DTO ↔ Services; stabile Fehlercodes.
+- ❌ Keine Secrets/Keys/PII im Repo oder Logs. ❌ Keine DB-Typen in Domain/Services. ❌ Keine globalen Singletons.
 
 # Konfiguration (fail-fast)
-- **Quellen**: `config/*.toml` (default→env-spezifisch) + ENV + Flags (optional).
-- **Schema (Beispiele)**:
-  - `app.name`, `app.version`
-  - `server.ssh.host`, `server.ssh.port`, `server.http.host`, `server.http.port`, `server.enable_http`, `server.enable_grpc`
-  - `security.kdf` (algo, params), `security.jwt` (issuer, audience, exp), `security.allowed_ciphers`
-  - `db.default_engine` ∈ {postgres, mysql, sqlite, mongodb}
-  - `db.connections.<engine>.uri`, `pool.max`, `pool.timeout_ms`
-  - `telemetry.tracing.level`, `metrics.enabled`, `health.enabled`
-  - `audit.enabled`, `audit.storage.path`
-  - `cli.prompt.theme`, `cli.plugins.allowlist`
-- **Command**: `--check-config` validiert Schema und beendet mit passendem Exit-Code.
+- Quellen: default → profile (`FENRIR_CONFIG_ENV`/`FENRIR_ENV`) → local → `FENRIR_CONFIG_FILE` → ENV Overrides `FENRIR__...`.
+- Wichtige Felder: `app.*`, `server.enable_http|enable_grpc`, `server.ssh/http/grpc`, `security.kdf|allowed_ciphers|jwt|session|http.control_tokens|identity.*`, `db.default_engine`, `db.connections.<engine>.uri|pool.*`, `telemetry.*`, `audit.*`, `cli.prompt_theme`, `modules.registry|storage|runtime|bootstrap|trust`.
+- Prod-Gates: identity external nur HTTPS, `auth_token` Pflicht, TLS-Pfade valide, `accept_invalid_certs` verboten.
+- Command: `--check-config`/`-check-config` → CFG-* Codes.
 
-# Security-Standards
-- **KDF**: Konfigurierbar (z. B. Argon2id), Parameter aus Config, Upgrades via Versionierung.
-- **AEAD**: Authenticated Encryption (z. B. AES-GCM/XChaCha20-Poly1305); Keys nie loggen, rotieren über Provider.
-- **RBAC**: Rollen `admin`, `operator`, `viewer` (mindestens). Gate-Checks zentral.
-- **Sessions**: Signierte Tokens oder In-Memory-Session-IDs mit TTL/Refresh.
-- **Audit** (zwingend bei Auth/Policy/DB-Admin-Action): `{ts, actor, action, target, result, redactions}`.
-- **Logs**: Keine PII; Fehlerpfade mit stabilen Codes statt internen Details.
+# Security & Sessions
+- Immer über `SecurityManager` (KDF/AEAD/Passwörter/Sessions/RBAC/Audit); nie direkte Crypto-Primitives nutzen.
+- RBAC-Rollen mind. `admin|operator|viewer`; Audit von Allow/Deny.
+- Sessions zentral im Store; Services nutzen `ensure_role`/`validate_session`.
+- SSH in prod authentifiziert über Identity-Broker (FENRIR_SSH_PASSWORD ignorieren).
 
 # DB-Adapter & Migrations
-- **Trait**: Einheitliche Schnittstelle (connect, ping, query, tx).
-- **Adapter**: `infra/db/adapters/{postgres|mysql|sqlite|mongodb}`.
-- **Auswahl**: `db.default_engine` + optional Features für Binärgröße.
-- **Migrations**: Idempotent, versioniert; `migrations/<engine>/` + Runner-Command.
+- Ports: ping, simple_query, list_tables, describe_table.
+- Adapter unter `infra/db/adapters/<engine>`; Auswahl per Config.
+- Migrations idempotent unter `infra/db/migrations/<engine>/`; Runner mit Guards.
 
-# CLI & dynamische Commands
-- **Shell**: Login → Session → Prompt (konfigurierbar). Autocomplete/History optional.
-- **Registry**: Lädt Builtins aus `cli/commands/builtins/*` + signierte Plugins (Allowlist).
-- **db-shell**:
-  - Prompt `db:`; Standard-Connection laut Config.
-  - `\c <engine>`: Engine wechseln; `\d`-ähnliche Meta-Helfer (Schemas, Tables).
-  - **Guards**: Destruktive Operationen (DROP/DELETE/ALTER) nur mit Confirm/Policy.
-- **exit**: verlässt Subshell, zweites `exit` beendet Session.
+# CLI & Commands
+- Commands als Ordner unter `cli/commands/builtins/<name>/` mit `register()`.
+- db-shell: Prompt `db:`, `\c <engine>`, `\d`/Schema-Helfer, destruktive Befehle nur mit `--force`.
+- Keine Hardcodes in Registry; dynamische Command-Registration.
 
-# SSH/Transports
-- **SSH** (Pflicht): Host/Port/Keys aus Config; Auth via `security/auth`; PTY mit Shell gebunden.
-- **HTTP** (optional): Health/Metrics + minimal Ticket-/User-Endpoints.
-- **gRPC** (optional): Für starke Typisierung/Streaming.
+# Modules/Plugins
+- Registry + Runtime + Verifier (Signaturen). In prod `modules.trust.require_signature=true` + Allowlist/Keyring.
+- `modules.bootstrap` installiert Standardmodule (z. B. `fenrir-api`); offline_dirs werden vor HTTP abgefragt.
+- Modul-Katalog in `docs/modules_overview.md` pflegen, bei neuen Ports/Extension Points aktualisieren.
 
-# Fehler- & Result-Design
-- Einheitliche Fehler-Typen pro Layer, Mapping erst in Transporten (z. B. HTTP → Statuscode).
-- Nutze stabile **Fehlercodes** (Strings/Enums) statt freie Texte; logge Kette/Span-IDs.
-- Keine Panics in regulären Pfaden; `panic=abort` nur in Release erwägen, wenn sinnvoll.
+# Logging/Telemetry
+- Strukturiertes tracing, keine PII; stabile Codes.
+- Telemetry init erst nach Boot; Health `/live`/`/ready`; Metrics konfigurierbar.
 
-# Tracing, Metrics, Health
-- **Tracing**: Spans über kritische Pfade (Login, Query, Ticket-Create).
-- **Metrics**: Requests, Errors, Latency, Pool-Auslastung; Export konfigurierbar.
-- **Health**: `live`/`ready` Endpoints; Ready erst nach Boot-Fertig (DB/Keys/Registry).
-
-# Concurrency & Performance
-- Async (Tokio) auf IO-Pfaden; blockierende Arbeit in Threads/Task-Spawn.
-- Pool-Größen/Timeouts aus Config; Backpressure/Ratelimits wo nötig.
-- Zero-Copy & Streaming wo sinnvoll; vermeiden übermäßiger Allocations.
-
-# Code-Stil & Benennung
-- **Crate/Modul**: `kebab-case` / `snake_case`; **Types/Enums**: `PascalCase`; **Funktionen**: `snake_case`.
-- **Dateien**: Ein Typ oder eng verbundene Typen pro Datei; lange Dateien aufsplitten.
-- **Public API**: minimal, gezielt; `pub(crate)` wo möglich.
-- **Dokkommentare**: Für Public Types/Traits/Funcs mit kurzer Zweckbeschreibung.
+# Fehler-Design
+- Typisierte Fehler pro Layer; Mapping erst in Transports (HTTP/SSH/CLI).
+- Stabile Codes (CFG-*, BOOT-*, AUTH-*, DB-*); keine Panics in regulären Pfaden.
 
 # Tests & Qualität
-- **Unit-Tests**: Domain/Services (ohne IO, mit Mocks).
-- **Integration**: `tests/integration/` – Login, Tickets, db-shell, SSH.
-- **E2E**: `tests/e2e/` – realer Flow (SSH/CLI).
-- **Security**: Lockout, RBAC, No-PII-Logs, Audit-Vollständigkeit.
-- **Clippy**: `-D warnings`; **Fmt**: rustfmt stable.
-- **Benches**: Hot Paths (Parsing, KDF-Params, Query-Plan).
+- Unit: Domain/Security/Services ohne IO (Mocks).
+- Integration: `tests/integration/` (Config, Login, Modules, DB-Shell, SSH).
+- E2E: `tests/e2e/` (CLI/SSH).
+- Security-Tests: Lockout, RBAC, Audit-Vollständigkeit, Session-Expiry.
+- Gates: `cargo fmt`, `cargo clippy -D warnings`, `cargo test` (oder gezielt bei langen Läufen).
 
-# Vorlage für Cursor-Aufgaben (AI-Prompts)
-> Nutze diese Leitfragen bei Generierung/Refactorings:
-- **Layer Check**: Liegt der Code im richtigen Layer? Verwendet er nur erlaubte Abhängigkeiten?
-- **Config**: Werden Werte aus `config` bezogen, nicht hardcodiert?
-- **Security**: Werden sensible Daten vermieden/geschützt? Ist Audit erfasst?
-- **DB-Adapter**: Verwendet Service nur Ports? Werden Adapter korrekt implementiert?
-- **CLI-Command**: Liegt als eigener Ordner unter `cli/commands/builtins/<name>/` und registriert sich dynamisch?
-- **Fehlerbehandlung**: Liefert der Pfad klare Fehlercodes? Keine PII in Messages?
-- **Tests**: Hat der neue Code Unit-/Integration-Tests?
-
-# Aufgaben-Roadmap (Kurzfassung für AI)
-1. **Config** implementieren (TOML+ENV, Schema, `--check-config`).
-2. **Logging/Telemetry** einrichten (Tracing, Metrics, Health).
-3. **Security**: Crypto (AEAD/KDF), Auth+RBAC, Sessions, Audit.
-4. **DB**: Trait + Postgres-Adapter + Migrations-Runner (später weitere Adapter).
-5. **CLI**: Shell/Prompt/Registry, Builtins (`help`, `services`, `user`, `db-shell`, `exit`), Plugin-SDK/Loader.
-6. **SSH**: Server starten, PTY, Shell anbinden.
-7. **Services**: Ticket & User Use-Cases über Ports.
-8. **Tests**: Unit/Integration/E2E + Security-Checks.
-9. **Packaging/Deploy**: Docker/Systemd/K8s; Config/Secrets über ENV.
+# Roadmap (Kurzfassung)
+1. Config vollständig + fail-fast.
+2. Logging/Telemetry/Health.
+3. Security: KDF/AEAD, Auth/RBAC, Sessions, Audit.
+4. DB: Trait + Postgres-Adapter + Migrations-Runner; weitere Adapter.
+5. CLI: Shell/Registry/Builtins, db-shell Guards.
+6. SSH: Server/PTY/Pipeline.
+7. Module-Contract definieren (Ports/Lifecycle) für `fenrir-api` & Co.; `modules_overview` aktuell halten.
+8. Ticket/User Services via Ports (falls im Host benötigt); ansonsten Host-Ports für Module bereitstellen.
+9. Tests ausbauen (Unit/Integration/E2E, Security).
+10. Packaging/Deploy (Docker/Systemd/K8s), Secrets nur via ENV.
 
 # Qualitäts-Gates (Definition of Done)
-- Config validiert, Boot-Flow fail-fast.
-- Clippy/fmt grün; Tests (Unit/Integration) grün; E2E Smoke ok.
-- Keine Secrets/PII in Code/Logs.
-- DB-Adapter arbeitet über Traits; Services DB-agnostisch.
-- CLI-Builtins dynamisch gelistet; `db-shell` mit Guards.
-- SSH-Login läuft; Health/Metrics erreichbar.
+- Config validiert, Boot fail-fast; Telemetry/Logging aktiv.
+- Clippy/fmt/test grün; keine Secrets/PII.
+- DB-Adapter via Ports; Services DB-agnostisch.
+- CLI-Builtins dynamisch, db-shell mit Guards.
+- SSH-Login ok; Health/Metrics erreichbar.
+- Module Trust-Gates aktiv (prod); Modul-Katalog gepflegt.

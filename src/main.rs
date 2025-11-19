@@ -49,6 +49,12 @@ async fn main() {
         let cmd_name = cmd_args.remove(0);
 
         match registry.execute(cmd_name, &cmd_args, &deps, &mut out, env) {
+            Ok(fenrir::cli::commands::registry::CommandStatus::Executed(
+                fenrir::cli::commands::registry::CommandOutcome::AwaitConfirmation(_),
+            )) => {
+                eprintln!("Befehl '{cmd_name}' erfordert eine interaktive Bestätigung.");
+                std::process::exit(2);
+            }
             Ok(_) => std::process::exit(0),
             Err(e) => {
                 eprintln!("Command execution failed: {}", e);

@@ -44,7 +44,7 @@ fn handle_show(
             if tail.is_empty() {
                 writeln!(out, "Nutzung: show module <name[@version]>")?;
             } else {
-                modules::run_module_command(deps, "info", tail, out)?;
+                return modules::run_module_command(deps, "info", tail, out);
             }
         }
         other => {

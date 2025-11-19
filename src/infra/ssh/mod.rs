@@ -14,8 +14,8 @@ use crate::audit::AuditActor;
 use crate::cli::commands::builtins;
 use crate::cli::commands::builtins::db_shell::{self, RuntimeExecutor};
 use crate::cli::commands::registry::{
-    CliDependencies, CommandOutcome, CommandOutput, CommandRegistry, CommandStatus,
-    ShellEnvironment,
+    parse_confirmation_answer, CliDependencies, CommandOutcome, CommandOutput, CommandRegistry,
+    CommandStatus, ConfirmationRequest, ShellEnvironment,
 };
 use crate::cli::completion::{self, ContextualCompleter};
 use crate::config::{AppConfig, IdentityProviderKind};
@@ -35,7 +35,6 @@ const SSH_TRANSPORT: &str = "ssh";
 const SSH_DEFAULT_ROLE: &str = "ssh";
 const SSH_PASSWORD_ENV: &str = "FENRIR_SSH_PASSWORD";
 
-#[derive(Clone)]
 struct Handler {
     username: String,
     password_env: Option<String>,
@@ -58,6 +57,7 @@ struct Handler {
     db_session: Option<DbShellSession>,
     db_executor: Option<Arc<RuntimeExecutor>>,
     cursor: usize,
+    pending_confirmation: Option<ConfirmationRequest>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -137,6 +137,13 @@ impl server::Handler for Handler {
                     continue;
                 }
                 self.skip_next_lf = false;
+            }
+
+            if self.pending_confirmation.is_some() {
+                if !self.handle_confirmation_input(ch, channel, &mut session) {
+                    return self.finished(session);
+                }
+                continue;
             }
 
             match self.escape_state {
@@ -296,67 +303,8 @@ impl Handler {
                 .registry
                 .execute(name, &args, &deps, &mut writer, ShellEnvironment::Ssh)
             {
-                Ok(CommandStatus::Executed(CommandOutcome::Continue)) => {
-                    Handler::send_prompt(session, channel, self.current_prompt());
-                    true
-                }
-                Ok(CommandStatus::Executed(CommandOutcome::ExitShell)) => {
-                    session.close(channel);
-                    false
-                }
-                Ok(CommandStatus::Executed(CommandOutcome::EnterDbShell)) => {
-                    if !self.services.db_shell.is_enabled() {
-                        let _ = writeln!(
-                            &mut writer,
-                            "DB-Shell ist deaktiviert. Nutze 'start service db-shell'."
-                        );
-                        Handler::send_prompt(session, channel, self.current_prompt());
-                        return true;
-                    }
-                    self.mode = ShellMode::DbShell;
-                    self.buffer.clear();
-                    self.history_index = None;
-                    self.cursor = 0;
-                    let db_session = self.services.db_shell.create_session();
-                    let current_engine = db_session.current_engine();
-                    let engines = db_session
-                        .available_engines()
-                        .iter()
-                        .map(|engine| engine.to_string())
-                        .collect::<Vec<_>>();
-                    match RuntimeExecutor::new() {
-                        Ok(executor) => {
-                            self.db_executor = Some(Arc::new(executor));
-                            self.db_session = Some(db_session);
-                            let _ = writeln!(
-                                &mut writer,
-                                "DB-Shell aktiv. Aktueller Engine: {current_engine}"
-                            );
-                            if !engines.is_empty() {
-                                let _ = writeln!(
-                                    &mut writer,
-                                    "Verfügbare Engines: {}",
-                                    engines.join(", ")
-                                );
-                            }
-                            let _ = writeln!(
-                                &mut writer,
-                                "Hinweis: Destruktive Befehle benötigen '--force'."
-                            );
-                            Handler::send_prompt(session, channel, self.current_prompt());
-                            true
-                        }
-                        Err(err) => {
-                            tracing::error!(error = %err, "failed to create runtime for db-shell over ssh");
-                            self.mode = ShellMode::Main;
-                            let _ = writeln!(
-                                &mut writer,
-                                "DB-Shell konnte nicht gestartet werden ({err})"
-                            );
-                            Handler::send_prompt(session, channel, self.current_prompt());
-                            true
-                        }
-                    }
+                Ok(CommandStatus::Executed(outcome)) => {
+                    self.handle_command_outcome(outcome, channel, session)
                 }
                 Ok(CommandStatus::NotFound) => {
                     let _ = writeln!(&mut writer, "unbekannter Befehl: {}", name);
@@ -761,6 +709,204 @@ impl Handler {
         }
     }
 
+    fn handle_command_outcome(
+        &mut self,
+        outcome: CommandOutcome,
+        channel: ChannelId,
+        session: &mut Session,
+    ) -> bool {
+        match outcome {
+            CommandOutcome::Continue => {
+                Handler::send_prompt(session, channel, self.current_prompt());
+                true
+            }
+            CommandOutcome::ExitShell => {
+                session.close(channel);
+                false
+            }
+            CommandOutcome::EnterDbShell => {
+                if !self.services.db_shell.is_enabled() {
+                    let mut writer = SessionWriter::new(session, channel);
+                    let _ = writeln!(
+                        &mut writer,
+                        "DB-Shell ist deaktiviert. Nutze 'start service db-shell'."
+                    );
+                    Handler::send_prompt(session, channel, self.current_prompt());
+                    return true;
+                }
+                self.mode = ShellMode::DbShell;
+                self.buffer.clear();
+                self.history_index = None;
+                self.cursor = 0;
+                let db_session = self.services.db_shell.create_session();
+                let current_engine = db_session.current_engine();
+                let engines = db_session
+                    .available_engines()
+                    .iter()
+                    .map(|engine| engine.to_string())
+                    .collect::<Vec<_>>();
+                match RuntimeExecutor::new() {
+                    Ok(executor) => {
+                        self.db_executor = Some(Arc::new(executor));
+                        self.db_session = Some(db_session);
+                        let mut writer = SessionWriter::new(session, channel);
+                        let _ = writeln!(
+                            &mut writer,
+                            "DB-Shell aktiv. Aktueller Engine: {current_engine}"
+                        );
+                        if !engines.is_empty() {
+                            let _ =
+                                writeln!(&mut writer, "Verfügbare Engines: {}", engines.join(", "));
+                        }
+                        let _ = writeln!(
+                            &mut writer,
+                            "Hinweis: Destruktive Befehle benötigen '--force'."
+                        );
+                        Handler::send_prompt(session, channel, &self.db_prompt);
+                    }
+                    Err(err) => {
+                        self.mode = ShellMode::Main;
+                        let mut writer = SessionWriter::new(session, channel);
+                        let _ =
+                            writeln!(&mut writer, "DB-Shell konnte nicht gestartet werden: {err}");
+                        Handler::send_prompt(session, channel, self.current_prompt());
+                    }
+                }
+                true
+            }
+            CommandOutcome::AwaitConfirmation(request) => {
+                self.begin_confirmation(request, channel, session);
+                true
+            }
+        }
+    }
+
+    fn handle_confirmation_input(
+        &mut self,
+        ch: char,
+        channel: ChannelId,
+        session: &mut Session,
+    ) -> bool {
+        match ch {
+            '\u{1b}' => {
+                self.escape_state = EscapeState::Esc;
+                return true;
+            }
+            '\r' => {
+                self.skip_next_lf = true;
+                session.data(channel, CryptoVec::from_slice(b"\r\n"));
+                return self.finish_confirmation(channel, session);
+            }
+            '\n' => {
+                session.data(channel, CryptoVec::from_slice(b"\r\n"));
+                return self.finish_confirmation(channel, session);
+            }
+            '\u{3}' => {
+                self.buffer.clear();
+                self.cursor = 0;
+                session.data(channel, CryptoVec::from_slice(b"^C\r\n"));
+                if let Some(request) = self.pending_confirmation.take() {
+                    let mut writer = SessionWriter::new(session, channel);
+                    match request.resolve(false, &self.dependencies, &mut writer) {
+                        Ok(outcome) => {
+                            return self.handle_command_outcome(outcome, channel, session)
+                        }
+                        Err(err) => {
+                            let _ = writeln!(&mut writer, "Bestätigung fehlgeschlagen: {err}");
+                            Handler::send_prompt(session, channel, self.current_prompt());
+                            return true;
+                        }
+                    }
+                }
+                return true;
+            }
+            '\u{8}' | '\u{7f}' => {
+                if self.buffer.pop().is_some() {
+                    self.cursor = self.buffer.len();
+                    session.data(channel, CryptoVec::from_slice(b"\x08 \x08"));
+                } else {
+                    session.data(channel, CryptoVec::from_slice(b"\x07"));
+                }
+                return true;
+            }
+            '[' => {
+                if matches!(self.escape_state, EscapeState::Esc) {
+                    self.escape_state = EscapeState::Csi;
+                    return true;
+                }
+            }
+            ch if matches!(self.escape_state, EscapeState::Csi) => {
+                if ('@'..='~').contains(&ch) {
+                    self.escape_state = EscapeState::None;
+                }
+                return true;
+            }
+            _ => {
+                self.escape_state = EscapeState::None;
+            }
+        }
+
+        if ch.is_control() {
+            return true;
+        }
+
+        let mut buf = [0u8; 4];
+        let encoded = ch.encode_utf8(&mut buf);
+        self.buffer.push_str(encoded);
+        self.cursor = self.buffer.len();
+        session.data(channel, CryptoVec::from_slice(encoded.as_bytes()));
+        true
+    }
+
+    fn finish_confirmation(&mut self, channel: ChannelId, session: &mut Session) -> bool {
+        let input = self.buffer.trim().to_ascii_lowercase();
+        self.buffer.clear();
+        self.cursor = 0;
+        if input.is_empty() {
+            self.render_confirmation_prompt(session, channel);
+            return true;
+        }
+
+        if let Some(answer) = parse_confirmation_answer(&input) {
+            let Some(request) = self.pending_confirmation.take() else {
+                Handler::send_prompt(session, channel, self.current_prompt());
+                return true;
+            };
+            let mut writer = SessionWriter::new(session, channel);
+            match request.resolve(answer, &self.dependencies, &mut writer) {
+                Ok(outcome) => self.handle_command_outcome(outcome, channel, session),
+                Err(err) => {
+                    let _ = writeln!(&mut writer, "Bestätigung fehlgeschlagen: {err}");
+                    Handler::send_prompt(session, channel, self.current_prompt());
+                    true
+                }
+            }
+        } else {
+            let mut writer = SessionWriter::new(session, channel);
+            let _ = writeln!(&mut writer, "Bitte mit 'y' oder 'n' antworten.");
+            self.render_confirmation_prompt(session, channel);
+            true
+        }
+    }
+
+    fn begin_confirmation(
+        &mut self,
+        request: ConfirmationRequest,
+        channel: ChannelId,
+        session: &mut Session,
+    ) {
+        self.pending_confirmation = Some(request);
+        self.buffer.clear();
+        self.cursor = 0;
+        self.render_confirmation_prompt(session, channel);
+    }
+
+    fn render_confirmation_prompt(&mut self, session: &mut Session, channel: ChannelId) {
+        if let Some(request) = self.pending_confirmation.as_ref() {
+            Handler::send_prompt(session, channel, request.prompt());
+        }
+    }
+
     fn move_cursor_left(&mut self, session: &mut Session, channel: ChannelId) {
         if let Some(prev) = self.buffer[..self.cursor].chars().next_back() {
             self.cursor = self.cursor.saturating_sub(prev.len_utf8());
@@ -843,6 +989,7 @@ pub async fn start(cfg: &Arc<AppConfig>, services: &Arc<AppServices>) -> Result<
                 db_session: None,
                 db_executor: None,
                 cursor: 0,
+                pending_confirmation: None,
             };
             handler.refresh_prompts();
             handler

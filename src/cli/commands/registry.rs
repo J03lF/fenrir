@@ -2,11 +2,72 @@ use crate::audit::AuditActor;
 use crate::config::AppConfig;
 use crate::services::AppServices;
 use std::collections::BTreeMap;
+use std::fmt;
 use std::io::{self, Write};
 use std::sync::Arc;
 
 pub trait CommandOutput: Send + Sync + 'static {
     fn push(&self, text: &str);
+}
+
+pub trait ConfirmationHandler: Send {
+    fn handle(
+        self: Box<Self>,
+        accepted: bool,
+        deps: &CliDependencies,
+        out: &mut dyn Write,
+    ) -> io::Result<CommandOutcome>;
+}
+
+pub struct ConfirmationRequest {
+    prompt: String,
+    handler: Box<dyn ConfirmationHandler>,
+    command: Option<(String, Vec<String>)>,
+}
+
+impl ConfirmationRequest {
+    pub fn new(prompt: impl Into<String>, handler: Box<dyn ConfirmationHandler>) -> Self {
+        Self {
+            prompt: prompt.into(),
+            handler,
+            command: None,
+        }
+    }
+
+    pub fn prompt(&self) -> &str {
+        &self.prompt
+    }
+
+    pub fn with_command_context(mut self, name: impl Into<String>, args: &[&str]) -> Self {
+        let command = name.into();
+        let arguments = args.iter().map(|arg| (*arg).to_string()).collect();
+        self.command = Some((command, arguments));
+        self
+    }
+
+    pub fn command_context(&self) -> Option<(String, Vec<String>)> {
+        self.command
+            .as_ref()
+            .map(|(name, args)| (name.clone(), args.clone()))
+    }
+
+    pub fn resolve(
+        self,
+        accepted: bool,
+        deps: &CliDependencies,
+        out: &mut dyn Write,
+    ) -> io::Result<CommandOutcome> {
+        self.handler.handle(accepted, deps, out)
+    }
+}
+
+pub fn parse_confirmation_answer(input: &str) -> Option<bool> {
+    let normalized = input.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "y" | "yes" | "j" | "ja" => Some(true),
+        "n" | "no" | "nein" => Some(false),
+        _ => None,
+    }
 }
 
 pub type CommandHandler = fn(
@@ -176,11 +237,22 @@ impl CommandEntry {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandOutcome {
     Continue,
     ExitShell,
     EnterDbShell,
+    AwaitConfirmation(ConfirmationRequest),
+}
+
+impl fmt::Debug for CommandOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CommandOutcome::Continue => f.write_str("Continue"),
+            CommandOutcome::ExitShell => f.write_str("ExitShell"),
+            CommandOutcome::EnterDbShell => f.write_str("EnterDbShell"),
+            CommandOutcome::AwaitConfirmation(_) => f.write_str("AwaitConfirmation"),
+        }
+    }
 }
 
 pub enum CommandStatus {

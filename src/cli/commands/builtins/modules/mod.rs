@@ -14,7 +14,8 @@ use whoami;
 use crate::audit::{AuditActor, AuditEvent, AuditMetadata, AuditOutcome};
 use crate::cli::commands::registry::{
     CliDependencies, CommandArgument, CommandEntry, CommandOutcome, CommandOutput, CommandRegistry,
-    CommandShape, CommandSubcommand, CompletionContext, CompletionKind, ShellEnvironment,
+    CommandShape, CommandSubcommand, CompletionContext, CompletionKind, ConfirmationHandler,
+    ConfirmationRequest, ShellEnvironment,
 };
 use crate::cli::commands::table::Table;
 use crate::domain::module::{
@@ -352,13 +353,13 @@ pub(crate) fn run_module_command(
     action: &str,
     args: &[&str],
     out: &mut dyn Write,
-) -> io::Result<()> {
+) -> io::Result<CommandOutcome> {
     let Some(service) = deps.services.module_service() else {
         writeln!(
             out,
             "Modul-Service nicht verfügbar – bitte Boot-Logs prüfen."
         )?;
-        return Ok(());
+        return Ok(CommandOutcome::Continue);
     };
     let ctx = ModulesCommandCtx::new(deps, Arc::clone(&service));
     dispatch_module(action, &ctx, out, args)
@@ -374,8 +375,7 @@ fn handle_search_command(
     let Some(tail) = module_tail(args, out, "search modules [pattern]") else {
         return Ok(CommandOutcome::Continue);
     };
-    run_module_command(deps, "search", tail, out)?;
-    Ok(CommandOutcome::Continue)
+    run_module_command(deps, "search", tail, out)
 }
 
 fn handle_install_command(
@@ -388,8 +388,7 @@ fn handle_install_command(
     let Some(tail) = module_tail(args, out, "install module <name[@version]>") else {
         return Ok(CommandOutcome::Continue);
     };
-    run_module_command(deps, "install", tail, out)?;
-    Ok(CommandOutcome::Continue)
+    run_module_command(deps, "install", tail, out)
 }
 
 fn handle_uninstall_command(
@@ -402,8 +401,7 @@ fn handle_uninstall_command(
     let Some(tail) = module_tail(args, out, "uninstall module <name>") else {
         return Ok(CommandOutcome::Continue);
     };
-    run_module_command(deps, "uninstall", tail, out)?;
-    Ok(CommandOutcome::Continue)
+    run_module_command(deps, "uninstall", tail, out)
 }
 
 fn handle_update_command(
@@ -416,8 +414,7 @@ fn handle_update_command(
     let Some(tail) = module_tail(args, out, "update module [name]") else {
         return Ok(CommandOutcome::Continue);
     };
-    run_module_command(deps, "update", tail, out)?;
-    Ok(CommandOutcome::Continue)
+    run_module_command(deps, "update", tail, out)
 }
 
 fn handle_check_command(
@@ -430,8 +427,7 @@ fn handle_check_command(
     let Some(tail) = module_tail(args, out, "check modules") else {
         return Ok(CommandOutcome::Continue);
     };
-    run_module_command(deps, "check-updates", tail, out)?;
-    Ok(CommandOutcome::Continue)
+    run_module_command(deps, "check-updates", tail, out)
 }
 
 fn handle_logs_command(
@@ -444,8 +440,7 @@ fn handle_logs_command(
     let Some(tail) = module_tail(args, out, "logs module <name> [--tail N]") else {
         return Ok(CommandOutcome::Continue);
     };
-    run_module_command(deps, "logs", tail, out)?;
-    Ok(CommandOutcome::Continue)
+    run_module_command(deps, "logs", tail, out)
 }
 
 struct ModulesCommandCtx<'a> {
@@ -580,7 +575,7 @@ fn dispatch_module(
     ctx: &ModulesCommandCtx<'_>,
     out: &mut dyn Write,
     args: &[&str],
-) -> io::Result<()> {
+) -> io::Result<CommandOutcome> {
     match canonical {
         "list" => handle_list(ctx, out, args),
         "search" => handle_search(ctx, out, args),
@@ -600,12 +595,16 @@ fn dispatch_module(
                 "missing module handler mapping"
             );
             writeln!(out, "Subcommand '{other}' ist derzeit nicht implementiert.")?;
-            Ok(())
+            Ok(CommandOutcome::Continue)
         }
     }
 }
 
-fn handle_list(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> io::Result<()> {
+fn handle_list(
+    ctx: &ModulesCommandCtx,
+    out: &mut dyn Write,
+    args: &[&str],
+) -> io::Result<CommandOutcome> {
     if !args.is_empty() {
         writeln!(out, "'list modules' erwartet keine weiteren Argumente.")?;
     }
@@ -618,7 +617,7 @@ fn handle_list(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> i
                 "Installierte Module konnten nicht geladen werden",
                 &err,
             )?;
-            return Ok(());
+            return Ok(CommandOutcome::Continue);
         }
     };
 
@@ -626,7 +625,7 @@ fn handle_list(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> i
         writeln!(out, "Installierte Module")?;
         writeln!(out, "====================")?;
         writeln!(out, "(keine Module installiert)")?;
-        return Ok(());
+        return Ok(CommandOutcome::Continue);
     }
 
     let runtime_infos: HashMap<_, _> =
@@ -682,10 +681,15 @@ fn handle_list(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> i
         }
     }
 
-    table.render(out, "  ")
+    table.render(out, "  ")?;
+    Ok(CommandOutcome::Continue)
 }
 
-fn handle_search(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> io::Result<()> {
+fn handle_search(
+    ctx: &ModulesCommandCtx,
+    out: &mut dyn Write,
+    args: &[&str],
+) -> io::Result<CommandOutcome> {
     use crate::domain::module::ModuleSearchQuery;
 
     let pattern = args.get(0).map(|value| (*value).to_string());
@@ -698,7 +702,7 @@ fn handle_search(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) ->
         Ok(modules) => modules,
         Err(err) => {
             render_service_error(out, "Registry-Suche fehlgeschlagen", &err)?;
-            return Ok(());
+            return Ok(CommandOutcome::Continue);
         }
     };
 
@@ -707,7 +711,7 @@ fn handle_search(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) ->
 
     if modules.is_empty() {
         writeln!(out, "Keine Treffer.")?;
-        return Ok(());
+        return Ok(CommandOutcome::Continue);
     }
 
     let mut table = Table::new(vec![
@@ -724,20 +728,25 @@ fn handle_search(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) ->
         ]);
     }
 
-    table.render(out, "  ")
+    table.render(out, "  ")?;
+    Ok(CommandOutcome::Continue)
 }
 
-fn handle_info(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> io::Result<()> {
+fn handle_info(
+    ctx: &ModulesCommandCtx,
+    out: &mut dyn Write,
+    args: &[&str],
+) -> io::Result<CommandOutcome> {
     let Some(target) = args.first() else {
         writeln!(out, "Use: show module <name[@version]>")?;
-        return Ok(());
+        return Ok(CommandOutcome::Continue);
     };
 
     let (module_id, version) = match parse_module_target(target, &args[1..]) {
         Ok(tuple) => tuple,
         Err(err) => {
             writeln!(out, "{err}")?;
-            return Ok(());
+            return Ok(CommandOutcome::Continue);
         }
     };
 
@@ -752,24 +761,29 @@ fn handle_info(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> i
         Ok(manifest) => manifest,
         Err(err) => {
             render_service_error(out, "Manifest konnte nicht geladen werden", &err)?;
-            return Ok(());
+            return Ok(CommandOutcome::Continue);
         }
     };
 
-    render_manifest(out, &manifest)
+    render_manifest(out, &manifest)?;
+    Ok(CommandOutcome::Continue)
 }
 
-fn handle_install(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> io::Result<()> {
+fn handle_install(
+    ctx: &ModulesCommandCtx,
+    out: &mut dyn Write,
+    args: &[&str],
+) -> io::Result<CommandOutcome> {
     if args.is_empty() {
         writeln!(out, "Use: install module <name[@version]>")?;
-        return Ok(());
+        return Ok(CommandOutcome::Continue);
     }
 
     let (module_id, version) = match parse_module_target(args[0], &args[1..]) {
         Ok(tuple) => tuple,
         Err(err) => {
             writeln!(out, "{err}")?;
-            return Ok(());
+            return Ok(CommandOutcome::Continue);
         }
     };
 
@@ -783,7 +797,7 @@ fn handle_install(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -
                 module_id
             )?;
             out.flush()?;
-            return Ok(());
+            return Ok(CommandOutcome::Continue);
         } else {
             writeln!(
                 out,
@@ -880,7 +894,7 @@ fn handle_install(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -
                 render_line(out, "")?;
                 writeln!(out, "Download fehlgeschlagen – interner Fehler.")?;
                 out.flush()?;
-                return Ok(());
+                return Ok(CommandOutcome::Continue);
             }
         }
     }
@@ -932,18 +946,22 @@ fn handle_install(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -
         }
     }
 
-    Ok(())
+    Ok(CommandOutcome::Continue)
 }
 
-fn handle_uninstall(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> io::Result<()> {
+fn handle_uninstall(
+    ctx: &ModulesCommandCtx,
+    out: &mut dyn Write,
+    args: &[&str],
+) -> io::Result<CommandOutcome> {
     if args.len() != 1 {
         writeln!(out, "Use: uninstall module <name>")?;
-        return Ok(());
+        return Ok(CommandOutcome::Continue);
     }
 
     let module_id = match parse_module_id(out, args[0])? {
         Some(id) => id,
-        None => return Ok(()),
+        None => return Ok(CommandOutcome::Continue),
     };
 
     let module_id_for_call = module_id.clone();
@@ -975,16 +993,20 @@ fn handle_uninstall(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str])
         }
     }
 
-    Ok(())
+    Ok(CommandOutcome::Continue)
 }
 
-fn handle_update(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> io::Result<()> {
+fn handle_update(
+    ctx: &ModulesCommandCtx,
+    out: &mut dyn Write,
+    args: &[&str],
+) -> io::Result<CommandOutcome> {
     let fenrir_version = ctx.deps.config.app.version.clone();
 
     if let Some(module_name) = args.first() {
         let module_id = match parse_module_id(out, module_name)? {
             Some(id) => id,
-            None => return Ok(()),
+            None => return Ok(CommandOutcome::Continue),
         };
 
         let module_id_for_call = module_id.clone();
@@ -1007,43 +1029,80 @@ fn handle_update(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) ->
                 render_service_error(out, "Update fehlgeschlagen", &err)?;
             }
         }
+        return Ok(CommandOutcome::Continue);
     } else {
-        writeln!(out, "Aktualisiere alle Module...")?;
+        // First, check for available updates and show table
+        writeln!(out, "Prüfe verfügbare Updates...")?;
+        out.flush()?; // Ensure message is displayed immediately
 
         let fenrir_version_for_call = fenrir_version.clone();
-        let result = ctx.module_call(|service| async move {
-            service.update_all(Some(&fenrir_version_for_call)).await
-        });
-
-        match result {
-            Ok(results) => {
-                if results.is_empty() {
-                    writeln!(out, "Keine Updates verfügbar.")?;
-                } else {
-                    writeln!(out, "{} Module wurden aktualisiert:", results.len())?;
-                    for result in results {
-                        writeln!(
-                            out,
-                            "  ✓ {} v{}",
-                            result.manifest.id, result.manifest.version
-                        )?;
-                    }
-                }
-            }
+        let updates = match ctx.module_call(|service| async move {
+            service.check_updates(Some(&fenrir_version_for_call)).await
+        }) {
+            Ok(updates) => updates,
             Err(err) => {
-                render_service_error(out, "Update fehlgeschlagen", &err)?;
+                render_service_error(out, "Update-Prüfung fehlgeschlagen", &err)?;
+                return Ok(CommandOutcome::Continue);
             }
-        }
-    }
+        };
 
-    Ok(())
+        if updates.is_empty() {
+            writeln!(out, "Keine installierten Module.")?;
+            out.flush()?;
+            return Ok(CommandOutcome::Continue);
+        }
+
+        // Show table with updates
+        let mut table = Table::new(vec![
+            "Modul".to_string(),
+            "Aktuelle Version".to_string(),
+            "Verfügbare Version".to_string(),
+        ]);
+
+        let mut has_updates = false;
+        for update in &updates {
+            let available_version = if update.has_update && update.compatible {
+                has_updates = true;
+                update.latest_version.to_string()
+            } else {
+                String::new() // Leave empty if no update
+            };
+
+            table.add_row(vec![
+                update.module_id.to_string(),
+                update.current_version.to_string(),
+                available_version,
+            ]);
+        }
+
+        table.render(out, "  ")?;
+        writeln!(out)?;
+        out.flush()?; // Ensure table is displayed before asking for input
+
+        if !has_updates {
+            writeln!(out, "Keine Updates verfügbar.")?;
+            out.flush()?;
+            return Ok(CommandOutcome::Continue);
+        }
+
+        let confirmation = ConfirmationRequest::new(
+            "Alle Module aktualisieren? (y/n): ",
+            Box::new(UpdateAllConfirmation {
+                service: ctx.service(),
+                fenrir_version: fenrir_version.clone(),
+            }),
+        )
+        .with_command_context("update module", args);
+
+        return Ok(CommandOutcome::AwaitConfirmation(confirmation));
+    }
 }
 
 fn handle_check_updates(
     ctx: &ModulesCommandCtx,
     out: &mut dyn Write,
     args: &[&str],
-) -> io::Result<()> {
+) -> io::Result<CommandOutcome> {
     if !args.is_empty() {
         writeln!(out, "'check modules' erwartet keine Argumente.")?;
     }
@@ -1058,13 +1117,13 @@ fn handle_check_updates(
         Ok(updates) => updates,
         Err(err) => {
             render_service_error(out, "Update-Prüfung fehlgeschlagen", &err)?;
-            return Ok(());
+            return Ok(CommandOutcome::Continue);
         }
     };
 
     if updates.is_empty() {
         writeln!(out, "Keine installierten Module.")?;
-        return Ok(());
+        return Ok(CommandOutcome::Continue);
     }
 
     let mut table = Table::new(vec![
@@ -1108,18 +1167,22 @@ fn handle_check_updates(
         )?;
     }
 
-    Ok(())
+    Ok(CommandOutcome::Continue)
 }
 
-fn handle_start(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> io::Result<()> {
+fn handle_start(
+    ctx: &ModulesCommandCtx,
+    out: &mut dyn Write,
+    args: &[&str],
+) -> io::Result<CommandOutcome> {
     if args.len() != 1 {
         writeln!(out, "Use: start module <name>")?;
-        return Ok(());
+        return Ok(CommandOutcome::Continue);
     }
 
     let module_id = match parse_module_id(out, args[0])? {
         Some(id) => id,
-        None => return Ok(()),
+        None => return Ok(CommandOutcome::Continue),
     };
 
     let module_id_for_call = module_id.clone();
@@ -1171,18 +1234,22 @@ fn handle_start(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> 
         }
     }
 
-    Ok(())
+    Ok(CommandOutcome::Continue)
 }
 
-fn handle_stop(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> io::Result<()> {
+fn handle_stop(
+    ctx: &ModulesCommandCtx,
+    out: &mut dyn Write,
+    args: &[&str],
+) -> io::Result<CommandOutcome> {
     if args.len() != 1 {
         writeln!(out, "Use: stop module <name>")?;
-        return Ok(());
+        return Ok(CommandOutcome::Continue);
     }
 
     let module_id = match parse_module_id(out, args[0])? {
         Some(id) => id,
-        None => return Ok(()),
+        None => return Ok(CommandOutcome::Continue),
     };
 
     let module_id_for_call = module_id.clone();
@@ -1213,18 +1280,22 @@ fn handle_stop(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> i
         }
     }
 
-    Ok(())
+    Ok(CommandOutcome::Continue)
 }
 
-fn handle_restart(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> io::Result<()> {
+fn handle_restart(
+    ctx: &ModulesCommandCtx,
+    out: &mut dyn Write,
+    args: &[&str],
+) -> io::Result<CommandOutcome> {
     if args.len() != 1 {
         writeln!(out, "Use: restart module <name>")?;
-        return Ok(());
+        return Ok(CommandOutcome::Continue);
     }
 
     let module_id = match parse_module_id(out, args[0])? {
         Some(id) => id,
-        None => return Ok(()),
+        None => return Ok(CommandOutcome::Continue),
     };
 
     let module_id_for_call = module_id.clone();
@@ -1266,18 +1337,22 @@ fn handle_restart(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -
         }
     }
 
-    Ok(())
+    Ok(CommandOutcome::Continue)
 }
 
-fn handle_logs(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> io::Result<()> {
+fn handle_logs(
+    ctx: &ModulesCommandCtx,
+    out: &mut dyn Write,
+    args: &[&str],
+) -> io::Result<CommandOutcome> {
     if args.is_empty() {
         writeln!(out, "Use: logs module <name> [--tail N]")?;
-        return Ok(());
+        return Ok(CommandOutcome::Continue);
     }
 
     let module_id = match parse_module_id(out, args[0])? {
         Some(id) => id,
-        None => return Ok(()),
+        None => return Ok(CommandOutcome::Continue),
     };
 
     let mut tail = None;
@@ -1286,18 +1361,18 @@ fn handle_logs(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> i
         if flag == &"--tail" {
             let Some(value) = iter.next() else {
                 writeln!(out, "--tail benötigt einen Wert")?;
-                return Ok(());
+                return Ok(CommandOutcome::Continue);
             };
             tail = Some(match value.parse::<usize>() {
                 Ok(n) => n,
                 Err(_) => {
                     writeln!(out, "Ungültiger tail-Wert: {}", value)?;
-                    return Ok(());
+                    return Ok(CommandOutcome::Continue);
                 }
             });
         } else {
             writeln!(out, "Unbekannte Option {}", flag)?;
-            return Ok(());
+            return Ok(CommandOutcome::Continue);
         }
     }
 
@@ -1323,7 +1398,7 @@ fn handle_logs(ctx: &ModulesCommandCtx, out: &mut dyn Write, args: &[&str]) -> i
         }
     }
 
-    Ok(())
+    Ok(CommandOutcome::Continue)
 }
 
 fn parse_module_id(out: &mut dyn Write, raw: &str) -> io::Result<Option<ModuleId>> {
@@ -1512,6 +1587,58 @@ fn module_cli_actor(actor: Option<&AuditActor>) -> AuditActor {
     AuditActor::User {
         user_id: format!("cli::{}", whoami::username()),
         role: "operator".to_string(),
+    }
+}
+
+struct UpdateAllConfirmation {
+    service: Arc<ModuleService>,
+    fenrir_version: String,
+}
+
+impl ConfirmationHandler for UpdateAllConfirmation {
+    fn handle(
+        self: Box<Self>,
+        accepted: bool,
+        _deps: &CliDependencies,
+        out: &mut dyn Write,
+    ) -> io::Result<CommandOutcome> {
+        if !accepted {
+            writeln!(out, "Update abgebrochen.")?;
+            return Ok(CommandOutcome::Continue);
+        }
+
+        writeln!(out, "Aktualisiere alle Module...")?;
+        out.flush()?;
+
+        let service = Arc::clone(&self.service);
+        let version = self.fenrir_version.clone();
+        let result = run_module_future(move || {
+            let service = Arc::clone(&service);
+            async move { service.update_all(Some(&version)).await }
+        });
+
+        match result {
+            Ok(results) => {
+                if results.is_empty() {
+                    writeln!(out, "Keine Updates durchgeführt.")?;
+                } else {
+                    writeln!(out, "{} Module wurden aktualisiert:", results.len())?;
+                    for result in results {
+                        writeln!(
+                            out,
+                            "  ✓ {} v{}",
+                            result.manifest.id, result.manifest.version
+                        )?;
+                    }
+                }
+                out.flush()?;
+            }
+            Err(err) => {
+                render_service_error(out, "Update fehlgeschlagen", &err)?;
+            }
+        }
+
+        Ok(CommandOutcome::Continue)
     }
 }
 

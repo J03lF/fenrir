@@ -99,6 +99,7 @@
 - [ ] CLI: login flow skeleton using authenticator stub
 - [ ] db-shell: real SELECT dispatch via adapter; simple table formatter
 - [ ] Unit/Integration tests for auth, db adapter
+- [ ] Modul-Contract definieren: Ports/Lifecycle damit `fenrir-api` HTTP/gRPC/CLI-Befehle sauber registrieren kann; Dokumentation in `docs/modules_overview.md`
 
 ## Iteration 3
 - [ ] SSH server: start, PTY, bind CLI shell

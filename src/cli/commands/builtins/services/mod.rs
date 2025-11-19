@@ -137,8 +137,7 @@ fn handle_start(
     out: &mut dyn Write,
     _env: ShellEnvironment,
 ) -> io::Result<CommandOutcome> {
-    route_service_action(ServiceCliAction::Start, deps, args, out)?;
-    Ok(CommandOutcome::Continue)
+    route_service_action(ServiceCliAction::Start, deps, args, out)
 }
 
 fn handle_stop(
@@ -148,8 +147,7 @@ fn handle_stop(
     out: &mut dyn Write,
     _env: ShellEnvironment,
 ) -> io::Result<CommandOutcome> {
-    route_service_action(ServiceCliAction::Stop, deps, args, out)?;
-    Ok(CommandOutcome::Continue)
+    route_service_action(ServiceCliAction::Stop, deps, args, out)
 }
 
 fn handle_restart(
@@ -159,8 +157,7 @@ fn handle_restart(
     out: &mut dyn Write,
     _env: ShellEnvironment,
 ) -> io::Result<CommandOutcome> {
-    route_service_action(ServiceCliAction::Restart, deps, args, out)?;
-    Ok(CommandOutcome::Continue)
+    route_service_action(ServiceCliAction::Restart, deps, args, out)
 }
 
 fn handle_list(
@@ -195,7 +192,7 @@ fn handle_list(
             list_jobs(deps, out)?;
         }
         "modules" | "module" => {
-            modules::run_module_command(deps, "list", rest, out)?;
+            return modules::run_module_command(deps, "list", rest, out);
         }
         other => {
             writeln!(out, "unbekannte Ressource: {other}")?;
@@ -361,10 +358,10 @@ fn route_service_action(
     deps: &CliDependencies,
     args: &[&str],
     out: &mut dyn Write,
-) -> io::Result<()> {
+) -> io::Result<CommandOutcome> {
     if args.is_empty() {
         render_action_usage(out, action)?;
-        return Ok(());
+        return Ok(CommandOutcome::Continue);
     }
 
     match args[0].to_ascii_lowercase().as_str() {
@@ -374,19 +371,22 @@ fn route_service_action(
                 ServiceCliAction::Start => start_service(deps, tail, out),
                 ServiceCliAction::Stop => stop_service(deps, tail, out),
                 ServiceCliAction::Restart => restart_service(deps, tail, out),
-            }
+            }?;
+            Ok(CommandOutcome::Continue)
         }
         "module" | "modules" => {
             let tail = if args.len() > 1 { &args[1..] } else { &[] };
             if tail.is_empty() {
-                render_action_usage(out, action)
+                render_action_usage(out, action)?;
+                Ok(CommandOutcome::Continue)
             } else {
                 modules::run_module_command(deps, action.verb(), tail, out)
             }
         }
         other => {
             writeln!(out, "unbekannte Ressource: {other}")?;
-            writeln!(out, "gültig: service | module")
+            writeln!(out, "gültig: service | module")?;
+            Ok(CommandOutcome::Continue)
         }
     }
 }

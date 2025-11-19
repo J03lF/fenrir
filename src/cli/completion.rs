@@ -650,7 +650,7 @@ mod tests {
             },
             modules: ModulesSection {
                 registry: ModuleRegistrySection {
-                    url: "http://localhost:3001".to_string(),
+                    url: "http://localhost:8443".to_string(),
                     allow_offline: true,
                     offline_dirs: vec![],
                     auth_token: None,

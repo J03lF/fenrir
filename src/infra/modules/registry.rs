@@ -162,12 +162,12 @@ impl ModuleRegistryPort for HttpModuleRegistry {
         let base = self.base_url.trim_end_matches('/');
         let url = if let Some(ref pattern) = query.pattern {
             format!(
-                "{}/api/modules/search?q={}",
+                "{}/v1/modules/search?q={}",
                 base,
                 urlencoding::encode(pattern)
             )
         } else {
-            format!("{}/api/modules", base)
+            format!("{}/v1/modules", base)
         };
 
         let response = self.client.get(&url).send().await.map_err(|err| {
@@ -212,7 +212,7 @@ impl ModuleRegistryPort for HttpModuleRegistry {
         version: Option<&ModuleVersion>,
     ) -> Result<ModuleManifest, ModuleRegistryError> {
         let base = self.base_url.trim_end_matches('/');
-        let url = format!("{}/api/modules/{}", base, urlencoding::encode(id.as_str()));
+        let url = format!("{}/v1/modules/{}", base, urlencoding::encode(id.as_str()));
 
         let response = self.client.get(&url).send().await.map_err(|err| {
             ModuleRegistryError::Unavailable(format!("Failed to fetch module: {}", err))

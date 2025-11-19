@@ -1,6 +1,7 @@
 use crate::cli::commands::builtins;
 use crate::cli::commands::registry::{
-    CliDependencies, CommandOutcome, CommandStatus, ShellEnvironment,
+    parse_confirmation_answer, CliDependencies, CommandOutcome, CommandStatus, ConfirmationRequest,
+    ShellEnvironment,
 };
 use crate::cli::completion::ContextualCompleter;
 use crate::config::AppConfig;
@@ -56,7 +57,102 @@ pub fn run_shell(config: Arc<AppConfig>, services: Arc<AppServices>) -> io::Resu
         helper.update_catalog(registry.shapes());
     }
     let history_path = init_history(&mut editor);
+    let mut pending_confirmation: Option<ConfirmationRequest> = None;
     loop {
+        if let Some(request) = pending_confirmation.take() {
+            match editor.readline(request.prompt()) {
+                Ok(line) => {
+                    if let Some(answer) = parse_confirmation_answer(&line) {
+                        let context = request.command_context();
+                        let started = Instant::now();
+                        match request.resolve(answer, &dependencies, &mut stdout) {
+                            Ok(outcome) => {
+                                let duration = started.elapsed();
+                                if let Some((cmd, cmd_args)) = context.as_ref() {
+                                    let arg_refs: Vec<&str> =
+                                        cmd_args.iter().map(|s| s.as_str()).collect();
+                                    show_success(
+                                        &mut stdout,
+                                        cmd.as_str(),
+                                        &arg_refs,
+                                        duration,
+                                        &outcome,
+                                    )?;
+                                }
+                                if !handle_outcome(
+                                    &mut stdout,
+                                    &services,
+                                    &prompt_set,
+                                    &mut pending_confirmation,
+                                    outcome,
+                                )? {
+                                    break;
+                                }
+                            }
+                            Err(err) => {
+                                show_error(
+                                    &mut stdout,
+                                    "CLI-0004",
+                                    format!("Bestätigung fehlgeschlagen: {err}"),
+                                    started.elapsed(),
+                                )?;
+                            }
+                        }
+                    } else {
+                        writeln!(&mut stdout, "Bitte mit 'y' oder 'n' bestätigen.")?;
+                        pending_confirmation = Some(request);
+                    }
+                }
+                Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => {
+                    let context = request.command_context();
+                    let started = Instant::now();
+                    match request.resolve(false, &dependencies, &mut stdout) {
+                        Ok(outcome) => {
+                            let duration = started.elapsed();
+                            if let Some((cmd, cmd_args)) = context.as_ref() {
+                                let arg_refs: Vec<&str> =
+                                    cmd_args.iter().map(|s| s.as_str()).collect();
+                                show_success(
+                                    &mut stdout,
+                                    cmd.as_str(),
+                                    &arg_refs,
+                                    duration,
+                                    &outcome,
+                                )?;
+                            }
+                            if !handle_outcome(
+                                &mut stdout,
+                                &services,
+                                &prompt_set,
+                                &mut pending_confirmation,
+                                outcome,
+                            )? {
+                                break;
+                            }
+                        }
+                        Err(err) => {
+                            show_error(
+                                &mut stdout,
+                                "CLI-0004",
+                                format!("Bestätigung fehlgeschlagen: {err}"),
+                                started.elapsed(),
+                            )?;
+                        }
+                    }
+                }
+                Err(ReadlineError::Io(err)) => return Err(err),
+                Err(err) => {
+                    show_error(
+                        &mut stdout,
+                        "CLI-0003",
+                        format!("Eingabefehler: {err}"),
+                        Duration::from_secs(0),
+                    )?;
+                    break;
+                }
+            }
+            continue;
+        }
         match editor.readline(&prompt_set.main_cli) {
             Ok(line) => {
                 let cmd = line.trim();
@@ -81,31 +177,14 @@ pub fn run_shell(config: Arc<AppConfig>, services: Arc<AppServices>) -> io::Resu
                         Ok(CommandStatus::Executed(outcome)) => {
                             let duration = started.elapsed();
                             show_success(&mut stdout, name, &args, duration, &outcome)?;
-                            match outcome {
-                                CommandOutcome::Continue => {}
-                                CommandOutcome::ExitShell => break,
-                                CommandOutcome::EnterDbShell => {
-                                    let session = services.db_shell.create_session();
-                                    if let Err(err) =
-                                        crate::cli::commands::builtins::db_shell::run_local_db_shell(
-                                            session,
-                                            prompt_set.db_cli.clone(),
-                                        )
-                                    {
-                                        writeln!(&mut stdout, "db-shell Fehler: {err}")?;
-                                        services.registry().set_status(
-                                            "db-shell",
-                                            ServiceStatus::Degraded,
-                                            Some(format!("Fehler: {err}")),
-                                        );
-                                    } else {
-                                        services.registry().set_status(
-                                            "db-shell",
-                                            ServiceStatus::Active,
-                                            Some("Bereit für neue Sessions".to_string()),
-                                        );
-                                    }
-                                }
+                            if !handle_outcome(
+                                &mut stdout,
+                                &services,
+                                &prompt_set,
+                                &mut pending_confirmation,
+                                outcome,
+                            )? {
+                                break;
                             }
                         }
                         Ok(CommandStatus::NotFound) => {
@@ -188,6 +267,45 @@ fn map_readline_error(err: ReadlineError) -> io::Error {
     }
 }
 
+fn handle_outcome(
+    out: &mut dyn Write,
+    services: &AppServices,
+    prompt_set: &prompts::PromptSet,
+    pending_confirmation: &mut Option<ConfirmationRequest>,
+    outcome: CommandOutcome,
+) -> io::Result<bool> {
+    match outcome {
+        CommandOutcome::Continue => Ok(true),
+        CommandOutcome::ExitShell => Ok(false),
+        CommandOutcome::EnterDbShell => {
+            let session = services.db_shell.create_session();
+            if let Err(err) = crate::cli::commands::builtins::db_shell::run_local_db_shell(
+                session,
+                prompt_set.db_cli.clone(),
+            ) {
+                writeln!(out, "db-shell Fehler: {err}")?;
+                services.registry().set_status(
+                    "db-shell",
+                    ServiceStatus::Degraded,
+                    Some(format!("Fehler: {err}")),
+                );
+            } else {
+                services.registry().set_status(
+                    "db-shell",
+                    ServiceStatus::Active,
+                    Some("Bereit für neue Sessions".to_string()),
+                );
+            }
+            Ok(true)
+        }
+        CommandOutcome::AwaitConfirmation(request) => {
+            out.flush()?;
+            *pending_confirmation = Some(request);
+            Ok(true)
+        }
+    }
+}
+
 fn show_pending(out: &mut dyn Write, command: &str, args: &[&str]) -> io::Result<()> {
     let joined = if args.is_empty() {
         command.to_string()
@@ -216,18 +334,20 @@ fn show_success(
     } else {
         format!("{} {}", command, args.join(" "))
     };
-    let note = match outcome {
-        CommandOutcome::Continue => "ok",
-        CommandOutcome::ExitShell => "exit",
-        CommandOutcome::EnterDbShell => "db",
+    let (symbol, note) = match outcome {
+        CommandOutcome::Continue => ("✔", "ok"),
+        CommandOutcome::ExitShell => ("✔", "exit"),
+        CommandOutcome::EnterDbShell => ("✔", "db"),
+        CommandOutcome::AwaitConfirmation(_) => ("?", "confirm"),
     };
     writeln!(
         out,
-        "{color}✔{reset} {cmd} [{note} • {time}]",
+        "{color}{symbol}{reset} {cmd} [{note} • {time}]",
         color = COLOR_SUCCESS,
         reset = COLOR_RESET,
         cmd = joined,
         note = note,
+        symbol = symbol,
         time = utils::format_brief_duration(duration)
     )?;
     out.flush()

@@ -116,6 +116,7 @@ src/
 - `modules.bootstrap` listet Module, die beim Boot automatisch installiert/aktualisiert werden (Standard: `fenrir-api`).
 - Trust Layer (`modules.trust`) erzwingt Signaturen, sofern aktiviert; im Dev-Default (`require_signature = false`, leere Allowlist) dürfen Offline-Artefakte ohne Signatur installiert werden.
 - Installationspfade kommen aus Config (`modules.storage.install_dir`).
+- Modul-Katalog: Überblick der benötigten Ticketsystem-Module inklusive Abhängigkeiten in `docs/modules_overview.md` pflegen und bei Änderungen an Erweiterungspunkten (z. B. Ports, Signaturanforderungen) mitziehen.
 
 # Telemetry & Logging
 - `infra::logging::init_tracing` setzt strukturiertes Logging; Level per Config.

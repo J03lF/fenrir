@@ -10,7 +10,7 @@ port = 2222
 user = "test"
 server_name = "fenrir-Test"
 host_key_path = "keys/server/ssh/host_ed25519"
-idle_close_seconds = 30
+idle_close_seconds = 300
 
 [server.ssh.tls]
 allowed_ciphers = []
@@ -110,7 +110,7 @@ prompt_theme = "default"
 bootstrap = ["fenrir-api"]
 
 [modules.registry]
-url = "http://localhost:3001"
+url = "http://localhost:8443"
 allow_offline = false
 offline_dirs = []
 auth_token = "env:FENRIR_REGISTRY_TOKEN"

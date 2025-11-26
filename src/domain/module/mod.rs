@@ -197,6 +197,12 @@ pub struct ModuleInstallResult {
     pub path: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DistributionTarget {
+    pub module_id: ModuleId,
+    pub version: ModuleVersion,
+}
+
 #[async_trait]
 pub trait ModuleRegistryPort: Send + Sync {
     async fn search(
@@ -212,6 +218,10 @@ pub trait ModuleRegistryPort: Send + Sync {
         &self,
         manifest: &ModuleManifest,
     ) -> Result<ModuleBundle, ModuleRegistryError>;
+    async fn distribution_targets(
+        &self,
+        fenrir_version: &str,
+    ) -> Result<Vec<DistributionTarget>, ModuleRegistryError>;
 }
 
 #[async_trait]

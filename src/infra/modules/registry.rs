@@ -5,8 +5,9 @@ use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use reqwest::{Certificate, Identity, Url};
 use semver::{Version, VersionReq};
 use serde::Deserialize;
+use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -16,13 +17,28 @@ use tracing::warn;
 
 use crate::config::ModuleRegistrySection;
 use crate::domain::module::{
-    ChecksumAlgorithm, ModuleArtifactDescriptor, ModuleBundle, ModuleChecksum, ModuleId,
-    ModuleManifest, ModuleRegistryError, ModuleRegistryPort, ModuleSearchQuery,
+    ChecksumAlgorithm, DistributionTarget, ModuleArtifactDescriptor, ModuleBundle, ModuleChecksum,
+    ModuleId, ModuleManifest, ModuleRegistryError, ModuleRegistryPort, ModuleSearchQuery,
     ModuleSignatureDescriptor, ModuleSummary, ModuleVersion, SignatureAlgorithm,
 };
 
 const DEFAULT_CONTENT_TYPE: &str = "application/gzip";
 const USER_AGENT_VALUE: &str = "fenrir-runtime/registry-client";
+
+#[derive(Debug, Deserialize)]
+struct CompatibilityTreeResponse {
+    #[allow(dead_code)]
+    fenrir_version: String,
+    tree: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct CompatibilityNodeDto {
+    id: String,
+    label: String,
+    #[serde(default)]
+    children: Vec<CompatibilityNodeDto>,
+}
 
 #[derive(Debug, Clone)]
 pub struct HttpModuleRegistry {
@@ -350,6 +366,78 @@ impl ModuleRegistryPort for HttpModuleRegistry {
             checksum: expected_checksum,
         })
     }
+
+    async fn distribution_targets(
+        &self,
+        fenrir_version: &str,
+    ) -> Result<Vec<DistributionTarget>, ModuleRegistryError> {
+        let base = self.base_url.trim_end_matches('/');
+        let url = format!(
+            "{}/v1/compatibility/{}",
+            base,
+            urlencoding::encode(fenrir_version)
+        );
+
+        let response = self.client.get(&url).send().await.map_err(|err| {
+            ModuleRegistryError::Unavailable(format!(
+                "Failed to query compatibility tree: {}",
+                err
+            ))
+        })?;
+
+        if response.status().as_u16() == 404 {
+            return Ok(Vec::new());
+        }
+
+        if !response.status().is_success() {
+            return Err(ModuleRegistryError::Unavailable(format!(
+                "Compatibility API returned status: {}",
+                response.status()
+            )));
+        }
+
+        let payload: CompatibilityTreeResponse = response.json().await.map_err(|err| {
+            ModuleRegistryError::Protocol(format!("Invalid compatibility response: {}", err))
+        })?;
+
+        if payload.tree.is_null() {
+            return Ok(Vec::new());
+        }
+
+        let root: CompatibilityNodeDto = serde_json::from_value(payload.tree).map_err(|err| {
+            ModuleRegistryError::Protocol(format!("Invalid compatibility tree format: {}", err))
+        })?;
+
+        let mut targets = HashMap::new();
+        collect_distribution_targets(&root, &mut targets);
+
+        Ok(targets
+            .into_iter()
+            .map(|(module_id, version)| DistributionTarget { module_id, version })
+            .collect())
+    }
+}
+
+fn collect_distribution_targets(
+    node: &CompatibilityNodeDto,
+    acc: &mut HashMap<ModuleId, ModuleVersion>,
+) {
+    if let Some((module_id, version)) = parse_module_from_node(node) {
+        acc.entry(module_id).or_insert(version);
+    }
+    for child in &node.children {
+        collect_distribution_targets(child, acc);
+    }
+}
+
+fn parse_module_from_node(
+    node: &CompatibilityNodeDto,
+) -> Option<(ModuleId, ModuleVersion)> {
+    let base_id = node.id.split(':').next().unwrap_or(&node.id);
+    let (module_raw, version_raw) = base_id.split_once('@')?;
+    let module = ModuleId::new(module_raw).ok()?;
+    let version = ModuleVersion::parse(version_raw).ok()?;
+    Some((module, version))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -471,6 +559,33 @@ impl ModuleRegistryPort for LocalModuleRegistry {
         let version = module.pick_version(Some(&ModuleVersion(manifest.version.clone())))?;
         version.load_bundle(&module).await
     }
+
+    async fn distribution_targets(
+        &self,
+        fenrir_version: &str,
+    ) -> Result<Vec<DistributionTarget>, ModuleRegistryError> {
+        let parsed =
+            Version::parse(fenrir_version).map_err(|err| ModuleRegistryError::Protocol(format!(
+                "invalid Fenrir version: {}",
+                err
+            )))?;
+        let modules = self.load_modules().await?;
+        let mut targets = Vec::new();
+        for module in modules {
+            if let Some(entry) = module
+                .versions
+                .iter()
+                .filter(|version| version.is_compatible_with(&parsed))
+                .max_by(|a, b| a.version.cmp(&b.version))
+            {
+                targets.push(DistributionTarget {
+                    module_id: module.id.clone(),
+                    version: entry.version.clone(),
+                });
+            }
+        }
+        Ok(targets)
+    }
 }
 
 #[derive(Clone)]
@@ -542,6 +657,31 @@ impl ModuleRegistryPort for CompositeModuleRegistry {
         Err(ModuleRegistryError::NotFound {
             module: manifest.id.clone(),
         })
+    }
+
+    async fn distribution_targets(
+        &self,
+        fenrir_version: &str,
+    ) -> Result<Vec<DistributionTarget>, ModuleRegistryError> {
+        let mut combined: HashMap<ModuleId, ModuleVersion> = HashMap::new();
+        for source in &self.sources {
+            match source.distribution_targets(fenrir_version).await {
+                Ok(targets) => {
+                    for entry in targets {
+                        combined
+                            .entry(entry.module_id.clone())
+                            .or_insert(entry.version.clone());
+                    }
+                }
+                Err(ModuleRegistryError::NotFound { .. }) => continue,
+                Err(err) => return Err(err),
+            }
+        }
+
+        Ok(combined
+            .into_iter()
+            .map(|(module_id, version)| DistributionTarget { module_id, version })
+            .collect())
     }
 }
 
@@ -623,6 +763,15 @@ struct LocalModuleVersion {
     fenrir_req: Option<VersionReq>,
     signature: Option<String>,
     signer: Option<String>,
+}
+
+impl LocalModuleVersion {
+    fn is_compatible_with(&self, version: &Version) -> bool {
+        match &self.fenrir_req {
+            Some(req) => req.matches(version),
+            None => true,
+        }
+    }
 }
 
 impl LocalModuleVersion {

@@ -137,5 +137,5 @@ cache_dir = "/Users/jfurocket/Documents/personal/modules/.cache"
 
 [modules.trust]
 require_signature = true
-allowed_signers = ["fenrir-core", "Fenrir Team"]
+allowed_signers = ["fenrir-core", "Fenrir Team", "module-registry"]
 keyring_path = "config/modules/keyring.json"

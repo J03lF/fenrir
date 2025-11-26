@@ -1,11 +1,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::TryRecvError;
-use std::sync::{mpsc, Arc};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::sync::Arc;
 
 use tokio::runtime::{Handle, Runtime};
 use tracing::{info, warn};
@@ -13,25 +9,24 @@ use whoami;
 
 use crate::audit::{AuditActor, AuditEvent, AuditMetadata, AuditOutcome};
 use crate::cli::commands::registry::{
-    CliDependencies, CommandArgument, CommandEntry, CommandOutcome, CommandOutput, CommandRegistry,
-    CommandShape, CommandSubcommand, CompletionContext, CompletionKind, ConfirmationHandler,
-    ConfirmationRequest, ShellEnvironment,
+    CliDependencies, CommandArgument, CommandEntry, CommandOutcome, CommandRegistry, CommandShape,
+    CommandSubcommand, CompletionContext, CompletionKind, ConfirmationHandler, ConfirmationRequest,
+    ShellEnvironment,
 };
 use crate::cli::commands::table::Table;
 use crate::domain::module::{
     ModuleId, ModuleInstallStatus, ModuleManifest, ModuleRegistryError, ModuleRuntimeError,
     ModuleServiceError, ModuleStorageError, ModuleVerificationError, ModuleVersion,
 };
-use crate::services::{AppServices, ModuleService};
+use crate::services::module::{DistributionPlanEntry, ModuleService};
 use crate::utils;
 
 const DETAILS: &[&str] = &[
     "list modules                    – zeigt alle Module mit Runtime-Status",
     "search modules [pattern]        – durchsucht Registry",
     "show module <name[@version]>    – zeigt Manifest-Informationen",
-    "install module <name[@version]> – installiert/aktualisiert Modul",
+    "install distribution            – installiert alle Module einer Distribution",
     "uninstall module <name>         – entfernt ein installiertes Modul",
-    "update module [name]            – aktualisiert Modul(e)",
     "check modules                   – prüft verfügbare Updates",
     "start module <name>             – startet ein installiertes Modul",
     "stop module <name>              – stoppt ein laufendes Modul",
@@ -70,17 +65,17 @@ const MODULE_PATTERN_ARGUMENT: CommandArgument = CommandArgument::optional("patt
 const SEARCH_ARGUMENTS: &[CommandArgument] = &[MODULE_RESOURCE_ARGUMENT, MODULE_PATTERN_ARGUMENT];
 const SEARCH_SHAPE: CommandShape = CommandShape::new("search", &[], SEARCH_ARGUMENTS, &[]);
 
-const INSTALL_ARGUMENTS: &[CommandArgument] = &[MODULE_RESOURCE_ARGUMENT, MODULE_ID_ARGUMENT];
+const DISTRIBUTION_RESOURCE_OPTIONS: &[&str] = &["distribution", "distributions"];
+const DISTRIBUTION_RESOURCE_ARGUMENT: CommandArgument = CommandArgument::required("resource")
+    .with_completion(CompletionKind::Static(DISTRIBUTION_RESOURCE_OPTIONS));
+
+const INSTALL_ARGUMENTS: &[CommandArgument] = &[DISTRIBUTION_RESOURCE_ARGUMENT];
 const INSTALL_SHAPE: CommandShape =
     CommandShape::new("install", &["import"], INSTALL_ARGUMENTS, &[]);
 
 const UNINSTALL_ARGUMENTS: &[CommandArgument] = &[MODULE_RESOURCE_ARGUMENT, MODULE_ID_ARGUMENT];
 const UNINSTALL_SHAPE: CommandShape =
     CommandShape::new("uninstall", &["remove"], UNINSTALL_ARGUMENTS, &[]);
-
-const UPDATE_ARGUMENTS: &[CommandArgument] =
-    &[MODULE_RESOURCE_ARGUMENT, MODULE_OPTIONAL_ID_ARGUMENT];
-const UPDATE_SHAPE: CommandShape = CommandShape::new("update", &["upgrade"], UPDATE_ARGUMENTS, &[]);
 
 const CHECK_ARGUMENTS: &[CommandArgument] = &[MODULE_RESOURCE_ARGUMENT];
 const CHECK_SHAPE: CommandShape = CommandShape::new("check", &[], CHECK_ARGUMENTS, &[]);
@@ -94,9 +89,8 @@ const LOGS_SHAPE: CommandShape = CommandShape::new("logs", &["tail"], LOGS_ARGUM
 
 const SEARCH_DETAILS: &[&str] = &["search modules [pattern] – durchsucht die Modul-Registry"];
 const INSTALL_DETAILS: &[&str] =
-    &["install module <name[@version]> – installiert oder aktualisiert"];
+    &["install distribution – installiert/aktualisiert alle kompatiblen Module"];
 const UNINSTALL_DETAILS: &[&str] = &["uninstall module <name> – entfernt ein Modul"];
-const UPDATE_DETAILS: &[&str] = &["update module [name] – aktualisiert ein Modul oder alle Module"];
 const CHECK_DETAILS: &[&str] = &["check modules – prüft verfügbare Modul-Updates"];
 const LOGS_DETAILS: &[&str] = &["logs module <name> [--tail N] – zeigt Laufzeit-Logs"];
 
@@ -114,8 +108,8 @@ pub fn search_command() -> CommandEntry {
 pub fn install_command() -> CommandEntry {
     CommandEntry::with_shape(
         "install",
-        "Installiert oder aktualisiert Module",
-        "install module <name[@version]>",
+        "Installiert Module einer Fenrir-Distribution",
+        "install distribution",
         INSTALL_DETAILS,
         handle_install_command,
         INSTALL_SHAPE,
@@ -130,17 +124,6 @@ pub fn uninstall_command() -> CommandEntry {
         UNINSTALL_DETAILS,
         handle_uninstall_command,
         UNINSTALL_SHAPE,
-    )
-}
-
-pub fn update_command() -> CommandEntry {
-    CommandEntry::with_shape(
-        "update",
-        "Aktualisiert Module auf die neueste Version",
-        "update module [name]",
-        UPDATE_DETAILS,
-        handle_update_command,
-        UPDATE_SHAPE,
     )
 }
 
@@ -176,22 +159,16 @@ const MODULE_SUBCOMMANDS: &[CommandSubcommand] = &[
         "Manifest eines Moduls anzeigen",
     ),
     CommandSubcommand::new(
-        "install",
+        "install-distribution",
+        &["install_distribution"],
         &[],
-        &[MODULE_ID_ARGUMENT],
-        "Modul installieren oder aktualisieren",
+        "Alle Module für eine Fenrir-Distribution installieren",
     ),
     CommandSubcommand::new(
         "uninstall",
         &["remove"],
         &[MODULE_ID_ARGUMENT],
         "Modul deinstallieren",
-    ),
-    CommandSubcommand::new(
-        "update",
-        &[],
-        &[MODULE_OPTIONAL_ID_ARGUMENT],
-        "Module aktualisieren",
     ),
     CommandSubcommand::new(
         "check-updates",
@@ -385,10 +362,18 @@ fn handle_install_command(
     out: &mut dyn Write,
     _env: ShellEnvironment,
 ) -> io::Result<CommandOutcome> {
-    let Some(tail) = module_tail(args, out, "install module <name[@version]>") else {
+    let Some((resource, tail)) = args.split_first() else {
+        writeln!(out, "Nutzung: install distribution")?;
         return Ok(CommandOutcome::Continue);
     };
-    run_module_command(deps, "install", tail, out)
+
+    if resource.eq_ignore_ascii_case("distribution") || resource.eq_ignore_ascii_case("distributions") {
+        return run_module_command(deps, "install-distribution", tail, out);
+    }
+
+    writeln!(out, "Unbekannte Ressource: {resource}")?;
+    writeln!(out, "Nutzung: install distribution")?;
+    Ok(CommandOutcome::Continue)
 }
 
 fn handle_uninstall_command(
@@ -402,19 +387,6 @@ fn handle_uninstall_command(
         return Ok(CommandOutcome::Continue);
     };
     run_module_command(deps, "uninstall", tail, out)
-}
-
-fn handle_update_command(
-    deps: &CliDependencies,
-    args: &[&str],
-    _registry: &CommandRegistry,
-    out: &mut dyn Write,
-    _env: ShellEnvironment,
-) -> io::Result<CommandOutcome> {
-    let Some(tail) = module_tail(args, out, "update module [name]") else {
-        return Ok(CommandOutcome::Continue);
-    };
-    run_module_command(deps, "update", tail, out)
 }
 
 fn handle_check_command(
@@ -580,9 +552,8 @@ fn dispatch_module(
         "list" => handle_list(ctx, out, args),
         "search" => handle_search(ctx, out, args),
         "info" => handle_info(ctx, out, args),
-        "install" => handle_install(ctx, out, args),
+        "install-distribution" => handle_install_distribution(ctx, out, args),
         "uninstall" => handle_uninstall(ctx, out, args),
-        "update" => handle_update(ctx, out, args),
         "check-updates" => handle_check_updates(ctx, out, args),
         "start" => handle_start(ctx, out, args),
         "stop" => handle_stop(ctx, out, args),
@@ -769,184 +740,91 @@ fn handle_info(
     Ok(CommandOutcome::Continue)
 }
 
-fn handle_install(
+fn handle_install_distribution(
     ctx: &ModulesCommandCtx,
     out: &mut dyn Write,
     args: &[&str],
 ) -> io::Result<CommandOutcome> {
-    if args.is_empty() {
-        writeln!(out, "Use: install module <name[@version]>")?;
+    if !args.is_empty() {
+        writeln!(
+            out,
+            "Fenrir-Version wird automatisch verwendet ({}).",
+            ctx.deps.config.app.version
+        )?;
         return Ok(CommandOutcome::Continue);
     }
 
-    let (module_id, version) = match parse_module_target(args[0], &args[1..]) {
-        Ok(tuple) => tuple,
+    let fenrir_version = ctx.deps.config.app.version.clone();
+
+    let version_for_call = fenrir_version.clone();
+    let plan = match ctx.module_call(|service| async move {
+        service.distribution_plan(&version_for_call).await
+    }) {
+        Ok(plan) => plan,
         Err(err) => {
-            writeln!(out, "{err}")?;
+            render_service_error(out, "Distribution konnte nicht ermittelt werden", &err)?;
             return Ok(CommandOutcome::Continue);
         }
     };
 
-    if let Some(_) = ctx.deps.output() {
-        let job_module = module_id.clone();
-        let job_version = version.clone();
-        if spawn_install_job(ctx, job_module, job_version).is_ok() {
-            writeln!(
-                out,
-                "Installation von '{}' läuft im Hintergrund – Fortschritt folgt unten.",
-                module_id
-            )?;
-            out.flush()?;
-            return Ok(CommandOutcome::Continue);
-        } else {
-            writeln!(
-                out,
-                "Hintergrundauftrag konnte nicht gestartet werden – starte synchrone Installation."
-            )?;
+    if plan.is_empty() {
+        writeln!(
+            out,
+            "Keine Module für Fenrir {} in der Registry gefunden.",
+            fenrir_version
+        )?;
+        return Ok(CommandOutcome::Continue);
+    }
+
+    let mut actionable = Vec::new();
+    let mut table = Table::new(vec![
+        "Aktion".to_string(),
+        "Modul".to_string(),
+        "Installiert".to_string(),
+        "Distribution".to_string(),
+    ]);
+
+    for entry in &plan {
+        let current = entry
+            .current_version
+            .as_ref()
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        table.add_row(vec![
+            entry.action.label().to_string(),
+            entry.module_id.to_string(),
+            current,
+            entry.target_version.to_string(),
+        ]);
+
+        if entry.action.requires_execution() {
+            actionable.push(entry.clone());
         }
     }
 
-    let module_id_for_call = module_id.clone();
-    let version_for_call = version.clone();
-
-    writeln!(out, "Lade Modul {} herunter …", module_id)?;
-    out.flush()?;
-
-    let service_for_thread = ctx.service();
-    let module_id_for_thread = Arc::new(module_id_for_call);
-    let version_for_thread = version_for_call;
-    let (result_tx, result_rx) = mpsc::channel();
-
-    let install_join = thread::spawn(move || {
-        let service = Arc::clone(&service_for_thread);
-        let module_id = Arc::clone(&module_id_for_thread);
-        let version = version_for_thread;
-        let result = run_module_future(move || {
-            let service = Arc::clone(&service);
-            let module_id = Arc::clone(&module_id);
-            async move { service.install(module_id.as_ref(), version.as_ref()).await }
-        });
-        let _ = result_tx.send(result);
-    });
-
-    const BAR_WIDTH: usize = 28;
-    let emit_interval = Duration::from_millis(200);
-    let mut last_emit = Instant::now();
-    let mut simulated_progress = 0usize;
-    let frames = ['|', '/', '-', '\\'];
-    let mut frame_index = 0usize;
-
-    let render_line = |out: &mut dyn Write, text: &str| -> io::Result<()> {
-        write!(out, "\x1b[2K\r{text}")?;
-        out.flush()?;
-        Ok(())
-    };
-
-    render_line(
-        out,
-        &format!(
-            "[download] {} [{}] {:>3}% {}",
-            module_id,
-            " ".repeat(BAR_WIDTH),
-            0,
-            frames[frame_index]
-        ),
-    )?;
-
-    let install_result;
-    loop {
-        match result_rx.try_recv() {
-            Ok(result) => {
-                install_result = result;
-                let line = format!(
-                    "[download] {} [{}] {:>3}% ✓",
-                    module_id,
-                    "#".repeat(BAR_WIDTH),
-                    100
-                );
-                render_line(out, &line)?;
-                writeln!(out)?;
-                break;
-            }
-            Err(TryRecvError::Empty) => {
-                if last_emit.elapsed() >= emit_interval {
-                    simulated_progress = (simulated_progress + 3).min(95);
-                    let filled = (simulated_progress * BAR_WIDTH) / 100;
-                    let frame = frames[frame_index % frames.len()];
-                    frame_index = (frame_index + 1) % frames.len();
-                    let line = format!(
-                        "[download] {} [{}] {:>3}% {}",
-                        module_id,
-                        format!(
-                            "{}{}",
-                            "#".repeat(filled),
-                            " ".repeat(BAR_WIDTH.saturating_sub(filled))
-                        ),
-                        simulated_progress,
-                        frame
-                    );
-                    render_line(out, &line)?;
-                    last_emit = Instant::now();
-                }
-                thread::sleep(Duration::from_millis(120));
-            }
-            Err(TryRecvError::Disconnected) => {
-                render_line(out, "")?;
-                writeln!(out, "Download fehlgeschlagen – interner Fehler.")?;
-                out.flush()?;
-                return Ok(CommandOutcome::Continue);
-            }
-        }
-    }
-
-    let _ = install_join.join();
+    table.render(out, "  ")?;
     writeln!(out)?;
 
-    match install_result {
-        Ok(result) => {
-            writeln!(out, "")?;
-            let status_message = match result.status {
-                ModuleInstallStatus::Installed => "installiert",
-                ModuleInstallStatus::Updated => "aktualisiert",
-                ModuleInstallStatus::AlreadyCurrent => "bereits aktuell",
-            };
-
-            writeln!(
-                out,
-                "✓ Modul {} ({}) {} – Pfad: {}",
-                result.manifest.id, result.manifest.version, status_message, result.path
-            )?;
-
-            let recorded_version = version
-                .clone()
-                .unwrap_or_else(|| ModuleVersion(result.manifest.version.clone()));
-
-            ctx.record_audit(
-                "module::install",
-                &module_id,
-                Some(&recorded_version),
-                AuditOutcome::Success,
-                AuditMetadata::default()
-                    .insert("status", status_message)
-                    .insert("path", result.path),
-            );
-        }
-        Err(err) => {
-            writeln!(out, "")?;
-            render_service_error(out, "Installation fehlgeschlagen", &err)?;
-            ctx.record_audit(
-                "module::install",
-                &module_id,
-                version.as_ref(),
-                AuditOutcome::Failure,
-                AuditMetadata::default()
-                    .insert("error_code", module_error_code(&err))
-                    .insert("error", err.to_string()),
-            );
-        }
+    if actionable.is_empty() {
+        writeln!(
+            out,
+            "Alle Module für Fenrir {} sind bereits installiert.",
+            fenrir_version
+        )?;
+        return Ok(CommandOutcome::Continue);
     }
 
-    Ok(CommandOutcome::Continue)
+    let confirmation = ConfirmationRequest::new(
+        &format!("Distribution {} installieren? (y/n): ", fenrir_version),
+        Box::new(InstallDistributionConfirmation {
+            service: ctx.service(),
+            plan: actionable,
+            fenrir_version,
+        }),
+    )
+    .with_command_context("install distribution", args);
+
+    Ok(CommandOutcome::AwaitConfirmation(confirmation))
 }
 
 fn handle_uninstall(
@@ -994,117 +872,6 @@ fn handle_uninstall(
     }
 
     Ok(CommandOutcome::Continue)
-}
-
-fn handle_update(
-    ctx: &ModulesCommandCtx,
-    out: &mut dyn Write,
-    args: &[&str],
-) -> io::Result<CommandOutcome> {
-    let fenrir_version = ctx.deps.config.app.version.clone();
-
-    if let Some(module_name) = args.first() {
-        let module_id = match parse_module_id(out, module_name)? {
-            Some(id) => id,
-            None => return Ok(CommandOutcome::Continue),
-        };
-
-        let module_id_for_call = module_id.clone();
-        let fenrir_version_for_call = fenrir_version.clone();
-        let result = ctx.module_call(|service| async move {
-            service
-                .update(&module_id_for_call, Some(&fenrir_version_for_call))
-                .await
-        });
-
-        match result {
-            Ok(install_result) => {
-                writeln!(
-                    out,
-                    "✓ Modul {} auf Version {} aktualisiert",
-                    install_result.manifest.id, install_result.manifest.version
-                )?;
-            }
-            Err(err) => {
-                render_service_error(out, "Update fehlgeschlagen", &err)?;
-            }
-        }
-        return Ok(CommandOutcome::Continue);
-    } else {
-        // First, check for available updates and show table
-        writeln!(out, "Prüfe verfügbare Updates...")?;
-        out.flush()?; // Ensure message is displayed immediately
-
-        let fenrir_version_for_call = fenrir_version.clone();
-        let updates = match ctx.module_call(|service| async move {
-            service.check_updates(Some(&fenrir_version_for_call)).await
-        }) {
-            Ok(updates) => updates,
-            Err(err) => {
-                render_service_error(out, "Update-Prüfung fehlgeschlagen", &err)?;
-                return Ok(CommandOutcome::Continue);
-            }
-        };
-
-        if updates.is_empty() {
-            writeln!(out, "Keine installierten Module.")?;
-            out.flush()?;
-            return Ok(CommandOutcome::Continue);
-        }
-
-        // Show table with updates
-        let mut table = Table::new(vec![
-            "Aktion".to_string(),
-            "Modul".to_string(),
-            "Aktuelle Version".to_string(),
-            "Verfügbare Version".to_string(),
-        ]);
-
-        let mut has_updates = false;
-        for update in &updates {
-            let (action, available_version) = if update.has_update {
-                if update.compatible {
-                    has_updates = true;
-                    ("Update".to_string(), update.latest_version.to_string())
-                } else {
-                    (
-                        "Skip (Inkompatibel)".to_string(),
-                        update.latest_version.to_string(),
-                    )
-                }
-            } else {
-                ("Skip".to_string(), String::new())
-            };
-
-            table.add_row(vec![
-                action,
-                update.module_id.to_string(),
-                update.current_version.to_string(),
-                available_version,
-            ]);
-        }
-
-        table.render(out, "  ")?;
-        writeln!(out)?;
-        out.flush()?; // Ensure table is displayed before asking for input
-
-        if !has_updates {
-            writeln!(out, "Keine Updates verfügbar.")?;
-            out.flush()?;
-            return Ok(CommandOutcome::Continue);
-        }
-
-        let confirmation = ConfirmationRequest::new(
-            "Alle Module aktualisieren? (y/n): ",
-            Box::new(UpdateAllConfirmation {
-                service: ctx.service(),
-                fenrir_version: fenrir_version.clone(),
-            }),
-        )
-        .with_command_context("update module", args);
-
-        return Ok(CommandOutcome::AwaitConfirmation(confirmation));
-    }
 }
 
 fn handle_check_updates(
@@ -1171,7 +938,7 @@ fn handle_check_updates(
         writeln!(out)?;
         writeln!(
             out,
-            "💡 {} Update(s) verfügbar. Nutze 'update module' zum Aktualisieren.",
+            "💡 {} Update(s) verfügbar. Nutze 'install distribution' zum Aktualisieren.",
             available_updates
         )?;
     }
@@ -1599,12 +1366,13 @@ fn module_cli_actor(actor: Option<&AuditActor>) -> AuditActor {
     }
 }
 
-struct UpdateAllConfirmation {
+struct InstallDistributionConfirmation {
     service: Arc<ModuleService>,
+    plan: Vec<DistributionPlanEntry>,
     fenrir_version: String,
 }
 
-impl ConfirmationHandler for UpdateAllConfirmation {
+impl ConfirmationHandler for InstallDistributionConfirmation {
     fn handle(
         self: Box<Self>,
         accepted: bool,
@@ -1612,230 +1380,49 @@ impl ConfirmationHandler for UpdateAllConfirmation {
         out: &mut dyn Write,
     ) -> io::Result<CommandOutcome> {
         if !accepted {
-            writeln!(out, "Update abgebrochen.")?;
+            writeln!(out, "Installation abgebrochen.")?;
             return Ok(CommandOutcome::Continue);
         }
 
-        writeln!(out, "Aktualisiere alle Module...")?;
+        writeln!(
+            out,
+            "Installiere Module für Fenrir {}...",
+            self.fenrir_version
+        )?;
         out.flush()?;
 
         let service = Arc::clone(&self.service);
-        let version = self.fenrir_version.clone();
+        let plan = self.plan.clone();
         let result = run_module_future(move || {
             let service = Arc::clone(&service);
-            async move { service.update_all(Some(&version)).await }
+            async move { service.apply_distribution_plan(plan).await }
         });
 
         match result {
             Ok(results) => {
                 if results.is_empty() {
-                    writeln!(out, "Keine Updates durchgeführt.")?;
+                    writeln!(out, "Alle Module waren bereits aktuell.")?;
                 } else {
-                    writeln!(out, "{} Module wurden aktualisiert:", results.len())?;
+                    writeln!(out, "{} Module wurden installiert/aktualisiert:", results.len())?;
                     for result in results {
+                        let status = match result.status {
+                            ModuleInstallStatus::Installed => "installiert",
+                            ModuleInstallStatus::Updated => "aktualisiert",
+                            ModuleInstallStatus::AlreadyCurrent => "aktuell",
+                        };
                         writeln!(
                             out,
-                            "  ✓ {} v{}",
-                            result.manifest.id, result.manifest.version
+                            "  ✓ {} v{} ({})",
+                            result.manifest.id, result.manifest.version, status
                         )?;
                     }
                 }
-                out.flush()?;
             }
             Err(err) => {
-                render_service_error(out, "Update fehlgeschlagen", &err)?;
+                render_service_error(out, "Distribution konnte nicht installiert werden", &err)?;
             }
         }
 
         Ok(CommandOutcome::Continue)
-    }
-}
-
-fn spawn_install_job(
-    ctx: &ModulesCommandCtx,
-    module_id: ModuleId,
-    version: Option<ModuleVersion>,
-) -> io::Result<()> {
-    let Some(output) = ctx.deps.output() else {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            "kein Output-Sink verfügbar",
-        ));
-    };
-    let output = Arc::clone(&output);
-    let service = ctx.service();
-    let services = Arc::clone(&ctx.deps.services);
-    let session_actor = ctx.deps.session_actor().cloned();
-    let module_label = module_id.to_string();
-    let (tx, rx) = mpsc::channel::<Vec<String>>();
-    let done = Arc::new(AtomicBool::new(false));
-    let progress_output = Arc::clone(&output);
-    let progress_done = Arc::clone(&done);
-    thread::spawn(move || progress_loop(rx, progress_output, module_label, progress_done));
-
-    thread::spawn(move || {
-        run_install_worker(
-            service,
-            services,
-            module_id,
-            version,
-            tx,
-            done,
-            session_actor,
-        );
-    });
-    Ok(())
-}
-
-fn run_install_worker(
-    service: Arc<ModuleService>,
-    services: Arc<AppServices>,
-    module_id: ModuleId,
-    version: Option<ModuleVersion>,
-    tx: mpsc::Sender<Vec<String>>,
-    done: Arc<AtomicBool>,
-    session_actor: Option<AuditActor>,
-) {
-    let module_id_for_call = module_id.clone();
-    let version_for_call = version.clone();
-    let install_result = run_module_future(move || {
-        let service = Arc::clone(&service);
-        async move {
-            service
-                .install(&module_id_for_call, version_for_call.as_ref())
-                .await
-        }
-    });
-
-    let mut metadata = AuditMetadata::default()
-        .insert("transport", "ssh")
-        .insert("command", "modules install");
-    if let Some(ref version) = version {
-        metadata = metadata.insert("version", version.to_string());
-    }
-
-    let lines = match &install_result {
-        Ok(result) => {
-            let status_message = match result.status {
-                ModuleInstallStatus::Installed => "installiert",
-                ModuleInstallStatus::Updated => "aktualisiert",
-                ModuleInstallStatus::AlreadyCurrent => "bereits aktuell",
-            };
-            metadata = metadata
-                .insert("status", status_message)
-                .insert("path", result.path.clone());
-            let event = AuditEvent::builder()
-                .actor(module_cli_actor(session_actor.as_ref()))
-                .action("module::install")
-                .target(module_id.to_string())
-                .outcome(AuditOutcome::Success)
-                .metadata(metadata)
-                .build();
-            if let Ok(event) = event {
-                if let Err(err) = services.record_audit(event) {
-                    warn!(error = %err, "module audit append failed (async install)");
-                }
-            }
-            vec![
-                String::new(),
-                format!(
-                    "✓ Modul {} ({}) {} – Pfad: {}",
-                    result.manifest.id, result.manifest.version, status_message, result.path
-                ),
-            ]
-        }
-        Err(err) => {
-            let failure_metadata = metadata
-                .insert("error_code", module_error_code(err))
-                .insert("error", err.to_string());
-            let event = AuditEvent::builder()
-                .actor(module_cli_actor(session_actor.as_ref()))
-                .action("module::install")
-                .target(module_id.to_string())
-                .outcome(AuditOutcome::Failure)
-                .metadata(failure_metadata)
-                .build();
-            if let Ok(event) = event {
-                if let Err(record_err) = services.record_audit(event) {
-                    warn!(error = %record_err, "module audit append failed (async install)");
-                }
-            }
-            vec![
-                String::new(),
-                format!(
-                    "✗ Installation fehlgeschlagen ({}): {}",
-                    module_error_code(err),
-                    module_error_message(err)
-                ),
-            ]
-        }
-    };
-
-    let _ = tx.send(lines);
-    done.store(true, Ordering::Relaxed);
-}
-
-fn progress_loop(
-    rx: mpsc::Receiver<Vec<String>>,
-    output: Arc<dyn CommandOutput>,
-    module_label: String,
-    done: Arc<AtomicBool>,
-) {
-    const BAR_WIDTH: usize = 28;
-    let frames = ['|', '/', '-', '\\'];
-    let mut frame_index = 0usize;
-    let mut percent = 0usize;
-
-    output.push("\n");
-    output.push(&format!(
-        "\r[download] {} [{}] {:>3}% {}   ",
-        module_label,
-        " ".repeat(BAR_WIDTH),
-        percent,
-        frames[frame_index]
-    ));
-
-    loop {
-        match rx.try_recv() {
-            Ok(lines) => {
-                output.push(&format!(
-                    "\r[download] {} [{}] {:>3}% ✓\n",
-                    module_label,
-                    "#".repeat(BAR_WIDTH),
-                    100
-                ));
-                for line in lines {
-                    if line.is_empty() {
-                        output.push("\n");
-                    } else {
-                        output.push(&format!("{line}\n"));
-                    }
-                }
-                done.store(true, Ordering::Relaxed);
-                break;
-            }
-            Err(TryRecvError::Empty) => {
-                if done.load(Ordering::Relaxed) {
-                    break;
-                }
-                percent = (percent + 3).min(95);
-                let filled = (percent * BAR_WIDTH) / 100;
-                let frame = frames[frame_index % frames.len()];
-                frame_index = (frame_index + 1) % frames.len();
-                let bar = format!(
-                    "{}{}",
-                    "#".repeat(filled),
-                    " ".repeat(BAR_WIDTH.saturating_sub(filled))
-                );
-                output.push(&format!(
-                    "\r[download] {} [{}] {:>3}% {}   ",
-                    module_label, bar, percent, frame
-                ));
-                thread::sleep(Duration::from_millis(200));
-            }
-            Err(TryRecvError::Disconnected) => {
-                break;
-            }
-        }
     }
 }

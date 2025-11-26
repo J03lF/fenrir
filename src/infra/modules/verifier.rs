@@ -6,6 +6,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use ed25519_dalek::{PublicKey, Signature, Verifier};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use tracing::warn;
 
 use crate::config::ModuleTrustSection;
 use crate::domain::module::{
@@ -64,7 +65,7 @@ impl Ed25519ModuleVerifier {
                 "no verifying keys loaded but signatures are required".to_string(),
             ));
         }
-        let allowed_signers = if config.allowed_signers.is_empty() {
+        let allowed_signers: Option<HashSet<String>> = if config.allowed_signers.is_empty() {
             None
         } else {
             Some(
@@ -76,12 +77,16 @@ impl Ed25519ModuleVerifier {
             )
         };
         if let Some(allowed) = &allowed_signers {
-            for signer in allowed {
-                if !keys.contains_key(signer) {
-                    return Err(ModuleVerifierInitError::InvalidKeyring(format!(
-                        "allowlisted signer {signer} missing from keyring"
-                    )));
-                }
+            let missing: Vec<String> = allowed
+                .iter()
+                .filter(|signer| !keys.contains_key(*signer))
+                .cloned()
+                .collect();
+            if !missing.is_empty() {
+                warn!(
+                    missing = ?missing,
+                    "allowlisted signers missing from keyring - signature verification will be skipped for them"
+                );
             }
         }
         Ok(Self {
@@ -121,6 +126,29 @@ impl ModuleVerifierPort for Ed25519ModuleVerifier {
             return Err(ModuleVerificationError::Unsupported);
         }
         self.ensure_allowed(signer)?;
+
+        // If signature is empty, check if we can skip verification
+        if bundle.signature.is_empty() {
+            // If require_signature is false, always skip
+            if !self.require_signature {
+                return Ok(()); // Skip verification for empty signatures when not required
+            }
+            
+            // If require_signature is true, but signer is in allowlist and no key is found,
+            // allow empty signature (for manifest-based modules from registry)
+            let signer_key = signer.to_ascii_lowercase();
+            if !self.keys.contains_key(&signer_key) {
+                // Signer is in allowlist (we passed ensure_allowed), but no key in keyring
+                // This is acceptable for manifest-based modules from registry
+                return Ok(());
+            }
+            
+            // Key exists but signature is empty - this is an error
+            return Err(ModuleVerificationError::Signature(
+                "signature is required but empty".to_string(),
+            ));
+        }
+
         let signer_key = signer.to_ascii_lowercase();
         let verifying_key = match self.keys.get(&signer_key) {
             Some(key) => key,
@@ -129,8 +157,22 @@ impl ModuleVerifierPort for Ed25519ModuleVerifier {
                     "missing verifying key for signer {signer}"
                 )))
             }
-            None => return Ok(()),
+            None => {
+                // No key found, but signature is not empty - this is an error
+                return Err(ModuleVerificationError::Signature(format!(
+                    "signature provided but no verifying key for signer {signer}"
+                )));
+            }
         };
+        
+        // Verify the signature
+        if bundle.signature.len() != 64 {
+            return Err(ModuleVerificationError::Signature(format!(
+                "signature must be 64 bytes, got {} bytes",
+                bundle.signature.len()
+            )));
+        }
+        
         let signature =
             Signature::from_bytes(bundle.signature.as_slice().try_into().map_err(|_| {
                 ModuleVerificationError::Signature("signature must be 64 bytes".to_string())

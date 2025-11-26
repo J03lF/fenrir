@@ -132,5 +132,5 @@ cache_dir = "/Users/jfurocket/Documents/personal/modules/.cache"
 
 [modules.trust]
 require_signature = false
-allowed_signers = []
+allowed_signers = ["module-registry"]
 keyring_path = "config/modules/keyring.json"

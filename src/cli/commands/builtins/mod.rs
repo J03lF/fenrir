@@ -24,7 +24,6 @@ pub fn register_builtins(registry: &mut CommandRegistry) {
     registry.register(modules::search_command());
     registry.register(modules::install_command());
     registry.register(modules::uninstall_command());
-    registry.register(modules::update_command());
     registry.register(modules::check_command());
     registry.register(modules::logs_command());
     registry.register(user::command());

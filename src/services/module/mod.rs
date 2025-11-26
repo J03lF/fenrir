@@ -1,10 +1,11 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::domain::module::{
-    InstalledModule, ModuleId, ModuleInstallResult, ModuleInstallStatus, ModuleManifest,
-    ModuleRegistryPort, ModuleResult, ModuleRuntimeError, ModuleRuntimeInfo, ModuleRuntimePort,
-    ModuleSearchQuery, ModuleServiceError, ModuleStartConfig, ModuleStorageError,
-    ModuleStoragePort, ModuleSummary, ModuleVerifierPort, ModuleVersion,
+    DistributionTarget, InstalledModule, ModuleId, ModuleInstallResult, ModuleInstallStatus,
+    ModuleManifest, ModuleRegistryPort, ModuleResult, ModuleRuntimeError, ModuleRuntimeInfo,
+    ModuleRuntimePort, ModuleSearchQuery, ModuleServiceError, ModuleStartConfig,
+    ModuleStorageError, ModuleStoragePort, ModuleSummary, ModuleVerifierPort, ModuleVersion,
 };
 
 /// Information about available updates for a module
@@ -15,6 +16,35 @@ pub struct ModuleUpdateInfo {
     pub latest_version: ModuleVersion,
     pub has_update: bool,
     pub compatible: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DistributionAction {
+    Install,
+    Update,
+    AlreadyCurrent,
+}
+
+impl DistributionAction {
+    pub fn label(&self) -> &'static str {
+        match self {
+            DistributionAction::Install => "Install",
+            DistributionAction::Update => "Update",
+            DistributionAction::AlreadyCurrent => "Aktuell",
+        }
+    }
+
+    pub fn requires_execution(&self) -> bool {
+        matches!(self, DistributionAction::Install | DistributionAction::Update)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DistributionPlanEntry {
+    pub module_id: ModuleId,
+    pub target_version: ModuleVersion,
+    pub current_version: Option<ModuleVersion>,
+    pub action: DistributionAction,
 }
 
 #[derive(Clone)]
@@ -156,6 +186,67 @@ impl ModuleService {
         }
 
         Ok(updates)
+    }
+
+    /// Build a plan for installing/updating all modules compatible with the target Fenrir version
+    pub async fn distribution_plan(
+        &self,
+        fenrir_version: &str,
+    ) -> ModuleResult<Vec<DistributionPlanEntry>> {
+        let targets = self.registry.distribution_targets(fenrir_version).await?;
+        let installed = self.list_installed().await?;
+        let mut current_map = HashMap::new();
+        for module in installed {
+            let module_id = module.manifest.module_id().map_err(|e| {
+                ModuleServiceError::Storage(ModuleStorageError::InvalidState(e.to_string()))
+            })?;
+            current_map.insert(module_id, module.manifest.module_version());
+        }
+
+        let mut plan = Vec::new();
+        for DistributionTarget { module_id, version } in targets {
+            let current = current_map.get(&module_id).cloned();
+            let action = match current.as_ref() {
+                None => DistributionAction::Install,
+                Some(current_version) if current_version < &version => DistributionAction::Update,
+                _ => DistributionAction::AlreadyCurrent,
+            };
+
+            plan.push(DistributionPlanEntry {
+                module_id,
+                target_version: version,
+                current_version: current,
+                action,
+            });
+        }
+
+        plan.sort_by(|a, b| a.module_id.cmp(&b.module_id));
+        Ok(plan)
+    }
+
+    /// Apply a distribution plan by installing/updating required modules
+    pub async fn apply_distribution_plan(
+        &self,
+        plan: Vec<DistributionPlanEntry>,
+    ) -> ModuleResult<Vec<ModuleInstallResult>> {
+        let mut results = Vec::new();
+        for entry in plan {
+            if !entry.action.requires_execution() {
+                continue;
+            }
+
+            let result = self
+                .install(&entry.module_id, Some(&entry.target_version))
+                .await?;
+
+            if matches!(result.status, ModuleInstallStatus::AlreadyCurrent) {
+                continue;
+            }
+
+            results.push(result);
+        }
+
+        Ok(results)
     }
 
     /// Update a specific module to latest compatible version

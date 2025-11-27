@@ -142,8 +142,63 @@ impl ServiceDescriptor {
 }
 
 #[derive(Clone, Debug)]
+pub struct ServiceDescriptorOwned {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub kind: ServiceKind,
+    pub critical: bool,
+    pub tags: Vec<ServiceTag>,
+}
+
+impl ServiceDescriptorOwned {
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        kind: ServiceKind,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            description: description.into(),
+            kind,
+            critical: false,
+            tags: Vec::new(),
+        }
+    }
+
+    pub fn with_tags(mut self, tags: impl Into<Vec<ServiceTag>>) -> Self {
+        self.tags = tags.into();
+        self
+    }
+
+    pub fn critical(mut self) -> Self {
+        self.critical = true;
+        self
+    }
+
+    pub fn has_tag(&self, tag: ServiceTag) -> bool {
+        self.tags.iter().any(|t| t == &tag)
+    }
+}
+
+impl From<ServiceDescriptor> for ServiceDescriptorOwned {
+    fn from(value: ServiceDescriptor) -> Self {
+        Self {
+            id: value.id.to_string(),
+            name: value.name.to_string(),
+            description: value.description.to_string(),
+            kind: value.kind,
+            critical: value.critical,
+            tags: value.tags.to_vec(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct ServiceSnapshot {
-    pub descriptor: ServiceDescriptor,
+    pub descriptor: ServiceDescriptorOwned,
     pub status: ServiceStatus,
     pub since: SystemTime,
     pub note: Option<String>,
@@ -196,7 +251,7 @@ pub enum ServiceControlError {
 }
 
 struct ServiceRecord {
-    descriptor: ServiceDescriptor,
+    descriptor: ServiceDescriptorOwned,
     status: ServiceStatus,
     since: SystemTime,
     note: Option<String>,
@@ -204,7 +259,7 @@ struct ServiceRecord {
 
 #[derive(Clone)]
 pub struct ServiceRegistry {
-    inner: Arc<RwLock<BTreeMap<&'static str, ServiceRecord>>>,
+    inner: Arc<RwLock<BTreeMap<String, ServiceRecord>>>,
     events: broadcast::Sender<ServiceSnapshot>,
 }
 
@@ -225,21 +280,23 @@ impl ServiceRegistry {
 
     pub fn register(
         &self,
-        descriptor: ServiceDescriptor,
+        descriptor: impl Into<ServiceDescriptorOwned>,
         status: ServiceStatus,
         note: impl Into<Option<String>>,
     ) {
+        let descriptor_owned = descriptor.into();
+        let id = descriptor_owned.id.clone();
         let record = ServiceRecord {
-            descriptor,
+            descriptor: descriptor_owned,
             status,
             since: SystemTime::now(),
             note: note.into(),
         };
         let snapshot = if let Ok(mut guard) = self.inner.write() {
-            guard.insert(descriptor.id, record);
-            guard.get(descriptor.id).map(snapshot_from_record)
+            guard.insert(id.clone(), record);
+            guard.get(&id).map(snapshot_from_record)
         } else {
-            tracing::error!(service_id = descriptor.id, "service registry lock poisoned");
+            tracing::error!(service_id = id, "service registry lock poisoned");
             None
         };
         if let Some(snapshot) = snapshot {
@@ -289,6 +346,25 @@ impl ServiceRegistry {
         }
     }
 
+    pub fn unregister(&self, id: &str) {
+        if let Ok(mut guard) = self.inner.write() {
+            guard.remove(id);
+        }
+    }
+
+    pub fn unregister_prefixed(&self, prefix: &str) {
+        if let Ok(mut guard) = self.inner.write() {
+            let ids: Vec<String> = guard
+                .keys()
+                .filter(|key| key.starts_with(prefix))
+                .cloned()
+                .collect();
+            for id in ids {
+                guard.remove(&id);
+            }
+        }
+    }
+
     pub fn snapshot(&self) -> Vec<ServiceSnapshot> {
         match self.inner.read() {
             Ok(guard) => guard.values().map(snapshot_from_record).collect(),
@@ -310,7 +386,7 @@ impl ServiceRegistry {
 
 fn snapshot_from_record(record: &ServiceRecord) -> ServiceSnapshot {
     ServiceSnapshot {
-        descriptor: record.descriptor,
+        descriptor: record.descriptor.clone(),
         status: record.status,
         since: record.since,
         note: record.note.clone(),
@@ -483,7 +559,7 @@ impl AppServices {
         self.register_runtime_service(service);
     }
 
-    fn controllable_non_core_ids(&self) -> Vec<&'static str> {
+    fn controllable_non_core_ids(&self) -> Vec<String> {
         let managed = self
             .managed
             .read()
@@ -493,10 +569,12 @@ impl AppServices {
             .snapshot()
             .into_iter()
             .filter(|snapshot| {
-                managed.contains(&snapshot.descriptor.id)
+                managed
+                    .iter()
+                    .any(|candidate| *candidate == snapshot.descriptor.id.as_str())
                     && !snapshot.descriptor.has_tag(ServiceTag::Core)
             })
-            .map(|snapshot| snapshot.descriptor.id)
+            .map(|snapshot| snapshot.descriptor.id.clone())
             .collect()
     }
 
@@ -583,8 +661,8 @@ impl AppServices {
         self.controllable_non_core_ids()
             .into_iter()
             .map(|id| ServiceActionReport {
-                id: id.to_string(),
-                result: self.stop_service(id, force),
+                id: id.clone(),
+                result: self.stop_service(&id, force),
             })
             .collect()
     }
@@ -593,8 +671,8 @@ impl AppServices {
         self.controllable_non_core_ids()
             .into_iter()
             .map(|id| ServiceActionReport {
-                id: id.to_string(),
-                result: self.start_service(id),
+                id: id.clone(),
+                result: self.start_service(&id),
             })
             .collect()
     }
@@ -603,8 +681,8 @@ impl AppServices {
         self.controllable_non_core_ids()
             .into_iter()
             .map(|id| ServiceActionReport {
-                id: id.to_string(),
-                result: self.restart_service(id, force),
+                id: id.clone(),
+                result: self.restart_service(&id, force),
             })
             .collect()
     }

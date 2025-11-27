@@ -262,8 +262,8 @@ mod tests {
     use super::*;
     use crate::domain::module::{
         InstalledModule, ModuleArtifactDescriptor, ModuleBundle, ModuleChecksum,
-        ModuleInstallResult, ModuleManifest, ModuleSignatureDescriptor, ModuleStorageError,
-        ModuleStoragePort, SignatureAlgorithm,
+        ModuleInstallResult, ModuleInstallSource, ModuleManifest, ModuleSignatureDescriptor,
+        ModuleStorageError, ModuleStoragePort, SignatureAlgorithm,
     };
     use async_trait::async_trait;
     use std::time::SystemTime;
@@ -288,6 +288,7 @@ mod tests {
         async fn stage_and_activate(
             &self,
             _bundle: ModuleBundle,
+            _source: ModuleInstallSource,
         ) -> Result<ModuleInstallResult, ModuleStorageError> {
             Err(ModuleStorageError::InvalidState("not implemented".into()))
         }
@@ -326,6 +327,7 @@ mod tests {
             },
             installed_at: SystemTime::now(),
             path: "test".into(),
+            source: ModuleInstallSource::Distribution,
         }
     }
 

@@ -1,33 +1,37 @@
-2025-11-26T12:25:55.432110Z  INFO main ThreadId(01) fenrir::infra::logging: dateilogging initialisiert log_path=logs/app.log
-2025-11-26T12:25:55.432188Z  INFO main ThreadId(01) fenrir::infra::logging: db-logdatei vorbereitet log_path=logs/db.log
-2025-11-26T12:25:55.433930Z  INFO main ThreadId(01) fenrir::boot: core services registered in registry
-2025-11-26T12:25:55.434342Z  INFO main ThreadId(01) fenrir::boot: scheduler service started
-2025-11-26T12:25:55.434543Z  INFO tokio-runtime-worker ThreadId(14) fenrir::services::scheduler: scheduler heartbeat loop started
-2025-11-26T12:25:55.435256Z  INFO                 main ThreadId(01) fenrir::boot: audit log persistence configured path=/opt/fenrir/development/tmp/runtime/audit/fenrir-audit-history.json capacity=2048 retention_hours=24 persist_seconds=30
-2025-11-26T12:25:55.441093Z  WARN                 main ThreadId(01) fenrir::infra::modules::verifier: allowlisted signers missing from keyring - signature verification will be skipped for them missing=["module-registry"]
-2025-11-26T12:25:55.441959Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: loaded 0 module states from disk
-2025-11-26T12:25:55.462785Z  INFO                 main ThreadId(01) fenrir::infra::http::server: HTTP control-plane authentication via identity broker
-2025-11-26T12:25:55.462845Z  INFO                 main ThreadId(01) fenrir::boot: boot complete app=fenrir version=0.1.4
-2025-11-26T12:25:55.466211Z  INFO                 main ThreadId(01) fenrir::boot: bootstrap module ready module=fenrir-api version="latest" status=AlreadyCurrent
-2025-11-26T12:25:55.466265Z  INFO                 main ThreadId(01) fenrir::boot: transport initialisation triggered
-2025-11-26T12:25:55.466294Z  INFO tokio-runtime-worker ThreadId(14) fenrir::boot: ssh server task spawned
-2025-11-26T12:25:55.466592Z  INFO tokio-runtime-worker ThreadId(14) fenrir::infra::ssh: starting SSH server host=127.0.0.1 port=2222
-2025-11-26T12:25:59.975878Z  INFO tokio-runtime-worker ThreadId(10) thrussh::server::encrypted: pty-req: unknown pty code 42
-2025-11-26T12:26:07.492371Z  WARN ThreadId(18) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
-2025-11-26T12:26:10.468052Z  WARN tokio-runtime-worker ThreadId(06) fenrir::services::scheduler: db ping failed error=DB-Verbindungsfehler: error connecting to server: Connection refused (os error 61)
-2025-11-26T12:27:30.265543Z  WARN ThreadId(35) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
-2025-11-26T12:27:33.892624Z  WARN ThreadId(67) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
-2025-11-26T12:27:59.458651Z  WARN ThreadId(99) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
-2025-11-26T12:28:10.470327Z  WARN tokio-runtime-worker ThreadId(10) fenrir::services::scheduler: db ping failed error=DB-Verbindungsfehler: error connecting to server: Connection refused (os error 61)
-2025-11-26T12:30:10.474292Z  WARN tokio-runtime-worker ThreadId(06) fenrir::services::scheduler: db ping failed error=DB-Verbindungsfehler: error connecting to server: Connection refused (os error 61)
-2025-11-26T12:32:10.477871Z  WARN tokio-runtime-worker ThreadId(10) fenrir::services::scheduler: db ping failed error=DB-Verbindungsfehler: error connecting to server: Connection refused (os error 61)
-2025-11-26T12:34:10.480495Z  WARN tokio-runtime-worker ThreadId(06) fenrir::services::scheduler: db ping failed error=DB-Verbindungsfehler: error connecting to server: Connection refused (os error 61)
-2025-11-26T12:36:10.485497Z  WARN tokio-runtime-worker ThreadId(10) fenrir::services::scheduler: db ping failed error=DB-Verbindungsfehler: error connecting to server: Connection refused (os error 61)
-2025-11-26T12:38:10.490018Z  WARN tokio-runtime-worker ThreadId(06) fenrir::services::scheduler: db ping failed error=DB-Verbindungsfehler: error connecting to server: Connection refused (os error 61)
-2025-11-26T12:40:07.021064Z  INFO tokio-runtime-worker ThreadId(10) thrussh::server::encrypted: pty-req: unknown pty code 42
-2025-11-26T12:40:09.350602Z  WARN ThreadId(121) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
-2025-11-26T12:40:10.494196Z  WARN tokio-runtime-worker ThreadId(06) fenrir::services::scheduler: db ping failed error=DB-Verbindungsfehler: error connecting to server: Connection refused (os error 61)
-2025-11-26T12:41:22.457771Z  WARN ThreadId(138) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
-2025-11-26T12:42:10.498600Z  WARN tokio-runtime-worker ThreadId(06) fenrir::services::scheduler: db ping failed error=DB-Verbindungsfehler: error connecting to server: Connection refused (os error 61)
-2025-11-26T12:44:10.503735Z  WARN tokio-runtime-worker ThreadId(06) fenrir::services::scheduler: db ping failed error=DB-Verbindungsfehler: error connecting to server: Connection refused (os error 61)
-2025-11-26T12:46:10.508652Z  WARN tokio-runtime-worker ThreadId(14) fenrir::services::scheduler: db ping failed error=DB-Verbindungsfehler: error connecting to server: Connection refused (os error 61)
+2025-11-27T18:33:17.064806Z  INFO main ThreadId(01) fenrir::infra::logging: dateilogging initialisiert log_path=logs/app.log
+2025-11-27T18:33:17.064935Z  INFO main ThreadId(01) fenrir::infra::logging: db-logdatei vorbereitet log_path=logs/db.log
+2025-11-27T18:33:17.125103Z  INFO main ThreadId(01) fenrir::boot: core services registered in registry
+2025-11-27T18:33:17.125735Z  INFO main ThreadId(01) fenrir::boot: scheduler service started
+2025-11-27T18:33:17.125872Z  INFO tokio-runtime-worker ThreadId(04) fenrir::services::scheduler: scheduler heartbeat loop started
+2025-11-27T18:33:17.128182Z  INFO                 main ThreadId(01) fenrir::boot: audit log persistence configured path=/opt/fenrir/development/tmp/runtime/audit/fenrir-audit-history.json capacity=2048 retention_hours=24 persist_seconds=30
+2025-11-27T18:33:17.134965Z  WARN                 main ThreadId(01) fenrir::infra::modules::verifier: allowlisted signers missing from keyring - signature verification will be skipped for them missing=["module-registry"]
+2025-11-27T18:33:17.135916Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: loaded 0 module states from disk
+2025-11-27T18:33:17.183829Z  INFO                 main ThreadId(01) fenrir::infra::http::server: HTTP control-plane authentication via identity broker
+2025-11-27T18:33:17.183900Z  INFO                 main ThreadId(01) fenrir::boot: boot complete app=fenrir version=0.1.4
+2025-11-27T18:33:17.188405Z  INFO                 main ThreadId(01) fenrir::boot: bootstrap module ready module=fenrir-api version="latest" status=AlreadyCurrent
+2025-11-27T18:33:17.189501Z  WARN                 main ThreadId(01) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-11-27T18:33:17.191186Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: module process started module_id=fenrir-api pid=51901 port=None
+2025-11-27T18:33:17.191623Z  INFO                 main ThreadId(01) fenrir::services::module: module started successfully module_id=fenrir-api pid=Some(51901) port=None
+2025-11-27T18:33:17.193042Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: module process started module_id=notification-hub pid=51902 port=None
+2025-11-27T18:33:17.193296Z  INFO                 main ThreadId(01) fenrir::services::module: module started successfully module_id=notification-hub pid=Some(51902) port=None
+2025-11-27T18:33:17.193362Z  INFO tokio-runtime-worker ThreadId(12) fenrir::boot: ssh server task spawned
+2025-11-27T18:33:17.193376Z  INFO                 main ThreadId(01) fenrir::boot: transport initialisation triggered
+2025-11-27T18:33:17.193604Z  INFO tokio-runtime-worker ThreadId(12) fenrir::infra::ssh: starting SSH server host=127.0.0.1 port=2222
+2025-11-27T18:33:17.193898Z  INFO tokio-runtime-worker ThreadId(14) fenrir::infra::http::server: HTTP server task spawned
+2025-11-27T18:33:20.921854Z  INFO tokio-runtime-worker ThreadId(13) thrussh::server::encrypted: pty-req: unknown pty code 42
+2025-11-27T18:33:23.532914Z  WARN ThreadId(19) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-11-27T18:33:25.652593Z  WARN ThreadId(51) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-11-27T18:33:37.399021Z  WARN ThreadId(83) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-11-27T18:33:41.162194Z  WARN ThreadId(115) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-11-27T18:33:43.106956Z  WARN ThreadId(147) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-11-27T18:34:11.162819Z  WARN ThreadId(196) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-11-27T18:34:11.838660Z  INFO tokio-runtime-worker ThreadId(04) fenrir::infra::modules::runtime::process: module stopped module_id=fenrir-api pid=51901
+2025-11-27T18:34:12.343321Z  INFO tokio-runtime-worker ThreadId(13) fenrir::infra::modules::runtime::process: module stopped module_id=notification-hub pid=51902
+2025-11-27T18:34:12.345338Z  INFO tokio-runtime-worker ThreadId(13) fenrir::services::module: activating module dev service override module=fenrir-api services=1
+2025-11-27T18:34:17.935381Z  WARN ThreadId(213) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-11-27T18:34:18.114217Z  WARN tokio-runtime-worker ThreadId(14) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-11-27T18:34:18.120374Z  INFO tokio-runtime-worker ThreadId(04) fenrir::infra::modules::runtime::process: module process started module_id=fenrir-api pid=52073 port=None
+2025-11-27T18:34:18.121668Z  INFO tokio-runtime-worker ThreadId(04) fenrir::services::module: module started successfully module_id=fenrir-api pid=Some(52073) port=None
+2025-11-27T18:34:18.128491Z  INFO tokio-runtime-worker ThreadId(14) fenrir::infra::modules::runtime::process: module process started module_id=notification-hub pid=52074 port=None
+2025-11-27T18:34:18.134012Z  INFO tokio-runtime-worker ThreadId(14) fenrir::services::module: module started successfully module_id=notification-hub pid=Some(52074) port=None
+2025-11-27T18:34:35.775224Z  WARN ThreadId(229) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"

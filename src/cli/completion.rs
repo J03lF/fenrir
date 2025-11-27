@@ -523,9 +523,9 @@ mod tests {
     use crate::config::{
         AppConfig, AppSection, AuditSection, AuditStorageSection, CliSection, DbConnectionSettings,
         DbConnections, DbPoolSettings, DbSection, HttpConfig, HttpSecuritySection, HttpTlsConfig,
-        JwtConfig, KdfConfig, ModuleRegistrySection, ModuleRegistryTlsSection,
-        ModuleRuntimeSection, ModuleStorageSection, ModuleTrustSection, ModulesSection,
-        SecuritySection, ServerSection, SessionSection, SshConfig, SshTlsConfig,
+        IdentitySection, JwtConfig, KdfConfig, ModuleDevSourcesSection, ModuleRegistrySection,
+        ModuleRegistryTlsSection, ModuleRuntimeSection, ModuleStorageSection, ModuleTrustSection,
+        ModulesSection, SecuritySection, ServerSection, SessionSection, SshConfig, SshTlsConfig,
         TelemetryHealthSection, TelemetryMetricsSection, TelemetrySection, TelemetrySystemSection,
         TelemetryTracingSection,
     };
@@ -621,6 +621,7 @@ mod tests {
                     idle_timeout_seconds: 900,
                     cleanup_interval_seconds: 300,
                 },
+                identity: IdentitySection::default(),
             },
             db: DbSection {
                 default_engine: "postgres".to_string(),
@@ -663,6 +664,7 @@ mod tests {
                 runtime: ModuleRuntimeSection::default(),
                 bootstrap: Vec::new(),
                 trust: ModuleTrustSection::default(),
+                dev_sources: ModuleDevSourcesSection::default(),
             },
         })
     }

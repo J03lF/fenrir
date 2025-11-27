@@ -31,24 +31,24 @@ impl ServiceCliAction {
     }
 }
 
-const SERVICE_RESOURCE_OPTIONS: &[&str] = &["service", "services", "module", "modules"];
+const SERVICE_RESOURCE_OPTIONS: &[&str] = &["service", "services"];
 const LIST_RESOURCE_OPTIONS: &[&str] = &["services", "jobs", "modules"];
 const SERVICE_TARGET_GLOBAL_OPTIONS: &[&str] = &["--all", "-a", "all"];
 const SERVICE_FORCE_OPTIONS: &[&str] = &["--force", "-f"];
 
 const START_DETAILS: &[&str] = &[
     "start service <id|--all> – startet einen steuerbaren Service",
-    "start module <name> – startet ein installiertes Modul",
+    "Module werden automatisch verwaltet (kein manuelles start module)",
 ];
 
 const STOP_DETAILS: &[&str] = &[
     "stop service <id|--all> [--force] – stoppt einen Service",
-    "stop module <name> – stoppt ein Modul",
+    "Module werden automatisch verwaltet (kein manuelles stop module)",
 ];
 
 const RESTART_DETAILS: &[&str] = &[
     "restart service <id|--all> [--force] – Neustart von Services",
-    "restart module <name> – startet ein Modul neu",
+    "Module werden automatisch verwaltet (kein manuelles restart module)",
 ];
 
 const LIST_DETAILS: &[&str] = &[
@@ -209,7 +209,7 @@ fn list_services(deps: &CliDependencies, out: &mut dyn Write) -> io::Result<()> 
         return Ok(());
     }
 
-    entries.sort_by(|a, b| a.descriptor.id.cmp(b.descriptor.id));
+    entries.sort_by(|a, b| a.descriptor.id.cmp(&b.descriptor.id));
 
     let mut table = Table::new(vec![
         "ID".to_string(),
@@ -331,10 +331,6 @@ fn complete_action_targets(deps: &CliDependencies, ctx: &CompletionContext<'_>) 
         return suggestions;
     }
 
-    if matches!(resource, "module" | "modules") {
-        return modules::complete_module_ids(deps, ctx);
-    }
-
     Vec::new()
 }
 
@@ -375,13 +371,16 @@ fn route_service_action(
             Ok(CommandOutcome::Continue)
         }
         "module" | "modules" => {
-            let tail = if args.len() > 1 { &args[1..] } else { &[] };
-            if tail.is_empty() {
-                render_action_usage(out, action)?;
-                Ok(CommandOutcome::Continue)
-            } else {
-                modules::run_module_command(deps, action.verb(), tail, out)
-            }
+            writeln!(
+                out,
+                "Module werden automatisch verwaltet – '{}' module ist deaktiviert.",
+                action.verb()
+            )?;
+            writeln!(
+                out,
+                "Nutze 'sync module' oder 'install distribution'; Module starten/stoppen selbst."
+            )?;
+            Ok(CommandOutcome::Continue)
         }
         other => {
             writeln!(out, "unbekannte Ressource: {other}")?;
@@ -395,15 +394,15 @@ fn render_action_usage(out: &mut dyn Write, action: ServiceCliAction) -> io::Res
     match action {
         ServiceCliAction::Start => writeln!(
             out,
-            "Nutzung: start service <id|--all> | start module <name>"
+            "Nutzung: start service <id|--all>  (Module starten automatisch)"
         )?,
         ServiceCliAction::Stop => writeln!(
             out,
-            "Nutzung: stop service <id|--all> [--force] | stop module <name>"
+            "Nutzung: stop service <id|--all> [--force]  (Module stoppen automatisch)"
         )?,
         ServiceCliAction::Restart => writeln!(
             out,
-            "Nutzung: restart service <id|--all> [--force] | restart module <name>"
+            "Nutzung: restart service <id|--all> [--force]  (Module werden ohne manuelle Steuerung verwaltet)"
         )?,
     }
     Ok(())

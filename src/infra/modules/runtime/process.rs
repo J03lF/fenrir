@@ -14,6 +14,14 @@ use crate::domain::module::{
     ModuleStartConfig, ModuleStoragePort, ModuleVersion,
 };
 
+/// Classification result for executable validation.
+enum ExecCheck {
+    Compatible,
+    Script,
+    Foreign(&'static str),
+    Unknown,
+}
+
 /// State file name for persisting runtime information
 const STATE_FILE_NAME: &str = "runtime-state.json";
 
@@ -250,6 +258,60 @@ impl ProcessModuleRuntime {
         }
     }
 
+    /// Check if a file is a valid executable binary for the current platform
+    /// Accepts:
+    /// - ELF on Linux
+    /// - Mach-O / Universal binaries on macOS
+    /// - Scripts with shebang (`#!`)
+    fn classify_executable(path: &PathBuf) -> ExecCheck {
+        let mut magic = [0u8; 4];
+        let mut bytes_read = 0usize;
+
+        if let Ok(mut file) = std::fs::File::open(path) {
+            use std::io::Read;
+            if let Ok(read) = file.read(&mut magic) {
+                bytes_read = read;
+            }
+        }
+
+        if bytes_read >= 4 {
+            // 32/64-bit Mach-O and universal (fat) binaries
+            let is_mach = (magic == [0xFE, 0xED, 0xFA, 0xCE])
+                || (magic == [0xFE, 0xED, 0xFA, 0xCF])
+                || (magic == [0xCE, 0xFA, 0xED, 0xFE])
+                || (magic == [0xCF, 0xFA, 0xED, 0xFE])
+                || (magic == [0xCA, 0xFE, 0xBA, 0xBE]);
+            if is_mach {
+                return if cfg!(target_os = "macos") {
+                    ExecCheck::Compatible
+                } else {
+                    ExecCheck::Foreign("macos")
+                };
+            }
+            // ELF
+            if magic == [0x7F, b'E', b'L', b'F'] {
+                return if cfg!(target_os = "linux") {
+                    ExecCheck::Compatible
+                } else {
+                    ExecCheck::Foreign("linux")
+                };
+            }
+        }
+
+        // Detect shebang scripts without assuming text encoding
+        if let Ok(mut file) = std::fs::File::open(path) {
+            use std::io::Read;
+            let mut shebang = [0u8; 2];
+            if file.read(&mut shebang).map(|n| n == 2).unwrap_or(false) {
+                if shebang == [b'#', b'!'] {
+                    return ExecCheck::Script;
+                }
+            }
+        }
+
+        ExecCheck::Unknown
+    }
+
     /// Kill a process
     async fn kill_process(&self, pid: u32) -> Result<(), ModuleRuntimeError> {
         #[cfg(unix)]
@@ -331,10 +393,83 @@ impl ModuleRuntimePort for ProcessModuleRuntime {
             .open(&log_file)
             .map_err(|e| ModuleRuntimeError::Io(format!("failed to open log file: {}", e)))?;
 
+        // Resolve executable path (binary inside module directory)
+        // Try multiple common locations and naming patterns
+        let binary_path = {
+            let candidates = vec![
+                // Direct: <module_dir>/<module_id>
+                module_path.join(&module_id_str),
+                // In bin subdirectory: <module_dir>/bin/<module_id>
+                module_path.join("bin").join(&module_id_str),
+                // With .exe extension (for cross-platform compatibility)
+                module_path.join(format!("{}.exe", module_id_str)),
+                module_path
+                    .join("bin")
+                    .join(format!("{}.exe", module_id_str)),
+                // Alternative: just the module directory if it's a file
+                module_path.clone(),
+            ];
+
+            let mut found_path: Option<PathBuf> = None;
+            for candidate in candidates {
+                if candidate.is_file() {
+                    // Check if file is executable (Unix/macOS/Linux)
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        if let Ok(metadata) = std::fs::metadata(&candidate) {
+                            let permissions = metadata.permissions();
+                            // Check if file has execute permission
+                            if permissions.mode() & 0o111 != 0 {
+                                match Self::classify_executable(&candidate) {
+                                    ExecCheck::Compatible | ExecCheck::Script => {
+                                        found_path = Some(candidate);
+                                        break;
+                                    }
+                                    ExecCheck::Foreign(target) => {
+                                        return Err(ModuleRuntimeError::StartFailed {
+                                            module_id: module_id_str.clone(),
+                                            reason: format!(
+                                                "Modul-Binary ist für {} gebaut und nicht mit {} kompatibel",
+                                                target,
+                                                std::env::consts::OS
+                                            ),
+                                        });
+                                    }
+                                    ExecCheck::Unknown => {
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        // On Windows, just check if file exists
+                        found_path = Some(candidate);
+                        break;
+                    }
+                }
+            }
+
+            found_path.ok_or_else(|| {
+                ModuleRuntimeError::StartFailed {
+                    module_id: module_id_str.clone(),
+                    reason: format!(
+                        "kein ausführbares Modul in {} gefunden. Gesucht in: {}, bin/{}, {}.exe, bin/{}.exe",
+                        module_path.display(),
+                        module_id_str,
+                        module_id_str,
+                        module_id_str,
+                        module_id_str
+                    ),
+                }
+            })?
+        };
+
         // Build command
-        let mut cmd = Command::new("cargo");
-        cmd.arg("run")
-            .current_dir(&module_path)
+        let mut cmd = Command::new(&binary_path);
+        cmd.current_dir(&module_path)
             .stdout(Stdio::from(log_file_handle.try_clone().unwrap()))
             .stderr(Stdio::from(log_file_handle))
             .stdin(Stdio::null());
@@ -572,7 +707,9 @@ struct PersistedModuleState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::module::{ChecksumAlgorithm, ModuleBundle, ModuleInstallResult};
+    use crate::domain::module::{
+        ChecksumAlgorithm, ModuleBundle, ModuleInstallResult, ModuleInstallSource,
+    };
     use crate::domain::module::{
         InstalledModule, ModuleArtifactDescriptor, ModuleChecksum, ModuleManifest,
         ModuleSignatureDescriptor, SignatureAlgorithm,
@@ -605,6 +742,7 @@ mod tests {
         async fn stage_and_activate(
             &self,
             _bundle: ModuleBundle,
+            _source: ModuleInstallSource,
         ) -> Result<ModuleInstallResult, ModuleStorageError> {
             Err(ModuleStorageError::InvalidState(
                 "stage not implemented in test".to_string(),
@@ -647,6 +785,7 @@ mod tests {
             },
             installed_at: SystemTime::now(),
             path: String::from("/dev/null"),
+            source: ModuleInstallSource::Distribution,
         }
     }
 

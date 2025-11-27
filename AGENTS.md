@@ -116,6 +116,9 @@ src/
 - `modules.bootstrap` listet Module, die beim Boot automatisch installiert/aktualisiert werden (Standard: `fenrir-api`).
 - Trust Layer (`modules.trust`) erzwingt Signaturen, sofern aktiviert; im Dev-Default (`require_signature = false`, leere Allowlist) dürfen Offline-Artefakte ohne Signatur installiert werden.
 - Installationspfade kommen aus Config (`modules.storage.install_dir`).
+- Dev-Builds können ohne manuelles Kopieren genutzt werden: `[modules.dev_sources]` mit `base_path` setzen, `synchronize module` packt dann automatisch den Build unter `<base_path>/<module-id>` (Override per `.fenrir-dev.toml` möglich) und markiert das Modul als `local_override`.
+- `.fenrir-dev.toml` **oder** `.fenrir/config.toml` im Modul-Repo können `output = ".."` und `[[services]]` definieren (mindestens `id` + `endpoint`, optional `name|description|kind`). `sync module` (bzw. Auto-Detection bei gesetztem `[modules.dev_sources]`) stoppt dann den Modulprozess und registriert die angegebenen Dev-Service-Endpunkte über den `ServiceRegistry`, statt ein Artifact zu packen; `release module` stellt wieder auf Distribution zurück.
+- Module laufen dauerhaft ohne manuelles Start/Stop: CLI/HTTP expose keine manuellen Start/Stop-Kommandos mehr. Fenrir startet installierte Module beim Boot automatisch (`module:<id>` taucht im Service-Registry auf) und Distribution-Imports stoppen/aktualisieren/starts Module inklusive echter Progress-Anzeige. `.fenrir-dev.toml`-Services erscheinen separat als `module:<id>::service`.
 - Modul-Katalog: Überblick der benötigten Ticketsystem-Module inklusive Abhängigkeiten in `docs/modules_overview.md` pflegen und bei Änderungen an Erweiterungspunkten (z. B. Ports, Signaturanforderungen) mitziehen.
 
 # Telemetry & Logging

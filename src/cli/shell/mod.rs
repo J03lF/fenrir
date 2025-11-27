@@ -1,13 +1,14 @@
 use crate::cli::commands::builtins;
 use crate::cli::commands::registry::{
     parse_confirmation_answer, CliDependencies, CommandOutcome, CommandStatus, ConfirmationRequest,
-    ShellEnvironment,
+    ShellEnvironment, CommandOutput,
 };
 use crate::cli::completion::ContextualCompleter;
 use crate::config::AppConfig;
 use crate::prompts::{self, PromptContext};
 use crate::services::{AppServices, ServiceStatus};
 use crate::utils;
+use futures::executor::block_on;
 use rustyline::history::{DefaultHistory, History};
 use rustyline::{error::ReadlineError, Editor};
 use std::fs;
@@ -22,6 +23,16 @@ const COLOR_SUCCESS: &str = "\x1b[38;5;76m";
 const COLOR_ERROR: &str = "\x1b[38;5;203m";
 
 pub fn run_shell(config: Arc<AppConfig>, services: Arc<AppServices>) -> io::Result<()> {
+    #[derive(Clone)]
+    struct StdoutCommandOutput;
+    impl CommandOutput for StdoutCommandOutput {
+        fn push(&self, text: &str) {
+            let mut out = io::stdout();
+            let _ = out.write_all(text.as_bytes());
+            let _ = out.flush();
+        }
+    }
+
     let mut stdout = io::stdout();
     // Clear screen and position cursor in the top left before showing the banner.
     write!(&mut stdout, "{}", prompts::clear_screen_sequence())?;
@@ -29,7 +40,8 @@ pub fn run_shell(config: Arc<AppConfig>, services: Arc<AppServices>) -> io::Resu
     writeln!(&mut stdout, "{}", prompts::welcome_line(config.as_ref()))?;
 
     let registry = builtins::build_registry();
-    let dependencies = CliDependencies::new(Arc::clone(&config), Arc::clone(&services));
+    let dependencies = CliDependencies::new(Arc::clone(&config), Arc::clone(&services))
+        .with_output(Arc::new(StdoutCommandOutput));
 
     services.registry().set_status(
         "cli-shell",
@@ -303,6 +315,10 @@ fn handle_outcome(
             *pending_confirmation = Some(request);
             Ok(true)
         }
+        CommandOutcome::AsyncTask(task) => {
+            let result = block_on(task)?;
+            handle_outcome(out, services, prompt_set, pending_confirmation, result)
+        }
     }
 }
 
@@ -339,6 +355,7 @@ fn show_success(
         CommandOutcome::ExitShell => ("✔", "exit"),
         CommandOutcome::EnterDbShell => ("✔", "db"),
         CommandOutcome::AwaitConfirmation(_) => ("?", "confirm"),
+        CommandOutcome::AsyncTask(_) => ("⇄", "async"),
     };
     writeln!(
         out,

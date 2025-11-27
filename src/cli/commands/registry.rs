@@ -1,13 +1,22 @@
 use crate::audit::AuditActor;
 use crate::config::AppConfig;
 use crate::services::AppServices;
+use async_trait::async_trait;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::future::Future;
 use std::io::{self, Write};
+use std::pin::Pin;
 use std::sync::Arc;
 
+#[async_trait]
 pub trait CommandOutput: Send + Sync + 'static {
     fn push(&self, text: &str);
+    
+    /// Flush all pending output (for async implementations)
+    async fn flush_all(&self) {
+        // Default: no-op for sync implementations
+    }
 }
 
 pub trait ConfirmationHandler: Send {
@@ -242,6 +251,7 @@ pub enum CommandOutcome {
     ExitShell,
     EnterDbShell,
     AwaitConfirmation(ConfirmationRequest),
+    AsyncTask(Pin<Box<dyn Future<Output = io::Result<CommandOutcome>> + Send>>),
 }
 
 impl fmt::Debug for CommandOutcome {
@@ -251,6 +261,7 @@ impl fmt::Debug for CommandOutcome {
             CommandOutcome::ExitShell => f.write_str("ExitShell"),
             CommandOutcome::EnterDbShell => f.write_str("EnterDbShell"),
             CommandOutcome::AwaitConfirmation(_) => f.write_str("AwaitConfirmation"),
+            CommandOutcome::AsyncTask(_) => f.write_str("AsyncTask"),
         }
     }
 }

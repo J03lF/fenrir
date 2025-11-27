@@ -133,7 +133,7 @@ impl ModuleVerifierPort for Ed25519ModuleVerifier {
             if !self.require_signature {
                 return Ok(()); // Skip verification for empty signatures when not required
             }
-            
+
             // If require_signature is true, but signer is in allowlist and no key is found,
             // allow empty signature (for manifest-based modules from registry)
             let signer_key = signer.to_ascii_lowercase();
@@ -142,7 +142,7 @@ impl ModuleVerifierPort for Ed25519ModuleVerifier {
                 // This is acceptable for manifest-based modules from registry
                 return Ok(());
             }
-            
+
             // Key exists but signature is empty - this is an error
             return Err(ModuleVerificationError::Signature(
                 "signature is required but empty".to_string(),
@@ -164,7 +164,7 @@ impl ModuleVerifierPort for Ed25519ModuleVerifier {
                 )));
             }
         };
-        
+
         // Verify the signature
         if bundle.signature.len() != 64 {
             return Err(ModuleVerificationError::Signature(format!(
@@ -172,7 +172,7 @@ impl ModuleVerifierPort for Ed25519ModuleVerifier {
                 bundle.signature.len()
             )));
         }
-        
+
         let signature =
             Signature::from_bytes(bundle.signature.as_slice().try_into().map_err(|_| {
                 ModuleVerificationError::Signature("signature must be 64 bytes".to_string())

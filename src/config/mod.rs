@@ -346,6 +346,8 @@ pub struct ModulesSection {
     pub bootstrap: Vec<String>,
     #[serde(default)]
     pub trust: ModuleTrustSection,
+    #[serde(default)]
+    pub dev_sources: ModuleDevSourcesSection,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -387,6 +389,12 @@ pub struct ModuleStorageSection {
     pub install_dir: String,
     #[serde(default)]
     pub cache_dir: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ModuleDevSourcesSection {
+    #[serde(default)]
+    pub base_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]

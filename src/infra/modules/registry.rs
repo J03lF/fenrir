@@ -18,8 +18,9 @@ use tracing::warn;
 use crate::config::ModuleRegistrySection;
 use crate::domain::module::{
     ChecksumAlgorithm, DistributionTarget, ModuleArtifactDescriptor, ModuleBundle, ModuleChecksum,
-    ModuleId, ModuleManifest, ModuleRegistryError, ModuleRegistryPort, ModuleSearchQuery,
-    ModuleSignatureDescriptor, ModuleSummary, ModuleVersion, SignatureAlgorithm,
+    ModuleId, ModuleManifest, ModuleProgress, ModuleRegistryError, ModuleRegistryPort,
+    ModuleSearchQuery, ModuleSignatureDescriptor, ModuleSummary, ModuleVersion, ProgressCallback,
+    SignatureAlgorithm,
 };
 
 const DEFAULT_CONTENT_TYPE: &str = "application/gzip";
@@ -35,6 +36,7 @@ struct CompatibilityTreeResponse {
 #[derive(Debug, Deserialize)]
 struct CompatibilityNodeDto {
     id: String,
+    #[allow(dead_code)]
     label: String,
     #[serde(default)]
     children: Vec<CompatibilityNodeDto>,
@@ -166,6 +168,161 @@ impl HttpModuleRegistry {
                     url, err
                 ))
             })
+    }
+
+    async fn download_with_refresh(
+        &self,
+        manifest: &ModuleManifest,
+        allow_refresh: bool,
+        progress: Option<ProgressCallback>,
+    ) -> Result<ModuleBundle, ModuleRegistryError> {
+        use futures::StreamExt;
+        
+        let mut current_manifest = manifest.clone();
+        let mut retried_same = false;
+        let mut refreshed_manifest = false;
+
+        loop {
+            let download_url = self.resolve_url(&current_manifest.artifact.download_url)?;
+            
+            if let Some(ref callback) = progress {
+                callback(ModuleProgress::DownloadStarted {
+                    module_id: current_manifest.id.clone(),
+                    total_bytes: None,
+                });
+            }
+            
+            let response = self.client.get(download_url).send().await.map_err(|err| {
+                ModuleRegistryError::Unavailable(format!("Failed to download artifact: {}", err))
+            })?;
+
+            if !response.status().is_success() {
+                return Err(ModuleRegistryError::Unavailable(format!(
+                    "Download failed with status: {}",
+                    response.status()
+                )));
+            }
+
+            let total_bytes = response.content_length();
+            let mut downloaded_bytes = 0u64;
+            let mut archive_data = Vec::new();
+            
+            if let Some(total) = total_bytes {
+                archive_data.reserve(total as usize);
+            }
+
+            let mut stream = response.bytes_stream();
+            
+            while let Some(chunk_result) = stream.next().await {
+                let chunk = chunk_result.map_err(|err| {
+                    ModuleRegistryError::Unavailable(format!("Failed to read chunk: {}", err))
+                })?;
+                
+                archive_data.extend_from_slice(&chunk);
+                downloaded_bytes += chunk.len() as u64;
+                
+                if let Some(ref callback) = progress {
+                    callback(ModuleProgress::DownloadProgress {
+                        module_id: current_manifest.id.clone(),
+                        downloaded_bytes,
+                        total_bytes,
+                    });
+                }
+            }
+            
+            if let Some(ref callback) = progress {
+                callback(ModuleProgress::DownloadCompleted {
+                    module_id: current_manifest.id.clone(),
+                    total_bytes: downloaded_bytes,
+                });
+            }
+
+            let expected_checksum =
+                hex::decode(&current_manifest.artifact.checksum.hash).map_err(|err| {
+                    ModuleRegistryError::Protocol(format!("Invalid checksum encoding: {}", err))
+                })?;
+
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(&archive_data);
+            let actual_checksum = hasher.finalize();
+
+            if actual_checksum.as_slice() != expected_checksum.as_slice() {
+                tracing::warn!(
+                    module = %current_manifest.id,
+                    version = %current_manifest.version,
+                    expected = %current_manifest.artifact.checksum.hash,
+                    actual = %hex::encode(&actual_checksum),
+                    "artifact checksum mismatch, attempting manifest refresh"
+                );
+
+                if allow_refresh && !retried_same {
+                    retried_same = true;
+                    tracing::info!(
+                        module = %current_manifest.id,
+                        version = %current_manifest.version,
+                        "retrying download once after checksum mismatch"
+                    );
+                    continue;
+                }
+
+                if allow_refresh && !refreshed_manifest {
+                    if let Ok(module_id) = ModuleId::new(&current_manifest.id) {
+                        let module_version = ModuleVersion(current_manifest.version.clone());
+                        match self.fetch_manifest(&module_id, Some(&module_version)).await {
+                            Ok(fresh_manifest) => {
+                                let checksum_changed = fresh_manifest.artifact.checksum.hash
+                                    != current_manifest.artifact.checksum.hash;
+                                let url_changed = fresh_manifest.artifact.download_url
+                                    != current_manifest.artifact.download_url;
+                                if checksum_changed || url_changed {
+                                    tracing::info!(
+                                        module = %fresh_manifest.id,
+                                        version = %fresh_manifest.version,
+                                        "retrying download with refreshed manifest"
+                                    );
+                                    current_manifest = fresh_manifest;
+                                    refreshed_manifest = true;
+                                    retried_same = true;
+                                    continue;
+                                }
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    module = %current_manifest.id,
+                                    version = %current_manifest.version,
+                                    error = %err,
+                                    "failed to refresh manifest after checksum mismatch"
+                                );
+                            }
+                        }
+                    }
+                }
+
+                return Err(ModuleRegistryError::Protocol(
+                    "Downloaded artifact checksum mismatch".to_string(),
+                ));
+            }
+
+            let signature_bytes = if current_manifest.signature.signature.is_empty() {
+                Vec::new()
+            } else {
+                BASE64
+                    .decode(current_manifest.signature.signature.as_bytes())
+                    .map_err(|err| {
+                        ModuleRegistryError::Protocol(format!(
+                            "Invalid signature encoding: {}",
+                            err
+                        ))
+                    })?
+            };
+
+            return Ok(ModuleBundle {
+                manifest: current_manifest.clone(),
+                archive: archive_data,
+                signature: signature_bytes,
+                checksum: expected_checksum,
+            });
+        }
     }
 }
 
@@ -319,52 +476,15 @@ impl ModuleRegistryPort for HttpModuleRegistry {
         &self,
         manifest: &ModuleManifest,
     ) -> Result<ModuleBundle, ModuleRegistryError> {
-        let download_url = self.resolve_url(&manifest.artifact.download_url)?;
-        let response = self.client.get(download_url).send().await.map_err(|err| {
-            ModuleRegistryError::Unavailable(format!("Failed to download artifact: {}", err))
-        })?;
+        self.download_with_refresh(manifest, true, None).await
+    }
 
-        if !response.status().is_success() {
-            return Err(ModuleRegistryError::Unavailable(format!(
-                "Download failed with status: {}",
-                response.status()
-            )));
-        }
-
-        let archive = response.bytes().await.map_err(|err| {
-            ModuleRegistryError::Unavailable(format!("Failed to read artifact: {}", err))
-        })?;
-
-        let expected_checksum = hex::decode(&manifest.artifact.checksum.hash).map_err(|err| {
-            ModuleRegistryError::Protocol(format!("Invalid checksum encoding: {}", err))
-        })?;
-
-        let mut hasher = sha2::Sha256::new();
-        hasher.update(&archive);
-        let actual_checksum = hasher.finalize();
-
-        if actual_checksum.as_slice() != expected_checksum.as_slice() {
-            return Err(ModuleRegistryError::Protocol(
-                "Downloaded artifact checksum mismatch".to_string(),
-            ));
-        }
-
-        let signature_bytes = if manifest.signature.signature.is_empty() {
-            Vec::new()
-        } else {
-            BASE64
-                .decode(manifest.signature.signature.as_bytes())
-                .map_err(|err| {
-                    ModuleRegistryError::Protocol(format!("Invalid signature encoding: {}", err))
-                })?
-        };
-
-        Ok(ModuleBundle {
-            manifest: manifest.clone(),
-            archive: archive.to_vec(),
-            signature: signature_bytes,
-            checksum: expected_checksum,
-        })
+    async fn download_with_progress(
+        &self,
+        manifest: &ModuleManifest,
+        progress: Option<ProgressCallback>,
+    ) -> Result<ModuleBundle, ModuleRegistryError> {
+        self.download_with_refresh(manifest, true, progress).await
     }
 
     async fn distribution_targets(
@@ -379,10 +499,7 @@ impl ModuleRegistryPort for HttpModuleRegistry {
         );
 
         let response = self.client.get(&url).send().await.map_err(|err| {
-            ModuleRegistryError::Unavailable(format!(
-                "Failed to query compatibility tree: {}",
-                err
-            ))
+            ModuleRegistryError::Unavailable(format!("Failed to query compatibility tree: {}", err))
         })?;
 
         if response.status().as_u16() == 404 {
@@ -430,9 +547,7 @@ fn collect_distribution_targets(
     }
 }
 
-fn parse_module_from_node(
-    node: &CompatibilityNodeDto,
-) -> Option<(ModuleId, ModuleVersion)> {
+fn parse_module_from_node(node: &CompatibilityNodeDto) -> Option<(ModuleId, ModuleVersion)> {
     let base_id = node.id.split(':').next().unwrap_or(&node.id);
     let (module_raw, version_raw) = base_id.split_once('@')?;
     let module = ModuleId::new(module_raw).ok()?;
@@ -560,15 +675,22 @@ impl ModuleRegistryPort for LocalModuleRegistry {
         version.load_bundle(&module).await
     }
 
+    async fn download_with_progress(
+        &self,
+        manifest: &ModuleManifest,
+        _progress: Option<ProgressCallback>,
+    ) -> Result<ModuleBundle, ModuleRegistryError> {
+        // Local downloads are instant, no progress needed
+        self.download(manifest).await
+    }
+
     async fn distribution_targets(
         &self,
         fenrir_version: &str,
     ) -> Result<Vec<DistributionTarget>, ModuleRegistryError> {
-        let parsed =
-            Version::parse(fenrir_version).map_err(|err| ModuleRegistryError::Protocol(format!(
-                "invalid Fenrir version: {}",
-                err
-            )))?;
+        let parsed = Version::parse(fenrir_version).map_err(|err| {
+            ModuleRegistryError::Protocol(format!("invalid Fenrir version: {}", err))
+        })?;
         let modules = self.load_modules().await?;
         let mut targets = Vec::new();
         for module in modules {
@@ -649,6 +771,23 @@ impl ModuleRegistryPort for CompositeModuleRegistry {
     ) -> Result<ModuleBundle, ModuleRegistryError> {
         for source in &self.sources {
             match source.download(manifest).await {
+                Ok(bundle) => return Ok(bundle),
+                Err(ModuleRegistryError::NotFound { .. }) => continue,
+                Err(err) => return Err(err),
+            }
+        }
+        Err(ModuleRegistryError::NotFound {
+            module: manifest.id.clone(),
+        })
+    }
+
+    async fn download_with_progress(
+        &self,
+        manifest: &ModuleManifest,
+        progress: Option<ProgressCallback>,
+    ) -> Result<ModuleBundle, ModuleRegistryError> {
+        for source in &self.sources {
+            match source.download_with_progress(manifest, progress.clone()).await {
                 Ok(bundle) => return Ok(bundle),
                 Err(ModuleRegistryError::NotFound { .. }) => continue,
                 Err(err) => return Err(err),

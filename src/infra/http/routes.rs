@@ -25,9 +25,9 @@ use tracing::warn;
 
 use crate::audit::{AuditActor, AuditEvent, AuditMetadata, AuditOutcome};
 use crate::domain::module::{
-    InstalledModule, ModuleError, ModuleId, ModuleInstallResult, ModuleInstallStatus,
-    ModuleManifest, ModuleRegistryError, ModuleSearchQuery, ModuleServiceError, ModuleStorageError,
-    ModuleVersion,
+    InstalledModule, ModuleError, ModuleId, ModuleInstallResult, ModuleInstallSource,
+    ModuleInstallStatus, ModuleManifest, ModuleRegistryError, ModuleSearchQuery,
+    ModuleServiceError, ModuleStorageError, ModuleVersion,
 };
 use crate::infra::{logging, telemetry};
 use crate::security::auth::{AuthError, ControlPlaneAuthorizer, Role};
@@ -53,8 +53,8 @@ struct ServicesResponse {
 
 #[derive(Serialize)]
 struct ServiceStateEvent {
-    id: &'static str,
-    name: &'static str,
+    id: String,
+    name: String,
     kind: &'static str,
     status: &'static str,
     note: Option<String>,
@@ -65,12 +65,12 @@ struct ServiceStateEvent {
 
 #[derive(Clone, Serialize)]
 struct ServiceSummary {
-    id: &'static str,
-    name: &'static str,
+    id: String,
+    name: String,
     kind: &'static str,
     status: &'static str,
     since_seconds: Option<u64>,
-    description: &'static str,
+    description: String,
     note: Option<String>,
     critical: bool,
     tags: Vec<&'static str>,
@@ -327,6 +327,7 @@ struct InstalledModuleView {
     manifest: ModuleManifest,
     installed_at: Option<String>,
     path: String,
+    source: ModuleInstallSource,
 }
 
 #[derive(Serialize)]
@@ -353,6 +354,7 @@ struct ModuleInstallResponse {
     status: &'static str,
     manifest: ModuleManifest,
     path: String,
+    source: ModuleInstallSource,
 }
 
 #[derive(Serialize)]
@@ -440,13 +442,13 @@ impl IntoResponse for ServiceActionProblem {
 
 fn snapshot_to_summary(svc: ServiceSnapshot) -> ServiceSummary {
     ServiceSummary {
-        id: svc.descriptor.id,
-        name: svc.descriptor.name,
+        id: svc.descriptor.id.clone(),
+        name: svc.descriptor.name.clone(),
         kind: svc.descriptor.kind.as_str(),
         status: svc.status.label(),
         since_seconds: svc.since.elapsed().ok().map(|duration| duration.as_secs()),
-        description: svc.descriptor.description,
-        note: svc.note,
+        description: svc.descriptor.description.clone(),
+        note: svc.note.clone(),
         critical: svc.descriptor.critical,
         tags: svc.descriptor.tags.iter().map(|tag| tag.as_str()).collect(),
     }
@@ -454,11 +456,11 @@ fn snapshot_to_summary(svc: ServiceSnapshot) -> ServiceSummary {
 
 fn snapshot_to_state_event(snapshot: ServiceSnapshot) -> ServiceStateEvent {
     ServiceStateEvent {
-        id: snapshot.descriptor.id,
-        name: snapshot.descriptor.name,
+        id: snapshot.descriptor.id.clone(),
+        name: snapshot.descriptor.name.clone(),
         kind: snapshot.descriptor.kind.as_str(),
         status: snapshot.status.label(),
-        note: snapshot.note,
+        note: snapshot.note.clone(),
         since_seconds: snapshot
             .since
             .elapsed()
@@ -524,6 +526,7 @@ fn installed_module_to_view(installed: InstalledModule) -> InstalledModuleView {
         manifest: installed.manifest,
         installed_at: system_time_to_rfc3339(installed.installed_at),
         path: installed.path,
+        source: installed.source,
     }
 }
 
@@ -544,6 +547,7 @@ fn map_install_result(result: ModuleInstallResult) -> ModuleInstallResponse {
         status: module_install_status_label(result.status),
         manifest: result.manifest,
         path: result.path,
+        source: result.source,
     }
 }
 

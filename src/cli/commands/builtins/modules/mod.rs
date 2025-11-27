@@ -4,21 +4,24 @@ use std::io::{self, Write};
 use std::sync::Arc;
 
 use tokio::runtime::{Handle, Runtime};
-use tracing::{info, warn};
+use tracing::{info, warn, Instrument};
 use whoami;
 
 use crate::audit::{AuditActor, AuditEvent, AuditMetadata, AuditOutcome};
 use crate::cli::commands::registry::{
-    CliDependencies, CommandArgument, CommandEntry, CommandOutcome, CommandRegistry, CommandShape,
-    CommandSubcommand, CompletionContext, CompletionKind, ConfirmationHandler, ConfirmationRequest,
-    ShellEnvironment,
+    CliDependencies, CommandArgument, CommandEntry, CommandOutcome, CommandOutput, CommandRegistry,
+    CommandShape, CommandSubcommand, CompletionContext, CompletionKind, ConfirmationHandler,
+    ConfirmationRequest, ShellEnvironment,
 };
 use crate::cli::commands::table::Table;
 use crate::domain::module::{
-    ModuleId, ModuleInstallStatus, ModuleManifest, ModuleRegistryError, ModuleRuntimeError,
-    ModuleServiceError, ModuleStorageError, ModuleVerificationError, ModuleVersion,
+    ModuleId, ModuleInstallStatus, ModuleManifest, ModuleProgress, ModuleRegistryError,
+    ModuleRuntimeError, ModuleServiceError, ModuleStartConfig, ModuleStorageError,
+    ModuleVerificationError, ModuleVersion,
 };
-use crate::services::module::{DistributionPlanEntry, ModuleService};
+use crate::services::module::{
+    DistributionAction, DistributionPlanEntry, ModuleService, ModuleSyncOutcome,
+};
 use crate::utils;
 
 const DETAILS: &[&str] = &[
@@ -26,11 +29,10 @@ const DETAILS: &[&str] = &[
     "search modules [pattern]        – durchsucht Registry",
     "show module <name[@version]>    – zeigt Manifest-Informationen",
     "install distribution            – installiert alle Module einer Distribution",
+    "synchronize module <name>       – ersetzt Modul mit lokalen Änderungen",
+    "release module <name>           – setzt Modul auf Distribution zurück",
     "uninstall module <name>         – entfernt ein installiertes Modul",
     "check modules                   – prüft verfügbare Updates",
-    "start module <name>             – startet ein installiertes Modul",
-    "stop module <name>              – stoppt ein laufendes Modul",
-    "restart module <name>           – startet ein laufendes Modul neu",
     "logs module <name> [--tail N]   – zeigt Logs eines laufenden Moduls",
 ];
 
@@ -39,13 +41,6 @@ const MODULE_ALIASES: &[&str] = &["module"];
 const MODULE_ID_ARGUMENT: CommandArgument = CommandArgument {
     name: "module",
     optional: false,
-    variadic: false,
-    completion: CompletionKind::Dynamic(complete_module_ids),
-};
-
-const MODULE_OPTIONAL_ID_ARGUMENT: CommandArgument = CommandArgument {
-    name: "module",
-    optional: true,
     variadic: false,
     completion: CompletionKind::Dynamic(complete_module_ids),
 };
@@ -80,6 +75,13 @@ const UNINSTALL_SHAPE: CommandShape =
 const CHECK_ARGUMENTS: &[CommandArgument] = &[MODULE_RESOURCE_ARGUMENT];
 const CHECK_SHAPE: CommandShape = CommandShape::new("check", &[], CHECK_ARGUMENTS, &[]);
 
+const SYNCHRONIZE_ARGUMENTS: &[CommandArgument] = &[MODULE_RESOURCE_ARGUMENT, MODULE_ID_ARGUMENT];
+const SYNCHRONIZE_SHAPE: CommandShape =
+    CommandShape::new("synchronize", &["sync"], SYNCHRONIZE_ARGUMENTS, &[]);
+
+const RELEASE_ARGUMENTS: &[CommandArgument] = &[MODULE_RESOURCE_ARGUMENT, MODULE_ID_ARGUMENT];
+const RELEASE_SHAPE: CommandShape = CommandShape::new("release", &[], RELEASE_ARGUMENTS, &[]);
+
 const LOGS_ARGUMENTS: &[CommandArgument] = &[
     MODULE_RESOURCE_ARGUMENT,
     MODULE_ID_ARGUMENT,
@@ -90,6 +92,13 @@ const LOGS_SHAPE: CommandShape = CommandShape::new("logs", &["tail"], LOGS_ARGUM
 const SEARCH_DETAILS: &[&str] = &["search modules [pattern] – durchsucht die Modul-Registry"];
 const INSTALL_DETAILS: &[&str] =
     &["install distribution – installiert/aktualisiert alle kompatiblen Module"];
+const SYNCHRONIZE_DETAILS: &[&str] = &[
+    "synchronize module <name> – ersetzt das Modul durch lokale Dateien",
+    "Nutze [modules.dev_sources] base_path, um Dev-Builds automatisch zu verwenden",
+    ".fenrir-dev.toml kann Dev-Service-Endpunkte definieren; sync module registriert dann diese Services statt Artefakte zu packen",
+];
+const RELEASE_DETAILS: &[&str] =
+    &["release module <name> – setzt lokale Anpassungen zurück zur Distribution"];
 const UNINSTALL_DETAILS: &[&str] = &["uninstall module <name> – entfernt ein Modul"];
 const CHECK_DETAILS: &[&str] = &["check modules – prüft verfügbare Modul-Updates"];
 const LOGS_DETAILS: &[&str] = &["logs module <name> [--tail N] – zeigt Laufzeit-Logs"];
@@ -113,6 +122,28 @@ pub fn install_command() -> CommandEntry {
         INSTALL_DETAILS,
         handle_install_command,
         INSTALL_SHAPE,
+    )
+}
+
+pub fn synchronize_command() -> CommandEntry {
+    CommandEntry::with_shape(
+        "synchronize",
+        "Übernimmt lokale Moduländerungen",
+        "synchronize module <name>",
+        SYNCHRONIZE_DETAILS,
+        handle_synchronize_command,
+        SYNCHRONIZE_SHAPE,
+    )
+}
+
+pub fn release_command() -> CommandEntry {
+    CommandEntry::with_shape(
+        "release",
+        "Setzt lokale Moduländerungen zurück",
+        "release module <name>",
+        RELEASE_DETAILS,
+        handle_release_command,
+        RELEASE_SHAPE,
     )
 }
 
@@ -165,6 +196,18 @@ const MODULE_SUBCOMMANDS: &[CommandSubcommand] = &[
         "Alle Module für eine Fenrir-Distribution installieren",
     ),
     CommandSubcommand::new(
+        "synchronize",
+        &["sync"],
+        &[MODULE_ID_ARGUMENT],
+        "Lokale Änderungen eines Moduls übernehmen",
+    ),
+    CommandSubcommand::new(
+        "release",
+        &[],
+        &[MODULE_ID_ARGUMENT],
+        "Modul auf Distribution zurücksetzen",
+    ),
+    CommandSubcommand::new(
         "uninstall",
         &["remove"],
         &[MODULE_ID_ARGUMENT],
@@ -176,19 +219,6 @@ const MODULE_SUBCOMMANDS: &[CommandSubcommand] = &[
         &[],
         "Verfügbare Modul-Updates prüfen",
     ),
-    CommandSubcommand::new(
-        "start",
-        &[],
-        &[MODULE_ID_ARGUMENT],
-        "Modul zur Laufzeit starten",
-    ),
-    CommandSubcommand::new(
-        "stop",
-        &[],
-        &[MODULE_ID_ARGUMENT],
-        "Laufendes Modul stoppen",
-    ),
-    CommandSubcommand::new("restart", &[], &[MODULE_ID_ARGUMENT], "Modul neu starten"),
     CommandSubcommand::new(
         "logs",
         &[],
@@ -242,15 +272,17 @@ where
     Fut: Future<Output = Result<T, ModuleServiceError>> + Send + 'static,
     T: Send + 'static,
 {
+    let span = tracing::Span::current();
     if Handle::try_current().is_ok() {
         return std::thread::spawn(move || {
+            let _enter = span.enter();
             Runtime::new()
                 .map_err(|err| {
                     ModuleServiceError::Storage(ModuleStorageError::Unavailable(format!(
                         "runtime init failed: {err}"
                     )))
                 })?
-                .block_on(factory())
+                .block_on(factory().in_current_span())
         })
         .join()
         .unwrap_or_else(|err| {
@@ -259,13 +291,14 @@ where
             ))
         });
     }
+    let _enter = span.enter();
     Runtime::new()
         .map_err(|err| {
             ModuleServiceError::Storage(ModuleStorageError::Unavailable(format!(
                 "runtime init failed: {err}"
             )))
         })?
-        .block_on(factory())
+        .block_on(factory().in_current_span())
 }
 
 // Helper to run runtime futures (similar to run_module_future)
@@ -275,13 +308,15 @@ where
     Fut: Future<Output = Result<T, ModuleRuntimeError>> + Send + 'static,
     T: Send + 'static,
 {
+    let span = tracing::Span::current();
     if Handle::try_current().is_ok() {
         return std::thread::spawn(move || {
+            let _enter = span.enter();
             Runtime::new()
                 .map_err(|err| {
                     ModuleRuntimeError::InvalidState(format!("runtime init failed: {err}"))
                 })?
-                .block_on(factory())
+                .block_on(factory().in_current_span())
         })
         .join()
         .unwrap_or_else(|err| {
@@ -290,9 +325,10 @@ where
             )))
         });
     }
+    let _enter = span.enter();
     Runtime::new()
         .map_err(|err| ModuleRuntimeError::InvalidState(format!("runtime init failed: {err}")))?
-        .block_on(factory())
+        .block_on(factory().in_current_span())
 }
 
 fn run_module_call<F, Fut, T>(
@@ -308,6 +344,44 @@ where
         let service = Arc::clone(&service);
         factory(service)
     })
+}
+
+fn run_module_runtime_call<F, Fut, T>(
+    service: Arc<ModuleService>,
+    factory: F,
+) -> Result<T, ModuleRuntimeError>
+where
+    F: FnOnce(Arc<ModuleService>) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<T, ModuleRuntimeError>> + Send + 'static,
+    T: Send + 'static,
+{
+    let span = tracing::Span::current();
+    if Handle::try_current().is_ok() {
+        return std::thread::spawn(move || {
+            let _enter = span.enter();
+            Runtime::new()
+                .map_err(|err| {
+                    ModuleRuntimeError::InvalidState(format!("runtime init failed: {err}"))
+                })?
+                .block_on(async move {
+                    let service = Arc::clone(&service);
+                    factory(service).await
+                }.in_current_span())
+        })
+        .join()
+        .unwrap_or_else(|err| {
+            Err(ModuleRuntimeError::InvalidState(format!(
+                "blocking thread panicked: {err:?}"
+            )))
+        });
+    }
+    let _enter = span.enter();
+    Runtime::new()
+        .map_err(|err| ModuleRuntimeError::InvalidState(format!("runtime init failed: {err}")))?
+        .block_on(async move {
+            let service = Arc::clone(&service);
+            factory(service).await
+        }.in_current_span())
 }
 
 fn module_tail<'a>(args: &'a [&'a str], out: &mut dyn Write, usage: &str) -> Option<&'a [&'a str]> {
@@ -367,13 +441,41 @@ fn handle_install_command(
         return Ok(CommandOutcome::Continue);
     };
 
-    if resource.eq_ignore_ascii_case("distribution") || resource.eq_ignore_ascii_case("distributions") {
+    if resource.eq_ignore_ascii_case("distribution")
+        || resource.eq_ignore_ascii_case("distributions")
+    {
         return run_module_command(deps, "install-distribution", tail, out);
     }
 
     writeln!(out, "Unbekannte Ressource: {resource}")?;
     writeln!(out, "Nutzung: install distribution")?;
     Ok(CommandOutcome::Continue)
+}
+
+fn handle_synchronize_command(
+    deps: &CliDependencies,
+    args: &[&str],
+    _registry: &CommandRegistry,
+    out: &mut dyn Write,
+    _env: ShellEnvironment,
+) -> io::Result<CommandOutcome> {
+    let Some(tail) = module_tail(args, out, "synchronize module <name>") else {
+        return Ok(CommandOutcome::Continue);
+    };
+    run_module_command(deps, "synchronize", tail, out)
+}
+
+fn handle_release_command(
+    deps: &CliDependencies,
+    args: &[&str],
+    _registry: &CommandRegistry,
+    out: &mut dyn Write,
+    _env: ShellEnvironment,
+) -> io::Result<CommandOutcome> {
+    let Some(tail) = module_tail(args, out, "release module <name>") else {
+        return Ok(CommandOutcome::Continue);
+    };
+    run_module_command(deps, "release", tail, out)
 }
 
 fn handle_uninstall_command(
@@ -427,6 +529,14 @@ impl<'a> ModulesCommandCtx<'a> {
 
     fn service(&self) -> Arc<ModuleService> {
         Arc::clone(&self.service)
+    }
+
+    fn deps_clone(&self) -> CliDependencies {
+        self.deps.clone()
+    }
+
+    fn output_sink(&self) -> Option<Arc<dyn CommandOutput>> {
+        self.deps.output()
     }
 
     fn module_call<F, Fut, T>(&self, factory: F) -> Result<T, ModuleServiceError>
@@ -553,13 +663,24 @@ fn dispatch_module(
         "search" => handle_search(ctx, out, args),
         "info" => handle_info(ctx, out, args),
         "install-distribution" => handle_install_distribution(ctx, out, args),
+        "synchronize" => handle_synchronize(ctx, out, args),
+        "release" => handle_release(ctx, out, args),
         "uninstall" => handle_uninstall(ctx, out, args),
         "check-updates" => handle_check_updates(ctx, out, args),
-        "start" => handle_start(ctx, out, args),
-        "stop" => handle_stop(ctx, out, args),
-        "restart" => handle_restart(ctx, out, args),
         "logs" => handle_logs(ctx, out, args),
         other => {
+            if matches!(other, "start" | "stop" | "restart") {
+                writeln!(
+                    out,
+                    "Modul-Lifecycle ist automatisiert – '{}' module ist nicht mehr verfügbar.",
+                    other
+                )?;
+                writeln!(
+                    out,
+                    "Fenrir startet/stoppt Module beim Boot und während Distribution-Imports automatisch."
+                )?;
+                return Ok(CommandOutcome::Continue);
+            }
             warn!(
                 target = "cli::modules",
                 subcommand = other,
@@ -611,6 +732,7 @@ fn handle_list(
     let mut table = Table::new(vec![
         "Modul".to_string(),
         "Version".to_string(),
+        "Quelle".to_string(),
         "Status".to_string(),
         "PID".to_string(),
         "Port".to_string(),
@@ -619,6 +741,7 @@ fn handle_list(
 
     for module in modules {
         let module_id = module.manifest.id.clone();
+        let source_label = module.source.label().to_string();
         if let Some(runtime_info) = runtime_infos.get(&module_id) {
             let duration = runtime_info
                 .started_at
@@ -629,6 +752,7 @@ fn handle_list(
             table.add_row(vec![
                 module_id,
                 module.manifest.version.to_string(),
+                source_label.clone(),
                 "Running".to_string(),
                 runtime_info
                     .pid
@@ -644,6 +768,7 @@ fn handle_list(
             table.add_row(vec![
                 module_id,
                 module.manifest.version.to_string(),
+                source_label,
                 "Stopped".to_string(),
                 "-".to_string(),
                 "-".to_string(),
@@ -757,9 +882,9 @@ fn handle_install_distribution(
     let fenrir_version = ctx.deps.config.app.version.clone();
 
     let version_for_call = fenrir_version.clone();
-    let plan = match ctx.module_call(|service| async move {
-        service.distribution_plan(&version_for_call).await
-    }) {
+    let plan = match ctx
+        .module_call(|service| async move { service.distribution_plan(&version_for_call).await })
+    {
         Ok(plan) => plan,
         Err(err) => {
             render_service_error(out, "Distribution konnte nicht ermittelt werden", &err)?;
@@ -776,34 +901,13 @@ fn handle_install_distribution(
         return Ok(CommandOutcome::Continue);
     }
 
-    let mut actionable = Vec::new();
-    let mut table = Table::new(vec![
-        "Aktion".to_string(),
-        "Modul".to_string(),
-        "Installiert".to_string(),
-        "Distribution".to_string(),
-    ]);
+    render_distribution_plan(out, &plan)?;
 
-    for entry in &plan {
-        let current = entry
-            .current_version
-            .as_ref()
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "-".to_string());
-        table.add_row(vec![
-            entry.action.label().to_string(),
-            entry.module_id.to_string(),
-            current,
-            entry.target_version.to_string(),
-        ]);
-
-        if entry.action.requires_execution() {
-            actionable.push(entry.clone());
-        }
-    }
-
-    table.render(out, "  ")?;
-    writeln!(out)?;
+    let actionable: Vec<_> = plan
+        .iter()
+        .cloned()
+        .filter(|entry| entry.action.requires_execution())
+        .collect();
 
     if actionable.is_empty() {
         writeln!(
@@ -815,7 +919,7 @@ fn handle_install_distribution(
     }
 
     let confirmation = ConfirmationRequest::new(
-        &format!("Distribution {} installieren? (y/n): ", fenrir_version),
+        &format!("? Apply distribution plan? [Y/n] "),
         Box::new(InstallDistributionConfirmation {
             service: ctx.service(),
             plan: actionable,
@@ -848,7 +952,14 @@ fn handle_uninstall(
 
     match result {
         Ok(_) => {
-            writeln!(out, "✓ Modul '{}' wurde entfernt.", module_id)?;
+            writeln!(out, "\n[REMOVE] {}", module_id)?;
+            writeln!(out, "         ├── Stopping service hooks...     DONE")?;
+            writeln!(out, "         ├── Unlinking module files...     DONE")?;
+            writeln!(out, "         └── Cleaning up configurations... DONE")?;
+            writeln!(out)?;
+            writeln!(out, "[ \x1b[38;5;76mDONE\x1b[0m ] Module '{}' removed successfully.", module_id)?;
+            writeln!(out)?;
+            out.flush()?;
             ctx.record_audit(
                 "module::uninstall",
                 &module_id,
@@ -861,6 +972,180 @@ fn handle_uninstall(
             render_service_error(out, "Deinstallation fehlgeschlagen", &err)?;
             ctx.record_audit(
                 "module::uninstall",
+                &module_id,
+                None,
+                AuditOutcome::Failure,
+                AuditMetadata::default()
+                    .insert("error_code", module_error_code(&err))
+                    .insert("error", err.to_string()),
+            );
+        }
+    }
+
+    Ok(CommandOutcome::Continue)
+}
+
+fn handle_synchronize(
+    ctx: &ModulesCommandCtx,
+    out: &mut dyn Write,
+    args: &[&str],
+) -> io::Result<CommandOutcome> {
+    if args.len() != 1 {
+        writeln!(out, "Use: synchronize module <name>")?;
+        return Ok(CommandOutcome::Continue);
+    }
+
+    let module_id = match parse_module_id(out, args[0])? {
+        Some(id) => id,
+        None => return Ok(CommandOutcome::Continue),
+    };
+
+    if ctx.output_sink().is_some() {
+        let deps = ctx.deps_clone();
+        let service = ctx.service();
+        let module_id_for_task = module_id.clone();
+        let future = async move { run_synchronize_task(deps, service, module_id_for_task).await };
+        return Ok(CommandOutcome::AsyncTask(Box::pin(future)));
+    }
+
+    let module_id_for_call = module_id.clone();
+    let result = ctx.module_call(|service| async move {
+        service.synchronize_from_local(&module_id_for_call).await
+    });
+
+    match result {
+        Ok(ModuleSyncOutcome::Packaged(package)) => {
+            let install_result = package.install_result;
+            let packaged_from = package.packaged_from;
+            writeln!(
+                out,
+                "✓ Modul {} wurde mit lokalen Dateien synchronisiert (Quelle: {}, installiert nach {}).",
+                install_result.manifest.id,
+                packaged_from.display(),
+                install_result.path
+            )?;
+            let recorded_version = ModuleVersion(install_result.manifest.version.clone());
+            ctx.record_audit(
+                "module::synchronize",
+                &module_id,
+                Some(&recorded_version),
+                AuditOutcome::Success,
+                AuditMetadata::default()
+                    .insert("mode", "package")
+                    .insert("packaged_from", packaged_from.display().to_string()),
+            );
+        }
+        Ok(ModuleSyncOutcome::ExternalServices(dev_services)) => {
+            writeln!(
+                out,
+                "✓ Modul {} wurde auf Dev-Service-Endpunkte umgestellt:",
+                dev_services.module_id
+            )?;
+            for svc in &dev_services.services {
+                if let Some(description) = svc.description.as_deref() {
+                    writeln!(
+                        out,
+                        "  - {} @ {} ({}) – {}",
+                        svc.service_id, svc.endpoint, svc.name, description
+                    )?;
+                } else {
+                    writeln!(
+                        out,
+                        "  - {} @ {} ({})",
+                        svc.service_id, svc.endpoint, svc.name
+                    )?;
+                }
+            }
+            ctx.record_audit(
+                "module::synchronize",
+                &module_id,
+                Some(&dev_services.version),
+                AuditOutcome::Success,
+                AuditMetadata::default()
+                    .insert("mode", "dev_services")
+                    .insert(
+                        "service_ids",
+                        dev_services
+                            .services
+                            .iter()
+                            .map(|svc| svc.service_id.clone())
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    ),
+            );
+        }
+        Err(err) => {
+            render_service_error(out, "Synchronisation fehlgeschlagen", &err)?;
+            ctx.record_audit(
+                "module::synchronize",
+                &module_id,
+                None,
+                AuditOutcome::Failure,
+                AuditMetadata::default()
+                    .insert("error_code", module_error_code(&err))
+                    .insert("error", err.to_string()),
+            );
+        }
+    }
+
+    Ok(CommandOutcome::Continue)
+}
+
+fn handle_release(
+    ctx: &ModulesCommandCtx,
+    out: &mut dyn Write,
+    args: &[&str],
+) -> io::Result<CommandOutcome> {
+    if args.len() != 1 {
+        writeln!(out, "Use: release module <name>")?;
+        return Ok(CommandOutcome::Continue);
+    }
+
+    let module_id = match parse_module_id(out, args[0])? {
+        Some(id) => id,
+        None => return Ok(CommandOutcome::Continue),
+    };
+
+    if ctx.output_sink().is_some() {
+        let deps = ctx.deps_clone();
+        let service = ctx.service();
+        let fenrir_version = ctx.deps.config.app.version.clone();
+        let module_id_for_task = module_id.clone();
+        let future = async move {
+            run_release_task(deps, service, module_id_for_task, fenrir_version).await
+        };
+        return Ok(CommandOutcome::AsyncTask(Box::pin(future)));
+    }
+
+    let module_id_for_call = module_id.clone();
+    let fenrir_version = ctx.deps.config.app.version.clone();
+    let fenrir_version_for_call = fenrir_version.clone();
+    let result = ctx.module_call(|service| async move {
+        service
+            .release_override(&module_id_for_call, &fenrir_version_for_call)
+            .await
+    });
+
+    match result {
+        Ok(install_result) => {
+            writeln!(
+                out,
+                "✓ Modul {} läuft wieder mit der Distribution (Fenrir {}) v{}.",
+                install_result.manifest.id, fenrir_version, install_result.manifest.version
+            )?;
+            let recorded_version = ModuleVersion(install_result.manifest.version.clone());
+            ctx.record_audit(
+                "module::release",
+                &module_id,
+                Some(&recorded_version),
+                AuditOutcome::Success,
+                AuditMetadata::default().insert("source", install_result.source.label()),
+            );
+        }
+        Err(err) => {
+            render_service_error(out, "Release fehlgeschlagen", &err)?;
+            ctx.record_audit(
+                "module::release",
                 &module_id,
                 None,
                 AuditOutcome::Failure,
@@ -941,176 +1226,6 @@ fn handle_check_updates(
             "💡 {} Update(s) verfügbar. Nutze 'install distribution' zum Aktualisieren.",
             available_updates
         )?;
-    }
-
-    Ok(CommandOutcome::Continue)
-}
-
-fn handle_start(
-    ctx: &ModulesCommandCtx,
-    out: &mut dyn Write,
-    args: &[&str],
-) -> io::Result<CommandOutcome> {
-    if args.len() != 1 {
-        writeln!(out, "Use: start module <name>")?;
-        return Ok(CommandOutcome::Continue);
-    }
-
-    let module_id = match parse_module_id(out, args[0])? {
-        Some(id) => id,
-        None => return Ok(CommandOutcome::Continue),
-    };
-
-    let module_id_for_call = module_id.clone();
-    let result = ctx.runtime_call(|service| async move {
-        use crate::domain::module::ModuleStartConfig;
-        let config = ModuleStartConfig {
-            module_id: module_id_for_call,
-            port: None,
-            env_vars: vec![],
-            auto_restart: false,
-        };
-        service.start(config).await
-    });
-
-    match result {
-        Ok(info) => {
-            writeln!(
-                out,
-                "✓ Modul '{}' gestartet (PID: {}, Port: {})",
-                module_id,
-                info.pid
-                    .map(|p| p.to_string())
-                    .unwrap_or_else(|| "?".to_string()),
-                info.port
-                    .map(|p| p.to_string())
-                    .unwrap_or_else(|| "-".to_string())
-            )?;
-            ctx.record_audit(
-                "module::start",
-                &module_id,
-                None,
-                AuditOutcome::Success,
-                AuditMetadata::default()
-                    .insert("pid", info.pid.map(|p| p.to_string()).unwrap_or_default())
-                    .insert("port", info.port.map(|p| p.to_string()).unwrap_or_default()),
-            );
-        }
-        Err(err) => {
-            render_runtime_error(out, "Start fehlgeschlagen", &err)?;
-            ctx.record_audit(
-                "module::start",
-                &module_id,
-                None,
-                AuditOutcome::Failure,
-                AuditMetadata::default()
-                    .insert("error_code", runtime_error_code(&err))
-                    .insert("error", err.to_string()),
-            );
-        }
-    }
-
-    Ok(CommandOutcome::Continue)
-}
-
-fn handle_stop(
-    ctx: &ModulesCommandCtx,
-    out: &mut dyn Write,
-    args: &[&str],
-) -> io::Result<CommandOutcome> {
-    if args.len() != 1 {
-        writeln!(out, "Use: stop module <name>")?;
-        return Ok(CommandOutcome::Continue);
-    }
-
-    let module_id = match parse_module_id(out, args[0])? {
-        Some(id) => id,
-        None => return Ok(CommandOutcome::Continue),
-    };
-
-    let module_id_for_call = module_id.clone();
-    let result = ctx.runtime_call(|service| async move { service.stop(&module_id_for_call).await });
-
-    match result {
-        Ok(_) => {
-            writeln!(out, "✓ Modul '{}' wurde gestoppt.", module_id)?;
-            ctx.record_audit(
-                "module::stop",
-                &module_id,
-                None,
-                AuditOutcome::Success,
-                AuditMetadata::default(),
-            );
-        }
-        Err(err) => {
-            render_runtime_error(out, "Stop fehlgeschlagen", &err)?;
-            ctx.record_audit(
-                "module::stop",
-                &module_id,
-                None,
-                AuditOutcome::Failure,
-                AuditMetadata::default()
-                    .insert("error_code", runtime_error_code(&err))
-                    .insert("error", err.to_string()),
-            );
-        }
-    }
-
-    Ok(CommandOutcome::Continue)
-}
-
-fn handle_restart(
-    ctx: &ModulesCommandCtx,
-    out: &mut dyn Write,
-    args: &[&str],
-) -> io::Result<CommandOutcome> {
-    if args.len() != 1 {
-        writeln!(out, "Use: restart module <name>")?;
-        return Ok(CommandOutcome::Continue);
-    }
-
-    let module_id = match parse_module_id(out, args[0])? {
-        Some(id) => id,
-        None => return Ok(CommandOutcome::Continue),
-    };
-
-    let module_id_for_call = module_id.clone();
-    let result =
-        ctx.runtime_call(|service| async move { service.restart(&module_id_for_call).await });
-
-    match result {
-        Ok(info) => {
-            writeln!(
-                out,
-                "✓ Modul '{}' wurde neu gestartet (PID: {}, Restart-Zähler: {})",
-                module_id,
-                info.pid
-                    .map(|p| p.to_string())
-                    .unwrap_or_else(|| "?".to_string()),
-                info.restart_count
-            )?;
-            ctx.record_audit(
-                "module::restart",
-                &module_id,
-                None,
-                AuditOutcome::Success,
-                AuditMetadata::default()
-                    .insert("pid", info.pid.map(|p| p.to_string()).unwrap_or_default())
-                    .insert("restart_count", info.restart_count.to_string()),
-            );
-        }
-        Err(err) => {
-            render_runtime_error(out, "Restart fehlgeschlagen", &err)?;
-            ctx.record_audit(
-                "module::restart",
-                &module_id,
-                None,
-                AuditOutcome::Failure,
-                AuditMetadata::default()
-                    .insert("error_code", runtime_error_code(&err))
-                    .insert("error", err.to_string()),
-            );
-        }
     }
 
     Ok(CommandOutcome::Continue)
@@ -1356,6 +1471,39 @@ fn runtime_error_message(err: &ModuleRuntimeError) -> String {
     }
 }
 
+fn render_progress(
+    out: &mut dyn Write,
+    index: usize,
+    total: usize,
+    stage_fraction: f64,
+    message: &str,
+) -> io::Result<()> {
+    #![allow(dead_code)]
+    let total_f = total.max(1) as f64;
+    let progress = (((index as f64) + stage_fraction).clamp(0.0, total_f)) / total_f;
+    let width = 24;
+    let filled = (progress * width as f64).round() as usize;
+    let filled = filled.min(width);
+    let bar = format!(
+        "[{}{}]",
+        "█".repeat(filled),
+        " ".repeat(width.saturating_sub(filled))
+    );
+    write!(
+        out,
+        "\r{} {:>3}% {}",
+        bar,
+        (progress * 100.0) as u32,
+        message
+    )?;
+    out.flush()
+}
+
+fn finish_progress_line(out: &mut dyn Write) -> io::Result<()> {
+    #![allow(dead_code)]
+    writeln!(out)
+}
+
 fn module_cli_actor(actor: Option<&AuditActor>) -> AuditActor {
     if let Some(actor) = actor {
         return actor.clone();
@@ -1363,6 +1511,276 @@ fn module_cli_actor(actor: Option<&AuditActor>) -> AuditActor {
     AuditActor::User {
         user_id: format!("cli::{}", whoami::username()),
         role: "operator".to_string(),
+    }
+}
+
+fn record_module_audit(
+    deps: &CliDependencies,
+    action: &str,
+    module: &ModuleId,
+    version: Option<&ModuleVersion>,
+    outcome: AuditOutcome,
+    metadata: AuditMetadata,
+) {
+    let mut metadata = metadata.insert("transport", "cli").insert(
+        "command",
+        format!("modules {}", action.split("::").last().unwrap_or(action)),
+    );
+
+    if let Some(version) = version {
+        metadata = metadata.insert("version", version.to_string());
+    }
+
+    let target = module.as_str().to_string();
+    let actor = module_cli_actor(deps.session_actor());
+    let event = AuditEvent::builder()
+        .actor(actor)
+        .action(action)
+        .target(target)
+        .outcome(outcome)
+        .metadata(metadata)
+        .build();
+
+    match event {
+        Ok(event) => {
+            if let Err(err) = deps.services.record_audit(event) {
+                warn!(error = %err, "module audit append failed");
+            }
+        }
+        Err(err) => warn!(error = %err, "module audit build failed"),
+    }
+}
+
+fn render_task_block(out: &mut dyn Write, module_label: &str, steps: &[(String, String)]) -> io::Result<()> {
+    writeln!(out, "[TASK]   {}", module_label)?;
+    if steps.is_empty() {
+        return Ok(());
+    }
+    for (idx, (label, detail)) in steps.iter().enumerate() {
+        let is_last = idx + 1 == steps.len();
+        let prefix = if is_last { "└──" } else { "├──" };
+        writeln!(out, "         {} {:<14} {}", prefix, label, detail)?;
+    }
+    out.flush()
+}
+
+async fn run_synchronize_task(
+    deps: CliDependencies,
+    service: Arc<ModuleService>,
+    module_id: ModuleId,
+) -> io::Result<CommandOutcome> {
+    let sink = deps
+        .output()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "no output sink available"))?;
+    let mut out = OwnedStreamedWriter::new(sink);
+
+    writeln!(&mut out, "\n[SYNC] {}", module_id)?;
+    let result = service.synchronize_from_local(&module_id).await;
+    match result {
+        Ok(ModuleSyncOutcome::Packaged(package)) => {
+            let version = ModuleVersion(package.install_result.manifest.version.clone());
+            let mut steps = Vec::new();
+            steps.push((
+                "Packaging".to_string(),
+                format!("[ OK ] {}", package.packaged_from.display()),
+            ));
+            steps.push((
+                "Installing".to_string(),
+                format!("install v{}", version),
+            ));
+            steps.push((
+                "Starting".to_string(),
+                "[ SKIP ] auto-managed".to_string(),
+            ));
+            render_task_block(&mut out, &module_id.to_string(), &steps)?;
+            writeln!(out)?;  // Leerzeile zwischen Task-Block und DONE
+            writeln!(
+                out,
+                "[ \x1b[38;5;76mDONE\x1b[0m ] Module '{}' synchronized.",
+                module_id
+            )?;
+            record_module_audit(
+                &deps,
+                "module::synchronize",
+                &module_id,
+                Some(&version),
+        AuditOutcome::Success,
+        AuditMetadata::default()
+            .insert("mode", "package")
+            .insert("packaged_from", package.packaged_from.display().to_string()),
+            );
+        }
+        Ok(ModuleSyncOutcome::ExternalServices(dev_services)) => {
+            let mut steps = Vec::new();
+            steps.push((
+                "Switching".to_string(),
+                "[ OK ] dev services".to_string(),
+            ));
+            render_task_block(&mut out, &module_id.to_string(), &steps)?;
+            writeln!(out)?;  // Leerzeile zwischen Task-Block und DONE
+            writeln!(
+                out,
+                "[ \x1b[38;5;76mDONE\x1b[0m ] Module '{}' synchronized.",
+                module_id
+            )?;
+            record_module_audit(
+                &deps,
+                "module::synchronize",
+                &module_id,
+                Some(&dev_services.version),
+                AuditOutcome::Success,
+                AuditMetadata::default()
+                    .insert("mode", "dev_services")
+                    .insert(
+                        "service_ids",
+                        dev_services
+                            .services
+                            .iter()
+                            .map(|svc| svc.service_id.clone())
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    ),
+            );
+        }
+        Err(err) => {
+            render_service_error(&mut out, "Synchronisation fehlgeschlagen", &err)?;
+            record_module_audit(
+                &deps,
+                "module::synchronize",
+                &module_id,
+                None,
+                AuditOutcome::Failure,
+                AuditMetadata::default()
+                    .insert("error_code", module_error_code(&err))
+                    .insert("error", err.to_string()),
+            );
+        }
+    }
+
+    Ok(CommandOutcome::Continue)
+}
+
+async fn run_release_task(
+    deps: CliDependencies,
+    service: Arc<ModuleService>,
+    module_id: ModuleId,
+    fenrir_version: String,
+) -> io::Result<CommandOutcome> {
+    let sink = deps
+        .output()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "no output sink available"))?;
+    let mut out = OwnedStreamedWriter::new(sink);
+
+    writeln!(&mut out, "\n[RELEASE] {}", module_id)?;
+    let fenrir_version_for_call = fenrir_version.clone();
+    let result = service
+        .release_override(&module_id, &fenrir_version_for_call)
+        .await;
+
+    match result {
+        Ok(install_result) => {
+            let recorded_version = ModuleVersion(install_result.manifest.version.clone());
+            let mut steps = Vec::new();
+            steps.push((
+                "Resetting".to_string(),
+                "[ OK ] overrides".to_string(),
+            ));
+            steps.push((
+                "Installing".to_string(),
+                format!("install v{}", recorded_version),
+            ));
+            steps.push((
+                "Starting".to_string(),
+                "[ SKIP ] auto-managed".to_string(),
+            ));
+            render_task_block(&mut out, &module_id.to_string(), &steps)?;
+            writeln!(out)?;  // Leerzeile zwischen Task-Block und DONE
+            writeln!(
+                &mut out,
+                "[ \x1b[38;5;76mDONE\x1b[0m ] Module '{}' restored to v{}.",
+                module_id, recorded_version
+            )?;
+            record_module_audit(
+                &deps,
+                "module::release",
+                &module_id,
+                Some(&recorded_version),
+                AuditOutcome::Success,
+                AuditMetadata::default().insert("source", install_result.source.label()),
+            );
+        }
+        Err(err) => {
+            render_service_error(&mut out, "Release fehlgeschlagen", &err)?;
+            record_module_audit(
+                &deps,
+                "module::release",
+                &module_id,
+                None,
+                AuditOutcome::Failure,
+                AuditMetadata::default()
+                    .insert("error_code", module_error_code(&err))
+                    .insert("error", err.to_string()),
+            );
+        }
+    }
+
+    Ok(CommandOutcome::Continue)
+}
+
+fn render_distribution_plan(
+    out: &mut dyn Write,
+    plan: &[DistributionPlanEntry],
+) -> io::Result<()> {
+    writeln!(out, "\n:: DISTRIBUTION PLAN ::")?;
+    let mut table = Table::new(vec![
+        "Action".to_string(),
+        "Module".to_string(),
+        "Current".to_string(),
+        "Target".to_string(),
+    ]);
+
+    for entry in plan {
+        let action = match entry.action {
+            DistributionAction::Install => "[+] Install",
+            DistributionAction::Update => "[~] Update",
+            DistributionAction::AlreadyCurrent => "[=] Current",
+        };
+        let current = entry
+            .current_version
+            .as_ref()
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "(none)".to_string());
+        table.add_row(vec![
+            action.to_string(),
+            entry.module_id.to_string(),
+            current,
+            entry.target_version.to_string(),
+        ]);
+    }
+
+    table.render(out, "  ")?;
+    writeln!(out)?;
+    out.flush()
+}
+
+struct OwnedStreamedWriter {
+    sink: Arc<dyn CommandOutput>,
+}
+
+impl OwnedStreamedWriter {
+    fn new(sink: Arc<dyn CommandOutput>) -> Self {
+        Self { sink }
+    }
+}
+
+impl Write for OwnedStreamedWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.sink.push(&String::from_utf8_lossy(buf));
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -1376,7 +1794,7 @@ impl ConfirmationHandler for InstallDistributionConfirmation {
     fn handle(
         self: Box<Self>,
         accepted: bool,
-        _deps: &CliDependencies,
+        deps: &CliDependencies,
         out: &mut dyn Write,
     ) -> io::Result<CommandOutcome> {
         if !accepted {
@@ -1384,44 +1802,206 @@ impl ConfirmationHandler for InstallDistributionConfirmation {
             return Ok(CommandOutcome::Continue);
         }
 
-        writeln!(
-            out,
-            "Installiere Module für Fenrir {}...",
-            self.fenrir_version
-        )?;
-        out.flush()?;
+        // Run asynchronously to keep transports responsive; both CLI and SSH provide an output sink.
+        let deps_clone = deps.clone();
+        let future = async move { self.execute(&deps_clone).await };
+        Ok(CommandOutcome::AsyncTask(Box::pin(future)))
+    }
+}
+
+impl InstallDistributionConfirmation {
+    async fn execute(
+        self,
+        deps: &CliDependencies,
+    ) -> io::Result<CommandOutcome> {
+        // Use owned writer for async context
+        let sink = deps.output().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Other, "no output sink available")
+        })?;
+        let mut out = OwnedStreamedWriter::new(sink);
+
+        writeln!(&mut out)?;
+
+        let actionable: Vec<_> = self
+            .plan
+            .into_iter()
+            .filter(|entry| entry.action.requires_execution())
+            .collect();
+
+        if actionable.is_empty() {
+            writeln!(
+                out,
+                "Alle Module für Fenrir {} sind bereits aktuell.",
+                self.fenrir_version
+            )?;
+            return Ok(CommandOutcome::Continue);
+        }
 
         let service = Arc::clone(&self.service);
-        let plan = self.plan.clone();
-        let result = run_module_future(move || {
-            let service = Arc::clone(&service);
-            async move { service.apply_distribution_plan(plan).await }
-        });
 
-        match result {
-            Ok(results) => {
-                if results.is_empty() {
-                    writeln!(out, "Alle Module waren bereits aktuell.")?;
-                } else {
-                    writeln!(out, "{} Module wurden installiert/aktualisiert:", results.len())?;
-                    for result in results {
-                        let status = match result.status {
-                            ModuleInstallStatus::Installed => "installiert",
-                            ModuleInstallStatus::Updated => "aktualisiert",
-                            ModuleInstallStatus::AlreadyCurrent => "aktuell",
-                        };
-                        writeln!(
-                            out,
-                            "  ✓ {} v{} ({})",
-                            result.manifest.id, result.manifest.version, status
+        for entry in actionable.iter() {
+            let module_label = entry.module_id.to_string();
+            let mut needs_restart = matches!(entry.action, DistributionAction::Install);
+            let mut steps: Vec<(String, String)> = Vec::new();
+
+            if matches!(entry.action, DistributionAction::Update) {
+                let module_id_for_status = entry.module_id.clone();
+                match run_module_runtime_call(Arc::clone(&service), move |svc| async move {
+                    svc.runtime_status(&module_id_for_status).await
+                }) {
+                    Ok(_) => {
+                        let module_id_for_stop = entry.module_id.clone();
+                        if let Err(err) =
+                            run_module_runtime_call(Arc::clone(&service), move |svc| async move {
+                                svc.stop(&module_id_for_stop).await
+                            })
+                        {
+                            render_runtime_error(&mut out, "Stop fehlgeschlagen", &err)?;
+                            return Ok(CommandOutcome::Continue);
+                        }
+                        steps.push(("Stopping".to_string(), "[ OK ] stopped".to_string()));
+                        needs_restart = true;
+                    }
+                    Err(ModuleRuntimeError::NotRunning { .. }) => {}
+                    Err(err) => {
+                        render_runtime_error(
+                            &mut out,
+                            "Laufstatus konnte nicht ermittelt werden",
+                            &err,
                         )?;
+                        return Ok(CommandOutcome::Continue);
                     }
                 }
             }
-            Err(err) => {
-                render_service_error(out, "Distribution konnte nicht installiert werden", &err)?;
+
+            let module_id_for_install = entry.module_id.clone();
+            let target_version = entry.target_version.clone();
+            let service_for_install = Arc::clone(&service);
+
+            // Progress channel for live download updates
+            let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<ModuleProgress>();
+            let progress_callback: Arc<dyn Fn(ModuleProgress) + Send + Sync> =
+                Arc::new(move |progress: ModuleProgress| {
+                    let _ = progress_tx.send(progress);
+                });
+
+            let install_task = tokio::spawn(async move {
+                service_for_install
+                    .install_with_progress(&module_id_for_install, Some(&target_version), Some(progress_callback))
+                    .await
+            });
+
+            // Render progress updates while install runs; keep last bar to embed in task block
+            let mut last_percent = 0u32;
+            let mut download_bar: Option<String> = None;
+            let mut install_task = install_task;
+            let install_result = loop {
+                tokio::select! {
+                    biased;
+                    Some(progress) = progress_rx.recv() => {
+                        if let ModuleProgress::DownloadProgress { downloaded_bytes, total_bytes, .. } = progress {
+                            if let Some(total) = total_bytes {
+                                let percent = ((downloaded_bytes as f64 / total as f64) * 100.0).clamp(0.0, 100.0) as u32;
+                                if percent >= last_percent + 5 || percent == 100 {
+                                    let mb_downloaded = downloaded_bytes as f64 / 1_048_576.0;
+                                    let mb_total = total as f64 / 1_048_576.0;
+                                    let bar_width = 20;
+                                    let filled = ((percent as f64 / 100.0) * bar_width as f64).round() as usize;
+                                    let filled = filled.min(bar_width);
+                                    let bar = format!(
+                                        "[{}{}]",
+                                        "=".repeat(filled),
+                                        ".".repeat(bar_width.saturating_sub(filled))
+                                    );
+                                    download_bar = Some(format!("{} {:>3}% ({:.1} MB / {:.1} MB)", bar, percent, mb_downloaded, mb_total));
+                                    last_percent = percent;
+                                }
+                            }
+                        }
+                    }
+                    result = &mut install_task => {
+                        let result = result.map_err(|err| {
+                            io::Error::new(io::ErrorKind::Other, format!("install task panicked: {err:?}"))
+                        })?;
+                        break result;
+                    }
+                }
+            };
+
+            match install_result {
+                Ok(result) => {
+                    if let Some(bar) = download_bar.take() {
+                        steps.push(("Downloading".to_string(), bar));
+                    }
+                    let status_label = match result.status {
+                        ModuleInstallStatus::Installed => "install v",
+                        ModuleInstallStatus::Updated => "update to v",
+                        ModuleInstallStatus::AlreadyCurrent => "current v",
+                    };
+                    steps.push((
+                        "Installing".to_string(),
+                        format!("{}{}", status_label, result.manifest.version),
+                    ));
+                    if matches!(result.status, ModuleInstallStatus::AlreadyCurrent) {
+                        needs_restart = false;
+                    }
+                }
+                Err(err) => {
+                    render_service_error(
+                        &mut out,
+                        &format!("Installation von {} fehlgeschlagen", module_label),
+                        &err,
+                    )?;
+                    return Ok(CommandOutcome::Continue);
+                }
             }
+
+            if needs_restart {
+                let module_id_for_start = entry.module_id.clone();
+                let start_result =
+                    run_module_runtime_call(Arc::clone(&service), move |svc| async move {
+                        let config = ModuleStartConfig {
+                            module_id: module_id_for_start,
+                            port: None,
+                            env_vars: Vec::new(),
+                            auto_restart: true,
+                        };
+                        svc.start(config).await
+                    });
+                match start_result {
+                    Ok(info) => {
+                        let pid_hint = info
+                            .pid
+                            .map(|pid| format!("[ OK ] Service running (PID {pid})"))
+                            .unwrap_or_else(|| "[ OK ] Service running".to_string());
+                        steps.push(("Starting".to_string(), pid_hint));
+                    }
+                    Err(ModuleRuntimeError::AlreadyRunning { .. }) => steps.push((
+                        "Starting".to_string(),
+                        "[ SKIP ] already running".to_string(),
+                    )),
+                    Err(err) => {
+                        render_runtime_error(&mut out, "Start fehlgeschlagen", &err)?;
+                        return Ok(CommandOutcome::Continue);
+                    }
+                }
+            } else {
+                steps.push((
+                    "Starting".to_string(),
+                    "[ SKIP ] not required".to_string(),
+                ));
+            }
+
+            render_task_block(&mut out, &module_label, &steps)?;
         }
+
+        writeln!(out)?;
+        writeln!(
+            out,
+            "[ \x1b[38;5;76mDONE\x1b[0m ] Distribution {} successfully applied.",
+            self.fenrir_version
+        )?;
+        out.flush()?;
 
         Ok(CommandOutcome::Continue)
     }

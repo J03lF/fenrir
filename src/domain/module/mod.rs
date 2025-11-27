@@ -2,7 +2,25 @@ use async_trait::async_trait;
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::sync::Arc;
 use std::time::SystemTime;
+
+/// Progress event during module operations
+#[derive(Debug, Clone)]
+pub enum ModuleProgress {
+    /// Download started
+    DownloadStarted { module_id: String, total_bytes: Option<u64> },
+    /// Download progress update
+    DownloadProgress { module_id: String, downloaded_bytes: u64, total_bytes: Option<u64> },
+    /// Download completed
+    DownloadCompleted { module_id: String, total_bytes: u64 },
+    /// Verification started
+    VerificationStarted { module_id: String },
+    /// Installation started
+    InstallationStarted { module_id: String },
+}
+
+pub type ProgressCallback = Arc<dyn Fn(ModuleProgress) + Send + Sync>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct ModuleId(String);
@@ -176,11 +194,32 @@ pub struct ModuleBundle {
     pub checksum: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModuleInstallSource {
+    Distribution,
+    LocalOverride,
+}
+
+impl ModuleInstallSource {
+    pub fn is_synchronized(&self) -> bool {
+        matches!(self, Self::LocalOverride)
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Distribution => "Distribution",
+            Self::LocalOverride => "Synchronisiert",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct InstalledModule {
     pub manifest: ModuleManifest,
     pub installed_at: SystemTime,
     pub path: String,
+    pub source: ModuleInstallSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -195,6 +234,7 @@ pub struct ModuleInstallResult {
     pub status: ModuleInstallStatus,
     pub manifest: ModuleManifest,
     pub path: String,
+    pub source: ModuleInstallSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -218,6 +258,11 @@ pub trait ModuleRegistryPort: Send + Sync {
         &self,
         manifest: &ModuleManifest,
     ) -> Result<ModuleBundle, ModuleRegistryError>;
+    async fn download_with_progress(
+        &self,
+        manifest: &ModuleManifest,
+        progress: Option<ProgressCallback>,
+    ) -> Result<ModuleBundle, ModuleRegistryError>;
     async fn distribution_targets(
         &self,
         fenrir_version: &str,
@@ -231,6 +276,7 @@ pub trait ModuleStoragePort: Send + Sync {
     async fn stage_and_activate(
         &self,
         bundle: ModuleBundle,
+        source: ModuleInstallSource,
     ) -> Result<ModuleInstallResult, ModuleStorageError>;
     async fn remove(&self, id: &ModuleId) -> Result<(), ModuleStorageError>;
 }

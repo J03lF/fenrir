@@ -4,13 +4,14 @@ use std::time::SystemTime;
 
 use async_trait::async_trait;
 use flate2::read::GzDecoder;
+use serde::{Deserialize, Serialize};
 use tar::Archive;
 use tokio::{fs, task};
 
 use crate::config::ModuleStorageSection;
 use crate::domain::module::{
-    InstalledModule, ModuleBundle, ModuleId, ModuleInstallResult, ModuleInstallStatus,
-    ModuleManifest, ModuleStorageError, ModuleStoragePort,
+    InstalledModule, ModuleBundle, ModuleId, ModuleInstallResult, ModuleInstallSource,
+    ModuleInstallStatus, ModuleManifest, ModuleStorageError, ModuleStoragePort,
 };
 use tracing::warn;
 
@@ -58,6 +59,10 @@ impl FilesystemModuleStorage {
         self.module_dir(id).join(".fenrir-meta")
     }
 
+    fn install_metadata_path(&self, id: &ModuleId) -> PathBuf {
+        self.metadata_dir(id).join("install.json")
+    }
+
     fn manifest_path(&self, id: &ModuleId) -> PathBuf {
         self.metadata_dir(id).join("manifest.json")
     }
@@ -73,6 +78,10 @@ impl FilesystemModuleStorage {
 
     fn checksum_path(&self, id: &ModuleId) -> PathBuf {
         self.metadata_dir(id).join("checksum.bin")
+    }
+
+    fn download_url_path(&self, id: &ModuleId) -> PathBuf {
+        self.metadata_dir(id).join("download")
     }
 
     async fn read_installed(
@@ -96,6 +105,7 @@ impl FilesystemModuleStorage {
                     manifest,
                     installed_at,
                     path: self.module_dir(id).to_string_lossy().to_string(),
+                    source: self.read_install_source(id).await,
                 }))
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -104,6 +114,60 @@ impl FilesystemModuleStorage {
                 manifest_path.display()
             ))),
         }
+    }
+
+    async fn read_install_source(&self, id: &ModuleId) -> ModuleInstallSource {
+        let metadata_path = self.install_metadata_path(id);
+        match fs::read(&metadata_path).await {
+            Ok(bytes) => serde_json::from_slice::<ModuleInstallMetadata>(&bytes)
+                .map(|meta| meta.source)
+                .unwrap_or_else(|err| {
+                    warn!(
+                        target = "modules::storage",
+                        module = %id,
+                        path = %metadata_path.display(),
+                        error = %err,
+                        "failed to parse install metadata, using distribution source"
+                    );
+                    ModuleInstallSource::Distribution
+                }),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                ModuleInstallSource::Distribution
+            }
+            Err(err) => {
+                warn!(
+                    target = "modules::storage",
+                    module = %id,
+                    path = %metadata_path.display(),
+                    error = %err,
+                    "failed to read install metadata, using distribution source"
+                );
+                ModuleInstallSource::Distribution
+            }
+        }
+    }
+
+    async fn persist_install_metadata(
+        &self,
+        id: &ModuleId,
+        source: ModuleInstallSource,
+    ) -> Result<(), ModuleStorageError> {
+        let metadata = ModuleInstallMetadata { source };
+        let metadata_bytes = serde_json::to_vec_pretty(&metadata).map_err(|err| {
+            ModuleStorageError::InvalidState(format!(
+                "failed to encode install metadata for {}: {err}",
+                id
+            ))
+        })?;
+        let metadata_path = self.install_metadata_path(id);
+        fs::write(&metadata_path, &metadata_bytes)
+            .await
+            .map_err(|err| {
+                ModuleStorageError::Io(format!(
+                    "cannot write install metadata {}: {err}",
+                    metadata_path.display()
+                ))
+            })
     }
 }
 
@@ -180,6 +244,7 @@ impl ModuleStoragePort for FilesystemModuleStorage {
     async fn stage_and_activate(
         &self,
         bundle: ModuleBundle,
+        source: ModuleInstallSource,
     ) -> Result<ModuleInstallResult, ModuleStorageError> {
         let id = bundle
             .manifest
@@ -261,6 +326,18 @@ impl ModuleStoragePort for FilesystemModuleStorage {
                 ModuleStorageError::Io(format!("cannot write checksum for {}: {err}", id))
             })?;
 
+        // Store the original download URL for reference
+        fs::write(
+            self.download_url_path(&id),
+            bundle.manifest.artifact.download_url.as_bytes(),
+        )
+        .await
+        .map_err(|err| {
+            ModuleStorageError::Io(format!("cannot write download URL for {}: {err}", id))
+        })?;
+
+        self.persist_install_metadata(&id, source).await?;
+
         let status = match current {
             None => ModuleInstallStatus::Installed,
             Some(installed) => {
@@ -277,6 +354,7 @@ impl ModuleStoragePort for FilesystemModuleStorage {
             status,
             manifest: bundle.manifest,
             path: module_dir.to_string_lossy().to_string(),
+            source,
         })
     }
 
@@ -416,4 +494,9 @@ fn flatten_module_root(destination: &std::path::Path) -> Result<(), ModuleStorag
     }
 
     Ok(())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ModuleInstallMetadata {
+    source: ModuleInstallSource,
 }

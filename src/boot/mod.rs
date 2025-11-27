@@ -230,7 +230,8 @@ pub fn boot() -> Result<BootContext, BootError> {
             "Verwaltet installierte CLI-Module",
             ServiceKind::Infrastructure,
         )
-        .with_tags(&[ServiceTag::Platform]),
+        .with_tags(&[ServiceTag::Core, ServiceTag::Platform])
+        .critical(),
         ServiceStatus::Standby,
         Some("Keine Module installiert".to_string()),
     );
@@ -401,11 +402,21 @@ pub fn boot() -> Result<BootContext, BootError> {
                 Arc::new(InProcessModuleRuntime::new(Arc::clone(&module_storage)))
             }
         };
+    let dev_sources = cfg
+        .modules
+        .dev_sources
+        .base_path
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
     let module_service = Arc::new(ModuleService::new(
         Arc::clone(&module_registry),
         Arc::clone(&module_storage),
         Arc::clone(&module_verifier),
         Arc::clone(&module_runtime),
+        Arc::clone(&registry),
+        dev_sources,
     ));
 
     let services = Arc::new(AppServices::new(
@@ -602,8 +613,9 @@ pub fn boot() -> Result<BootContext, BootError> {
 }
 
 pub async fn start_transports(ctx: &BootContext) -> Result<()> {
+    let module_service = ctx.services.module_service();
     if !ctx.config.modules.bootstrap.is_empty() {
-        match ctx.services.module_service() {
+        match module_service.clone() {
             Some(module_service) => {
                 bootstrap_modules(Arc::clone(&ctx.config), module_service).await;
             }
@@ -611,6 +623,9 @@ pub async fn start_transports(ctx: &BootContext) -> Result<()> {
                 warn!("module service not attached; skipping bootstrap modules");
             }
         }
+    }
+    if let Some(service) = module_service {
+        service.ensure_all_running().await;
     }
 
     // Start SSH server (blocking future) on its own task

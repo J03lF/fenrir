@@ -257,7 +257,7 @@ mod tests {
     use super::*;
     use crate::audit::{AuditError, AuditEvent};
     use crate::config::{
-        HttpSecuritySection, JwtConfig, KdfConfig, SecuritySection, SessionSection,
+        HttpSecuritySection, IdentitySection, JwtConfig, KdfConfig, SecuritySection, SessionSection,
     };
     use crate::security::auth::Role;
     use std::sync::Mutex;
@@ -299,6 +299,7 @@ mod tests {
                 idle_timeout_seconds: 1,
                 cleanup_interval_seconds: 1,
             },
+            identity: IdentitySection::default(),
         }
     }
 

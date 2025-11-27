@@ -1,14 +1,17 @@
 use anyhow::{anyhow, Context, Result};
-use futures::executor::block_on;
+use futures::FutureExt;
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
+use std::future::Future;
 use std::io::{self, Write};
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use thrussh::server::{Auth, Handle as SessionHandle, Server, Session};
 use thrussh::{server, ChannelId, CryptoVec};
 use tokio::runtime::Handle as TokioHandle;
+use tokio::sync::mpsc;
 
 use crate::audit::AuditActor;
 use crate::cli::commands::builtins;
@@ -76,56 +79,79 @@ enum ShellMode {
 
 impl server::Handler for Handler {
     type Error = anyhow::Error;
-    type FutureAuth = futures::future::Ready<Result<(Self, Auth), Self::Error>>;
-    type FutureUnit = futures::future::Ready<Result<(Self, Session), Self::Error>>;
-    type FutureBool = futures::future::Ready<Result<(Self, Session, bool), Self::Error>>;
+    type FutureAuth = Pin<Box<dyn Future<Output = Result<(Self, Auth), Self::Error>> + Send>>;
+    type FutureUnit = Pin<Box<dyn Future<Output = Result<(Self, Session), Self::Error>> + Send>>;
+    type FutureBool = Pin<Box<dyn Future<Output = Result<(Self, Session, bool), Self::Error>> + Send>>;
 
     fn finished_auth(self, auth: Auth) -> Self::FutureAuth {
-        futures::future::ready(Ok((self, auth)))
+        futures::future::ready(Ok((self, auth))).boxed()
     }
     fn finished(self, session: Session) -> Self::FutureUnit {
-        futures::future::ready(Ok((self, session)))
+        futures::future::ready(Ok((self, session))).boxed()
     }
     fn finished_bool(self, b: bool, session: Session) -> Self::FutureBool {
-        futures::future::ready(Ok((self, session, b)))
+        futures::future::ready(Ok((self, session, b))).boxed()
     }
 
     fn auth_password(mut self, user: &str, password: &str) -> Self::FutureAuth {
         if self.identity_required {
-            match self.authenticate_identity(user, password) {
-                Ok(()) => return self.finished_auth(Auth::Accept),
-                Err(err) => {
-                    warn!(ssh_user = %user, error = %err, "identity authentication rejected");
-                    return self.finished_auth(Auth::Reject);
+             // ... we need to clone user/password to move into async block if we were fully async, 
+             // but here we can just do sync checks and return ready.
+             // But authenticate_identity uses block_in_place internally if needed.
+             // We can keep it sync for now as auth is usually fast or handles blocking.
+             // But since we changed the return type, we must box.
+             let user = user.to_string();
+             let password = password.to_string();
+             
+            async move {
+                if self.identity_required {
+                    match self.authenticate_identity(&user, &password) {
+                        Ok(()) => return Ok((self, Auth::Accept)),
+                        Err(err) => {
+                            warn!(ssh_user = %user, error = %err, "identity authentication rejected");
+                            return Ok((self, Auth::Reject));
+                        }
+                    }
                 }
-            }
-        }
-
-        let env_pw = self
-            .password_env
-            .as_ref()
-            .and_then(|key| std::env::var(key).ok())
-            .unwrap_or_default();
-        if user == self.username && !env_pw.is_empty() && password == env_pw {
-            self.finished_auth(Auth::Accept)
+                // ...
+                let env_pw = self.password_env.as_ref().and_then(|key| std::env::var(key).ok()).unwrap_or_default();
+                if user == self.username && !env_pw.is_empty() && password == env_pw {
+                    Ok((self, Auth::Accept))
+                } else {
+                    Ok((self, Auth::Reject))
+                }
+            }.boxed()
         } else {
-            self.finished_auth(Auth::Reject)
+            // ...
+             let user = user.to_string();
+             let password = password.to_string();
+             async move {
+                let env_pw = self.password_env.as_ref().and_then(|key| std::env::var(key).ok()).unwrap_or_default();
+                if user == self.username && !env_pw.is_empty() && password == env_pw {
+                    Ok((self, Auth::Accept))
+                } else {
+                    Ok((self, Auth::Reject))
+                }
+             }.boxed()
         }
     }
 
     fn channel_open_session(self, channel: ChannelId, mut session: Session) -> Self::FutureUnit {
-        {
-            let mut writer = SessionWriter::new(&mut session, channel);
-            let _ = write!(&mut writer, "{}", prompts::clear_screen_sequence());
-            let _ = writeln!(&mut writer, "{}", prompts::banner());
-            let _ = writeln!(
-                &mut writer,
-                "{}",
-                prompts::welcome_line(self.config.as_ref())
-            );
+        async move {
+            {
+                let mut writer = SessionWriter::new(&mut session, channel);
+                let _ = write!(&mut writer, "{}", prompts::clear_screen_sequence());
+                let _ = writeln!(&mut writer, "{}", prompts::banner());
+                let _ = writeln!(
+                    &mut writer,
+                    "{}",
+                    prompts::welcome_line(self.config.as_ref())
+                );
+            }
+            Handler::send_prompt(&mut session, channel, self.current_prompt());
+            Ok((self, session))
         }
-        Handler::send_prompt(&mut session, channel, self.current_prompt());
-        self.finished(session)
+        .boxed()
     }
 
     fn data(mut self, channel: ChannelId, data: &[u8], mut session: Session) -> Self::FutureUnit {
@@ -778,6 +804,48 @@ impl Handler {
                 self.begin_confirmation(request, channel, session);
                 true
             }
+            CommandOutcome::AsyncTask(task) => {
+                let prompt = format!("\r\n{}", self.current_prompt());
+                let output_sink = self.dependencies.output();
+                let mut handle = session.handle();
+
+                tokio::spawn(async move {
+                    let result = task.await;
+                    // Let any buffered module output flush first.
+                    tokio::time::sleep(tokio::time::Duration::from_millis(75)).await;
+                    match result {
+                        Ok(_) => {
+                            if let Some(sink) = output_sink {
+                                sink.push(&prompt);
+                                return;
+                            }
+                            let _ = handle
+                                .data(channel, CryptoVec::from_slice(prompt.as_bytes()))
+                                .await;
+                        }
+                        Err(err) => {
+                            if let Some(sink) = output_sink {
+                                sink.push(&format!(
+                                    "\r\nFehler bei der Befehlsausführung: {err}{prompt}"
+                                ));
+                                return;
+                            }
+                            let _ = handle
+                                .data(
+                                    channel,
+                                    CryptoVec::from_slice(
+                                        format!(
+                                            "Fehler bei der Befehlsausführung: {err}{prompt}"
+                                        )
+                                        .as_bytes(),
+                                    ),
+                                )
+                                .await;
+                        }
+                    }
+                });
+                true
+            }
         }
     }
 
@@ -872,8 +940,13 @@ impl Handler {
                 Handler::send_prompt(session, channel, self.current_prompt());
                 return true;
             };
+            
+            // Create output sink for confirmation handling
+            let output = Arc::new(SshCommandOutput::new(session.handle(), channel));
+            let deps_with_output = self.dependencies.with_output(output);
+            
             let mut writer = SessionWriter::new(session, channel);
-            match request.resolve(answer, &self.dependencies, &mut writer) {
+            match request.resolve(answer, &deps_with_output, &mut writer) {
                 Ok(outcome) => self.handle_command_outcome(outcome, channel, session),
                 Err(err) => {
                     let _ = writeln!(&mut writer, "Bestätigung fehlgeschlagen: {err}");
@@ -1130,19 +1203,27 @@ impl Write for SessionWriter<'_> {
 
 #[derive(Clone)]
 struct SshCommandOutput {
-    handle: SessionHandle,
-    channel: ChannelId,
+    tx: mpsc::UnboundedSender<Vec<u8>>,
 }
 
 impl SshCommandOutput {
     fn new(handle: SessionHandle, channel: ChannelId) -> Self {
-        Self { handle, channel }
+        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let mut handle = handle;
+        let runtime = TokioHandle::current();
+        runtime.spawn(async move {
+            while let Some(buf) = rx.recv().await {
+                let mut payload = CryptoVec::new();
+                payload.extend(&buf);
+                let _ = handle.data(channel, payload).await;
+            }
+        });
+        Self { tx }
     }
 }
 
 impl CommandOutput for SshCommandOutput {
     fn push(&self, text: &str) {
-        let channel = self.channel;
         let mut converted = Vec::with_capacity(text.len() * 2);
         for &byte in text.as_bytes() {
             if byte == b'\n' {
@@ -1152,17 +1233,6 @@ impl CommandOutput for SshCommandOutput {
                 converted.push(byte);
             }
         }
-        let mut handle = self.handle.clone();
-        if let Ok(runtime) = TokioHandle::try_current() {
-            runtime.spawn(async move {
-                let mut payload = CryptoVec::new();
-                payload.extend(&converted);
-                let _ = handle.data(channel, payload).await;
-            });
-        } else {
-            let mut payload = CryptoVec::new();
-            payload.extend(&converted);
-            let _ = block_on(handle.data(channel, payload));
-        }
+        let _ = self.tx.send(converted);
     }
 }

@@ -57,13 +57,13 @@ pub mod process {
     pub const MODULE_CONFIG_MISSING: &str = "no config.toml found in module";
     pub fn exec_foreign_target(target: impl fmt::Display, current: impl fmt::Display) -> String {
         format!(
-            "Modul-Binary ist für {} gebaut und nicht mit {} kompatibel",
+            "module binary was built for {} and is not compatible with {}",
             target, current
         )
     }
     pub fn exec_not_found(module_dir: impl fmt::Display, module_id: impl fmt::Display) -> String {
         format!(
-            "kein ausführbares Modul in {} gefunden. Gesucht in: {}, bin/{}, {}.exe, bin/{}.exe",
+            "no executable module found in {}. Searched: {}, bin/{}, {}.exe, bin/{}.exe",
             module_dir, module_id, module_id, module_id, module_id
         )
     }

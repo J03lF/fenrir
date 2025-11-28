@@ -10,10 +10,10 @@ pub mod logs {
 pub mod notes {
     use super::fmt;
 
-    pub const INSTALLED: &str = "installiert";
+    pub const INSTALLED: &str = "installed";
 
     pub fn start_failed(err: impl fmt::Display) -> String {
-        format!("Start fehlgeschlagen: {err}")
+        format!("start failed: {err}")
     }
 }
 
@@ -25,18 +25,18 @@ pub mod errors {
     }
 
     pub fn module_missing(id: impl fmt::Display) -> String {
-        format!("Module {id} ist nicht installiert")
+        format!("Module {id} is not installed")
     }
 
     pub fn already_on_distribution(id: impl fmt::Display) -> String {
-        format!("Module {id} nutzt bereits die Distribution")
+        format!("Module {id} already uses the distribution")
     }
 
     pub fn not_part_of_distribution(
         id: impl fmt::Display,
         fenrir_version: impl fmt::Display,
     ) -> String {
-        format!("Module {id} ist nicht Teil der Distribution für Fenrir {fenrir_version}")
+        format!("Module {id} is not part of the distribution for Fenrir {fenrir_version}")
     }
 
     pub fn incompatible_version(

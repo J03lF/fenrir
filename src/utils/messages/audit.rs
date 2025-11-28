@@ -13,13 +13,13 @@ pub mod outcomes {
 }
 
 pub mod builder {
-    pub const MISSING_ACTOR: &str = "Audit-Actor muss gesetzt werden";
-    pub const MISSING_ACTION: &str = "Action fehlt";
-    pub const MISSING_TARGET: &str = "Target fehlt";
+    pub const MISSING_ACTOR: &str = "audit actor must be set";
+    pub const MISSING_ACTION: &str = "action is required";
+    pub const MISSING_TARGET: &str = "target is required";
 }
 
 pub mod errors {
-    pub const LOG_LOCKED: &str = "Audit-Log gesperrt";
+    pub const LOG_LOCKED: &str = "audit log locked";
 }
 
 pub mod persistence {

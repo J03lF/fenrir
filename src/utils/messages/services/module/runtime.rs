@@ -14,9 +14,9 @@ pub mod notes {
     use super::fmt;
 
     pub fn running_with_pid(pid: impl fmt::Display) -> String {
-        format!("läuft (PID {pid})")
+        format!("running (PID {pid})")
     }
 
-    pub const RUNNING: &str = "läuft";
-    pub const STOPPED: &str = "gestoppt";
+    pub const RUNNING: &str = "running";
+    pub const STOPPED: &str = "stopped";
 }

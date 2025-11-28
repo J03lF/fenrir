@@ -1,21 +1,22 @@
 pub mod module_guard {
-    pub const AUTO_MANAGED_SUMMARY: &str = "Module werden automatisch verwaltet – nutze 'sync module' oder 'install distribution'; Module starten/stoppen selbst.";
+    pub const AUTO_MANAGED_SUMMARY: &str =
+        "Modules are managed automatically – use 'sync module' or 'install distribution'; modules start/stop on their own.";
 
     pub fn action_disabled_line(action: &str) -> String {
         format!(
-            "'{} module' ist deaktiviert (Module verwalten sich selbst).",
+            "'{} module' is disabled (modules manage themselves).",
             action
         )
     }
 }
 
 pub mod list_command {
-    pub const DESCRIPTION: &str = "Listet Ressourcen (Services, Jobs, Module)";
+    pub const DESCRIPTION: &str = "List resources (services, jobs, modules)";
     pub const SYNOPSIS: &str = "list <services|jobs|modules>";
     pub const DETAILS: &[&str] = &[
-        "list services – zeigt registrierte Services",
-        "list jobs – listet Scheduler-Jobs",
-        "list modules – zeigt installierte Module (mit Runtime)",
+        "list services – show registered services",
+        "list jobs – list scheduler jobs",
+        "list modules – show installed modules (with runtime state)",
     ];
 }
 
@@ -23,22 +24,22 @@ pub mod actions {
     use super::metadata::LIST_USAGE_HINT;
 
     pub fn unknown_list_resource(value: &str) -> String {
-        format!("unbekannte Ressource: {value}")
+        format!("unknown resource: {value}")
     }
 
     pub fn available_resources_hint() -> String {
-        format!("verfügbar: {LIST_USAGE_HINT}")
+        format!("available: {LIST_USAGE_HINT}")
     }
 
     pub fn list_argument_hint(resource: &str) -> String {
-        format!("Hinweis: 'list {resource}' erwartet keine weiteren Argumente.")
+        format!("Hint: 'list {resource}' does not take additional arguments.")
     }
 
     pub fn unknown_action_resource(value: &str) -> String {
-        format!("unbekannte Ressource: {value}")
+        format!("unknown resource: {value}")
     }
 
-    pub const ACTION_RESOURCE_HINT: &str = "gültig: service | module";
+    pub const ACTION_RESOURCE_HINT: &str = "valid: service | module";
 }
 
 pub mod metadata {
@@ -46,87 +47,87 @@ pub mod metadata {
 
     pub const LIST_USAGE_HINT: &str = "list services|jobs|modules";
 
-    pub const START_DESCRIPTION: &str = "Startet Services oder Module";
-    pub const START_SYNOPSIS: &str = "start <service|module> <ziel>";
-    pub const START_USAGE: &str = "Nutzung: start service <id|--all>  (Module starten automatisch)";
+    pub const START_DESCRIPTION: &str = "Start services or modules";
+    pub const START_SYNOPSIS: &str = "start <service|module> <target>";
+    pub const START_USAGE: &str = "Usage: start service <id|--all>  (modules start automatically)";
     pub const START_DETAILS: &[&str] = &[
-        "start service <id|--all> – startet einen steuerbaren Service",
+        "start service <id|--all> – start a controllable service",
         AUTO_MANAGED_SUMMARY,
     ];
 
-    pub const STOP_DESCRIPTION: &str = "Stoppt Services oder Module kontrolliert";
-    pub const STOP_SYNOPSIS: &str = "stop <service|module> <ziel> [--force]";
+    pub const STOP_DESCRIPTION: &str = "Stop services or modules";
+    pub const STOP_SYNOPSIS: &str = "stop <service|module> <target> [--force]";
     pub const STOP_USAGE: &str =
-        "Nutzung: stop service <id|--all> [--force]  (Module stoppen automatisch)";
+        "Usage: stop service <id|--all> [--force]  (modules stop automatically)";
     pub const STOP_DETAILS: &[&str] = &[
-        "stop service <id|--all> [--force] – stoppt einen Service",
+        "stop service <id|--all> [--force] – stop a service",
         AUTO_MANAGED_SUMMARY,
     ];
 
-    pub const RESTART_DESCRIPTION: &str = "Startet Services oder Module neu";
-    pub const RESTART_SYNOPSIS: &str = "restart <service|module> <ziel> [--force]";
-    pub const RESTART_USAGE: &str = "Nutzung: restart service <id|--all> [--force]  (Module werden ohne manuelle Steuerung verwaltet)";
+    pub const RESTART_DESCRIPTION: &str = "Restart services or modules";
+    pub const RESTART_SYNOPSIS: &str = "restart <service|module> <target> [--force]";
+    pub const RESTART_USAGE: &str = "Usage: restart service <id|--all> [--force]  (modules are managed automatically)";
     pub const RESTART_DETAILS: &[&str] = &[
-        "restart service <id|--all> [--force] – Neustart von Services",
+        "restart service <id|--all> [--force] – restart services",
         AUTO_MANAGED_SUMMARY,
     ];
 }
 
 pub mod control {
     pub fn missing_service_id(usage: &str) -> String {
-        format!("fehlende Service-ID. {usage}")
+        format!("missing service id. {usage}")
     }
 
     pub fn started(id: &str) -> String {
-        format!("Service {id} gestartet.")
+        format!("Service {id} started.")
     }
 
     pub fn already_running(id: &str) -> String {
-        format!("Service {id} läuft bereits.")
+        format!("Service {id} is already running.")
     }
 
     pub fn stopped(id: &str) -> String {
-        format!("Service {id} gestoppt.")
+        format!("Service {id} stopped.")
     }
 
     pub fn already_stopped(id: &str) -> String {
-        format!("Service {id} war bereits gestoppt.")
+        format!("Service {id} was already stopped.")
     }
 
     pub fn restarted(id: &str) -> String {
-        format!("Service {id} neu gestartet.")
+        format!("Service {id} restarted.")
     }
 
     pub fn unexpected_outcome(id: &str, outcome: &str) -> String {
-        format!("Service {id}: unerwartetes Ergebnis {outcome}")
+        format!("Service {id}: unexpected outcome {outcome}")
     }
 
     pub fn unknown_service(id: &str) -> String {
-        format!("Unbekannter Service: {id}")
+        format!("Unknown service: {id}")
     }
 
     pub fn not_controllable(id: &str) -> String {
-        format!("Service {id} unterstützt keine Steuerung über diese CLI.")
+        format!("Service {id} cannot be controlled via this CLI.")
     }
 
     pub fn force_required(id: &str) -> String {
-        format!("Service {id} ist als kritisch markiert. --force erforderlich.")
+        format!("Service {id} is marked as critical. --force required.")
     }
 
     pub fn core_locked(id: &str) -> String {
         format!(
-            "Service {id} gehört zur core-Plattform und kann nicht gestoppt oder neu gestartet werden."
+            "Service {id} is part of the core platform and cannot be stopped or restarted."
         )
     }
 
     pub fn operation_failed(err: &str) -> String {
-        format!("Operation fehlgeschlagen: {err}")
+        format!("Operation failed: {err}")
     }
 
-    pub const NO_CONTROLLABLE_SERVICES: &str = "Keine steuerbaren Services gefunden.";
+    pub const NO_CONTROLLABLE_SERVICES: &str = "No controllable services found.";
 
     pub fn bulk_header(action: &str) -> String {
-        format!("Ergebnisse für {action} service --all:")
+        format!("Results for {action} service --all:")
     }
 
     pub fn bulk_success_line(id: &str, outcome: &str) -> String {
@@ -134,26 +135,26 @@ pub mod control {
     }
 
     pub fn bulk_failure_line(id: &str, err: &str) -> String {
-        format!("  - {id}: Fehler ({err})")
+        format!("  - {id}: error ({err})")
     }
 }
 
 pub mod list {
-    pub const NO_SERVICES: &str = "Keine Services registriert.";
-    pub const NO_JOBS: &str = "Keine Scheduler-Jobs registriert.";
+    pub const NO_SERVICES: &str = "No services registered.";
+    pub const NO_JOBS: &str = "No scheduler jobs registered.";
 
     pub const SERVICE_HEADERS: &[&str] = &[
         "ID",
         "Name",
-        "Typ",
+        "Type",
         "Tags",
         "Status",
-        "Seit",
-        "Beschreibung",
-        "Hinweis",
+        "Since",
+        "Description",
+        "Note",
     ];
 
-    pub const JOB_HEADERS: &[&str] = &["ID", "Intervall", "Beschreibung", "Status"];
+    pub const JOB_HEADERS: &[&str] = &["ID", "Interval", "Description", "Status"];
 
     pub const EMPTY_VALUE: &str = "-";
     pub const STATUS_ACTIVE: &str = "active";

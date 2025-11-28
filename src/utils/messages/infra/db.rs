@@ -8,30 +8,30 @@ pub mod postgres {
     }
 
     pub fn invalid_config(err: impl fmt::Display) -> String {
-        format!("ungültige Postgres-Config: {err}")
+        format!("invalid postgres config: {err}")
     }
 
     pub fn connection_timeout() -> &'static str {
-        "Verbindungs-Timeout"
+        "connection timeout"
     }
 
     pub fn query_timeout() -> &'static str {
-        "Query-Timeout"
+        "query timeout"
     }
 
     pub fn empty_ping_response() -> &'static str {
-        "leere Antwort auf SELECT 1"
+        "empty response to SELECT 1"
     }
 
     pub fn statement_empty() -> &'static str {
-        "Statement darf nicht leer sein"
+        "statement must not be empty"
     }
 
     pub fn table_not_found(schema: &str, table: &str) -> String {
-        format!("Tabelle {schema}.{table} nicht gefunden")
+        format!("table {schema}.{table} not found")
     }
 }
 
 pub mod manager {
-    pub const ADAPTER_UNIMPLEMENTED: &str = "DB-Adapter noch nicht implementiert";
+    pub const ADAPTER_UNIMPLEMENTED: &str = "db adapter not implemented yet";
 }

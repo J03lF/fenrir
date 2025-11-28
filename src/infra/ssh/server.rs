@@ -411,7 +411,7 @@ impl Handler {
                     self.services.registry().set_status(
                         "db-shell",
                         ServiceStatus::Degraded,
-                        Some(format!("Runtime Fehler: {err}")),
+                        Some(format!("runtime error: {err}")),
                     );
                     Handler::send_prompt(session, channel, self.current_prompt());
                     return true;
@@ -1095,7 +1095,7 @@ pub async fn start(cfg: &Arc<AppConfig>, services: &Arc<AppServices>) -> Result<
     services.registry().set_status(
         "ssh-server",
         ServiceStatus::Active,
-        Some(format!("Lauscht auf {bind_addr}")),
+        Some(format!("listening on {bind_addr}")),
     );
 
     let identity_required = should_enforce_identity(cfg.as_ref());
@@ -1115,7 +1115,7 @@ pub async fn start(cfg: &Arc<AppConfig>, services: &Arc<AppServices>) -> Result<
             services.registry().set_status(
                 "ssh-server",
                 ServiceStatus::Stopped,
-                Some("Listener beendet".to_string()),
+                Some("listener stopped".to_string()),
             );
             Ok(())
         }

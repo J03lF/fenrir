@@ -1,9 +1,9 @@
 pub mod command {
     pub const NAME: &str = "clear";
-    pub const DESCRIPTION: &str = "Leert den Bildschirm und setzt den Cursor zurück";
+    pub const DESCRIPTION: &str = "Clears the screen and resets the cursor";
     pub const USAGE: &str = "clear";
     pub const DETAILS: &[&str] = &[
-        "clear – löscht den sichtbaren Bildschirminhalt",
-        "Alias für das klassische Terminal-Kommando, nützlich in SSH/CLI-Sitzungen",
+        "clear – removes the visible screen contents",
+        "Alias for the classic terminal command, useful in SSH/CLI sessions",
     ];
 }

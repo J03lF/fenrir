@@ -54,7 +54,6 @@ fn config_env_requires_existing_profile_file() {
         ConfigError::MissingConfigFile { path } => {
             assert!(path.ends_with("config/does-not-exist.toml"));
         }
-        other => panic!("expected MissingConfigFile, got {other:?}"),
     }
     env::remove_var("FENRIR_DB_POSTGRES_URI");
     env::remove_var("FENRIR_HTTP_TOKEN_ADMIN");
@@ -78,7 +77,6 @@ fn explicit_config_file_must_exist() {
     let err = explicit_config_path().expect_err("should fail for missing file");
     match err {
         ConfigError::MissingConfigFile { .. } => {}
-        other => panic!("expected missing config file error, got {other:?}"),
     }
     env::remove_var(ENV_CONFIG_FILE);
 }

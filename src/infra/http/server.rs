@@ -122,7 +122,7 @@ impl HttpServer {
                 .collect::<Vec<_>>();
             if entries.is_empty() {
                 return Err(anyhow!(
-                    "keine Kontrollebenen-Authentifizierung konfiguriert (Identity-Service fehlt, security.http.control_tokens leer)"
+                    "no control-plane authentication configured (identity service missing, security.http.control_tokens empty)"
                 ));
             }
             info!("HTTP control-plane authentication via static token fallback");
@@ -176,12 +176,12 @@ impl HttpServer {
                     *guard = Some(Arc::clone(&provider));
                     self.attach_tls_hooks(&provider);
                     telemetry::set_counter("http.tls.enabled", 1);
-                    info!("HTTP TLS aktiviert und Zertifikate geladen");
+                    info!("HTTP TLS enabled and certificates loaded");
                 }
             } else {
                 *guard = None;
                 telemetry::set_counter("http.tls.enabled", 0);
-                info!("HTTP TLS deaktiviert");
+                info!("HTTP TLS disabled");
             }
         }
 
@@ -189,7 +189,7 @@ impl HttpServer {
             provider
                 .update_runtime(runtime, TlsReloadReason::ConfigReload)
                 .await?;
-            info!("HTTP TLS-Konfiguration neu geladen");
+            info!("HTTP TLS configuration reloaded");
         }
         Ok(())
     }
@@ -208,7 +208,7 @@ impl HttpServer {
                 reason = tls_reload_reason_label(&event.reason),
                 cert = %event.cert_path.display(),
                 key = %event.key_path.display(),
-                "HTTP TLS-Zertifikate neu geladen"
+                "HTTP TLS certificates reloaded"
             );
 
             if let Some(services) = services.upgrade() {
@@ -227,11 +227,11 @@ impl HttpServer {
                 {
                     Ok(event) => {
                         if let Err(err) = services.record_audit(event) {
-                            tracing::warn!(error = %err, "audit event für TLS-Reload konnte nicht geschrieben werden");
+                            tracing::warn!(error = %err, "failed to persist audit event for TLS reload");
                         }
                     }
                     Err(err) => {
-                        tracing::warn!(error = %err, "audit event für TLS-Reload konnte nicht erstellt werden");
+                        tracing::warn!(error = %err, "failed to build audit event for TLS reload");
                     }
                 }
             }
@@ -253,23 +253,23 @@ impl HttpServer {
         self.registry.set_status(
             HTTP_SERVICE_ID,
             ServiceStatus::Starting,
-            Some("initialisiere".to_string()),
+            Some("initializing".to_string()),
         );
 
         let mut resolved = lookup_host((self.config.host.as_str(), self.config.port))
             .await
             .with_context(|| {
                 format!(
-                    "konnte HTTP-Adresse nicht auflösen: {}:{}",
+                    "failed to resolve HTTP address: {}:{}",
                     self.config.host, self.config.port
                 )
             })?;
         let addr = resolved
             .next()
-            .ok_or_else(|| anyhow!("keine Adresse für HTTP-Server gefunden"))?;
+            .ok_or_else(|| anyhow!("no address resolved for HTTP server"))?;
         let listener = TcpListener::bind(addr)
             .await
-            .with_context(|| format!("HTTP-Server konnte nicht binden: {addr}"))?;
+            .with_context(|| format!("failed to bind HTTP server: {addr}"))?;
         let actual_addr = listener.local_addr().unwrap_or(addr);
         let services = self
             .services
@@ -344,9 +344,9 @@ impl HttpServer {
         };
 
         let message = if force {
-            "beende (force)".to_string()
+            "shutting down (force)".to_string()
         } else {
-            "fahre herunter".to_string()
+            "shutting down".to_string()
         };
         self.registry
             .set_status(HTTP_SERVICE_ID, ServiceStatus::Degraded, Some(message));
@@ -356,9 +356,9 @@ impl HttpServer {
                     HTTP_SERVICE_ID,
                     ServiceStatus::Stopped,
                     Some(if force {
-                        "gestoppt (force)".to_string()
+                        "stopped (force)".to_string()
                     } else {
-                        "gestoppt".to_string()
+                        "stopped".to_string()
                     }),
                 );
                 info!("HTTP server stopped");
@@ -368,7 +368,7 @@ impl HttpServer {
                 self.registry.set_status(
                     HTTP_SERVICE_ID,
                     ServiceStatus::Failed,
-                    Some(format!("Fehler beim Stoppen: {err}")),
+                    Some(format!("error while stopping: {err}")),
                 );
                 Err(err)
             }
@@ -381,7 +381,7 @@ impl HttpServer {
             self.registry.set_status(
                 HTTP_SERVICE_ID,
                 ServiceStatus::Failed,
-                Some(format!("Fehler: {err}")),
+                Some(format!("error: {err}")),
             );
         }
         if let Ok(mut guard) = self.handle.lock() {
@@ -410,12 +410,12 @@ impl HttpServer {
                             let provider = Arc::clone(&provider);
                             tokio::spawn(async move {
                                 if let Err(err) = provider.serve_connection(stream, service).await {
-                                    tracing::error!(address = %addr, error = %err, "TLS-Verbindung fehlgeschlagen");
+                                    tracing::error!(address = %addr, error = %err, "TLS connection failed");
                                 }
                             });
                         }
                         Err(err) => {
-                            tracing::error!(error = %err, "Fehler beim Annehmen der TLS-Verbindung");
+                            tracing::error!(error = %err, "error accepting TLS connection");
                         }
                     }
                 }

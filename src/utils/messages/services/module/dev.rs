@@ -13,20 +13,20 @@ pub mod errors {
     use super::fmt;
 
     pub fn stop_all_failed(err: impl fmt::Display) -> String {
-        format!("Module konnten nicht gestoppt werden: {err}")
+        format!("failed to stop modules: {err}")
     }
 
     pub fn install_path_missing(path: impl fmt::Display) -> String {
-        format!("Installationspfad {path} existiert nicht")
+        format!("installation path {path} does not exist")
     }
 
     pub fn no_dev_services(module_id: impl fmt::Display) -> String {
-        format!("Keine Dev-Services für Modul {module_id} konfiguriert")
+        format!("no dev services configured for module {module_id}")
     }
 
     pub fn dev_root_not_directory(root: impl fmt::Display, module: impl fmt::Display) -> String {
         format!(
-            "Dev-Verzeichnis {root} für Modul {module} ist kein Ordner",
+            "dev directory {root} for module {module} is not a folder",
             root = root,
             module = module
         )
@@ -34,52 +34,52 @@ pub mod errors {
 
     pub fn missing_build_dir(root: impl fmt::Display) -> String {
         format!(
-            "Dev-Verzeichnis {root} gefunden, aber kein Build-Ordner (dist/, build/, target/*) vorhanden. Lege eine `.fenrir-dev.toml` mit `output = \"pfad\"` an.",
+            "dev directory {root} found, but no build folder (dist/, build/, target/*) present. Create a `.fenrir-dev.toml` with `output = \"path\"`.",
             root = root
         )
     }
 
     pub fn directory_missing(path: impl fmt::Display) -> String {
-        format!("Verzeichnis {path} existiert nicht")
+        format!("directory {path} does not exist")
     }
 
     pub fn not_a_directory(path: impl fmt::Display) -> String {
-        format!("{path} ist kein Verzeichnis")
+        format!("{path} is not a directory")
     }
 
     pub fn dev_config_read_failed(path: impl fmt::Display, err: impl fmt::Display) -> String {
-        format!("Dev-Konfiguration {path} konnte nicht gelesen werden: {err}")
+        format!("failed to read dev configuration {path}: {err}")
     }
 
     pub fn dev_config_invalid(path: impl fmt::Display, err: impl fmt::Display) -> String {
-        format!("Dev-Konfiguration {path} ist ungültig: {err}")
+        format!("dev configuration {path} is invalid: {err}")
     }
 
     pub fn dev_output_empty(path: impl fmt::Display) -> String {
         format!(
-            "Dev-Konfiguration {path} enthält einen leeren Output-Pfad",
+            "dev configuration {path} contains an empty output path",
             path = path
         )
     }
 
     pub fn dev_output_missing(path: impl fmt::Display, target: impl fmt::Display) -> String {
-        format!("Dev-Konfiguration {path} verweist auf nicht existierendes Verzeichnis {target}")
+        format!("dev configuration {path} points to non-existent directory {target}")
     }
 
     pub fn dev_output_not_dir(path: impl fmt::Display, target: impl fmt::Display) -> String {
-        format!("Dev-Konfiguration {path} verweist auf {target} (kein Verzeichnis)")
+        format!("dev configuration {path} references {target} (not a directory)")
     }
 
     pub fn dev_service_missing_id(path: impl fmt::Display) -> String {
         format!(
-            "Dev-Konfiguration {path} enthält einen Service ohne id",
+            "dev configuration {path} contains a service without an id",
             path = path
         )
     }
 
     pub fn dev_service_missing_endpoint(path: impl fmt::Display, id: impl fmt::Display) -> String {
         format!(
-            "Dev-Service {id} in {path} benötigt einen Endpoint",
+            "dev service {id} in {path} requires an endpoint",
             id = id,
             path = path
         )
@@ -91,7 +91,7 @@ pub mod errors {
         endpoint: impl fmt::Display,
         err: impl fmt::Display,
     ) -> String {
-        format!("Dev-Service {id} in {path} besitzt einen ungültigen Endpoint {endpoint}: {err}")
+        format!("dev service {id} in {path} has an invalid endpoint {endpoint}: {err}")
     }
 }
 
@@ -102,7 +102,7 @@ pub mod notes {
         format!("dev endpoint {endpoint}")
     }
 
-    pub const DEV_OVERRIDE_ACTIVE: &str = "Dev-Service override aktiv";
+    pub const DEV_OVERRIDE_ACTIVE: &str = "dev-service override active";
 
     pub fn endpoint(endpoint: impl fmt::Display) -> String {
         format!("endpoint {endpoint}")
@@ -113,11 +113,11 @@ pub mod names {
     use super::fmt;
 
     pub fn binding(service_id: impl fmt::Display, module_id: impl fmt::Display) -> String {
-        format!("Service {service_id} aus Modul {module_id}")
+        format!("service {service_id} from module {module_id}")
     }
 
     pub fn default_dev_service() -> &'static str {
-        "Dev-Service"
+        "Dev Service"
     }
 
     pub fn fallback_service_name(

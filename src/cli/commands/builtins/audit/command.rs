@@ -46,7 +46,6 @@ fn handle(
             "--limit" => {
                 idx += 1;
                 let Some(value) = args.get(idx) else {
-                    writeln!(out, "Fehlender Wert nach --limit")?;
                     writeln!(out, "{}", audit_responses::MISSING_LIMIT_VALUE)?;
                     return Ok(CommandOutcome::Continue);
                 };

@@ -550,7 +550,7 @@ fn module_error_problem(err: ModuleServiceError) -> ServiceActionProblem {
             ModuleRegistryError::NotFound { module } => ServiceActionProblem::new(
                 StatusCode::NOT_FOUND,
                 "module_not_found",
-                format!("Modul '{}' wurde nicht gefunden", module),
+                format!("Module '{}' was not found", module),
             ),
             ModuleRegistryError::Protocol(msg) => {
                 ServiceActionProblem::new(StatusCode::BAD_GATEWAY, "registry_protocol_error", msg)
@@ -1225,7 +1225,7 @@ async fn audit_history(
         Err(err) => ServiceActionProblem::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "audit_unavailable",
-            format!("Audit-Store nicht verfügbar: {err}"),
+            format!("Audit store unavailable: {err}"),
         )
         .into_response(),
     }

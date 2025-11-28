@@ -1,74 +1,74 @@
 pub mod command {
     pub const NAME: &str = "db-shell";
-    pub const DESCRIPTION: &str = "Öffnet die Datenbank-Subshell";
+    pub const DESCRIPTION: &str = "Opens the database subshell";
     pub const USAGE: &str = "db-shell";
-    pub const DETAIL_SWITCH: &str = r"\c <engine> – Engine wechseln";
-    pub const DETAIL_TABLES: &str = r"\d [table] – Tabellen auflisten oder Schema anzeigen";
-    pub const DETAIL_PING: &str = r"\ping – Verbindung testen";
-    pub const DETAIL_EXIT: &str = "exit / \\q – Subshell verlassen";
+    pub const DETAIL_SWITCH: &str = r"\c <engine> – switch engines";
+    pub const DETAIL_TABLES: &str = r"\d [table] – list tables or show schema";
+    pub const DETAIL_PING: &str = r"\ping – test the connection";
+    pub const DETAIL_EXIT: &str = "exit / \\q – leave the subshell";
     pub const DISABLED_NOTE: &str =
-        "DB-Shell ist derzeit deaktiviert. Nutze 'start service db-shell', um sie wieder zu aktivieren.";
-    pub const STATUS_NOTE_CLI: &str = "DB-Shell (CLI) aktiv";
-    pub const STATUS_NOTE_SSH: &str = "DB-Shell (SSH) aktiv";
+        "The DB shell is currently disabled. Use 'start service db-shell' to enable it.";
+    pub const STATUS_NOTE_CLI: &str = "DB shell (CLI) active";
+    pub const STATUS_NOTE_SSH: &str = "DB shell (SSH) active";
 
     pub fn engines_line(engines: &[String]) -> String {
         if engines.is_empty() {
-            "keine konfigurierten Engines".to_string()
+            "no engines configured".to_string()
         } else {
-            format!("verfügbar: {}", engines.join(", "))
+            format!("available: {}", engines.join(", "))
         }
     }
 
     pub fn starting_cli(default_engine: &str, engines_line: &str) -> String {
-        format!("Starte DB-Shell (Standard: {default_engine}) – {engines_line}")
+        format!("Starting DB shell (default: {default_engine}) – {engines_line}")
     }
 
     pub fn starting_ssh(default_engine: &str, engines_line: &str) -> String {
-        format!("Wechsle in DB-Shell (Standard: {default_engine}) – {engines_line}")
+        format!("Switching into DB shell (default: {default_engine}) – {engines_line}")
     }
 }
 
 pub mod shell {
     pub fn active(engine: &str) -> String {
-        format!("DB-Shell aktiv. Aktueller Engine: {engine}")
+        format!("DB shell active. Current engine: {engine}")
     }
 
-    pub const HELP_HINT: &str = "Nutze 'help' für Übersicht der Befehle.";
-    pub const EXIT_MESSAGE: &str = "DB-Shell beendet";
-    pub const INPUT_ERROR_PREFIX: &str = "Eingabefehler: ";
-    pub const ERROR_PREFIX: &str = "Fehler: ";
+    pub const HELP_HINT: &str = "Use 'help' for a command overview.";
+    pub const EXIT_MESSAGE: &str = "DB shell exited";
+    pub const INPUT_ERROR_PREFIX: &str = "Input error: ";
+    pub const ERROR_PREFIX: &str = "Error: ";
 }
 
 pub mod process {
-    pub const PING_OK: &str = "Ping erfolgreich";
-    pub const TABLE_NAME_HINT: &str = "Bitte Tabellenname angeben, z. B. \\d public.tickets";
-    pub const SWITCH_PROMPT: &str = "Wechsel mit \\c <engine>";
+    pub const PING_OK: &str = "Ping successful";
+    pub const TABLE_NAME_HINT: &str = "Please provide a table name, e.g. \\d public.tickets";
+    pub const SWITCH_PROMPT: &str = "Switch with \\c <engine>";
 
     pub fn current_engine(engine: &str) -> String {
-        format!("Aktueller Engine: {engine}")
+        format!("Current engine: {engine}")
     }
 
     pub fn available_engines(list: &[String]) -> String {
         if list.is_empty() {
-            "Verfügbare Engines: -".to_string()
+            "Available engines: -".to_string()
         } else {
-            format!("Verfügbare Engines: {}", list.join(", "))
+            format!("Available engines: {}", list.join(", "))
         }
     }
 
     pub fn engine_switched(engine: &str) -> String {
-        format!("Engine gewechselt zu {engine}")
+        format!("Engine switched to {engine}")
     }
 
-    pub const META_HEADER: &str = "Meta-Befehle:";
-    pub const SQL_HEADER: &str = "SQL-Befehle:";
-    pub const META_SWITCH: &str = "  \\c <engine>    – Engine wechseln";
-    pub const META_TABLES: &str = "  \\d [table]    – Tabellen auflisten oder Schema anzeigen";
-    pub const META_PING: &str = "  \\ping         – Verbindung testen";
-    pub const META_EXIT: &str = "  exit / \\q    – DB-Shell verlassen";
+    pub const META_HEADER: &str = "Meta commands:";
+    pub const SQL_HEADER: &str = "SQL commands:";
+    pub const META_SWITCH: &str = "  \\c <engine>    – switch engines";
+    pub const META_TABLES: &str = "  \\d [table]    – list tables or show schema";
+    pub const META_PING: &str = "  \\ping         – test the connection";
+    pub const META_EXIT: &str = "  exit / \\q    – leave the DB shell";
 
     pub fn meta_engine_line(engine: &str, options: &str) -> String {
-        format!("Aktueller Engine: {engine} (verfügbar: {options})")
+        format!("Current engine: {engine} (available: {options})")
     }
 
     pub fn guard_instruction(warning: &str) -> String {
@@ -77,30 +77,30 @@ pub mod process {
 }
 
 pub mod render {
-    pub const NO_RESULTS: &str = "(keine Rückgabe)";
-    pub const NO_TABLES: &str = "Keine Tabellen gefunden";
-    pub const UNKNOWN_SCHEMA: &str = "<unbekannt>";
-    pub const NO_COLUMNS: &str = "(keine Spalten)";
+    pub const NO_RESULTS: &str = "(no rows returned)";
+    pub const NO_TABLES: &str = "No tables found";
+    pub const UNKNOWN_SCHEMA: &str = "<unknown>";
+    pub const NO_COLUMNS: &str = "(no columns)";
     pub const NULLABLE: &str = "NULL";
     pub const NOT_NULL: &str = "NOT NULL";
 
     pub fn rows_affected(rows: u64) -> String {
-        format!("{rows} Zeile(n) betroffen")
+        format!("{rows} row(s) affected")
     }
 
     pub fn schema_heading(schema: &str, table: &str) -> String {
-        format!("Schema für {schema}.{table}:")
+        format!("Schema for {schema}.{table}:")
     }
 
     pub fn result_rows(count: usize) -> String {
-        format!("({count} Zeile(n))")
+        format!("({count} row(s))")
     }
 }
 
 pub mod errors {
     pub fn engine_not_configured(engine: &str) -> String {
-        format!("Engine {engine} ist nicht konfiguriert")
+        format!("Engine {engine} is not configured")
     }
 
-    pub const CONNECTION: &str = "Verbindungsfehler";
+    pub const CONNECTION: &str = "Connection error";
 }

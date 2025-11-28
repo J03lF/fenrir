@@ -4,23 +4,23 @@ pub mod errors {
     use super::fmt;
 
     pub fn unknown_service(id: impl fmt::Display) -> String {
-        format!("service `{id}` ist unbekannt")
+        format!("service `{id}` is unknown")
     }
 
     pub fn not_controllable(id: impl fmt::Display) -> String {
-        format!("service `{id}` unterstützt keine Laufzeitsteuerung")
+        format!("service `{id}` does not support runtime control")
     }
 
     pub fn force_required(id: impl fmt::Display) -> String {
-        format!("service `{id}` ist als kritisch markiert – --force erforderlich")
+        format!("service `{id}` is marked as critical – --force required")
     }
 
     pub fn core_locked(id: impl fmt::Display) -> String {
-        format!("service `{id}` ist als core markiert und kann nicht gestoppt werden")
+        format!("service `{id}` is marked as core and cannot be stopped")
     }
 
     pub fn operation_failed(id: impl fmt::Display, source: impl fmt::Display) -> String {
-        format!("operation für service `{id}` fehlgeschlagen: {source}")
+        format!("operation for service `{id}` failed: {source}")
     }
 }
 

@@ -1,18 +1,18 @@
 pub mod command {
     pub const NAME: &str = "help";
-    pub const DESCRIPTION: &str = "Listet Befehle oder zeigt Details zu einem Befehl an";
-    pub const USAGE: &str = "help [befehl]";
+    pub const DESCRIPTION: &str = "Lists commands or shows details for a command";
+    pub const USAGE: &str = "help [command]";
     pub const DETAILS: &[&str] = &[
-        "help            – listet alle Befehle",
-        "help <befehl>   – zeigt Details, Usage und Optionen",
+        "help            – lists all commands",
+        "help <command>  – shows details, usage, and options",
     ];
 }
 
 pub mod handler {
-    pub const TABLE_HEADERS: &[&str] = &["Befehl", "Usage", "Beschreibung"];
-    pub const COMMANDS_HEADER: &str = "Verfügbare Befehle:";
+    pub const TABLE_HEADERS: &[&str] = &["Command", "Usage", "Description"];
+    pub const COMMANDS_HEADER: &str = "Available commands:";
     pub const DETAILS_HEADER: &str = "Details:";
-    pub const DETAILS_HINT: &str = "Nutze 'help <befehl>' für Details";
+    pub const DETAILS_HINT: &str = "Use 'help <command>' for details";
 
     pub fn describe_command(name: &str, description: &str) -> String {
         format!("{name} - {description}")
@@ -31,6 +31,6 @@ pub mod handler {
     }
 
     pub fn unknown_command(name: &str) -> String {
-        format!("unbekannter Befehl: {name}")
+        format!("unknown command: {name}")
     }
 }

@@ -2,15 +2,15 @@ use std::fmt;
 
 pub mod command {
     pub const NAME: &str = "audit";
-    pub const DESCRIPTION: &str = "Listet aktuelle Audit-Events (nur lesend)";
+    pub const DESCRIPTION: &str = "Lists recent audit events (read-only)";
     pub const USAGE: &str =
         "audit [--limit <n>] [--action <code>] [--outcome <status>] [--actor <id>]";
     pub const DETAILS: &[&str] = &[
-        "audit                      – zeigt die letzten 20 Audit-Einträge",
-        "audit --limit <n>          – begrenzt die Anzahl der Einträge",
-        "audit --action <code>      – filtert nach Aktions-Code",
-        "audit --outcome <status>   – filtert nach Ergebnis (success|failure|denied)",
-        "audit --actor system       – nur Systemereignisse anzeigen",
+        "audit                      – shows the last 20 audit entries",
+        "audit --limit <n>          – limits the number of entries",
+        "audit --action <code>      – filters by action code",
+        "audit --outcome <status>   – filters by outcome (success|failure|denied)",
+        "audit --actor system       – only show system events",
     ];
 }
 
@@ -18,21 +18,21 @@ pub mod responses {
     use super::*;
 
     pub const DISABLED: &str =
-        "Audit-Logging ist laut Konfiguration deaktiviert. Aktivieren via [audit.enabled].";
-    pub const MISSING_LIMIT_VALUE: &str = "Fehlender Wert nach --limit";
-    pub const INVALID_LIMIT: &str = "Ungültiger --limit Wert. Erlaubt: positive Ganzzahlen";
+        "Audit logging is disabled in the configuration. Enable via [audit.enabled].";
+    pub const MISSING_LIMIT_VALUE: &str = "missing value after --limit";
+    pub const INVALID_LIMIT: &str = "invalid --limit value. Allowed: positive integers";
     pub fn unknown_parameter(param: &str) -> String {
-        format!("Unbekannter Parameter: {param}")
+        format!("unknown parameter: {param}")
     }
-    pub const ZERO_LIMIT_WARNING: &str = "Limit 0 liefert keine Ergebnisse.";
+    pub const ZERO_LIMIT_WARNING: &str = "limit 0 returns no results.";
     pub fn load_failed(err: impl fmt::Display) -> String {
-        format!("Konnte Audit-Events nicht laden: {err}")
+        format!("failed to load audit events: {err}")
     }
-    pub const NONE_AVAILABLE: &str = "Keine Audit-Ereignisse vorhanden.";
+    pub const NONE_AVAILABLE: &str = "No audit events available.";
     pub fn header(limit: usize) -> String {
-        format!("Audit-Events (neueste zuerst, max. {limit}):")
+        format!("Audit events (newest first, max. {limit}):")
     }
-    pub const FILTER_NONE: &str = "Keine Audit-Ereignisse entsprechen den gesetzten Filtern.";
+    pub const FILTER_NONE: &str = "No audit events match the configured filters.";
 }
 
 pub mod render {

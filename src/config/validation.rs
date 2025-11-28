@@ -12,7 +12,7 @@ pub(super) fn validate_http_tls(http: &HttpConfig) -> Result<(), ConfigError> {
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
             .ok_or(ConfigError::Invalid(
-                "server.http.tls.cert_path muss gesetzt sein, wenn TLS aktiviert ist",
+                "server.http.tls.cert_path must be set when TLS is enabled",
             ))?;
         let key = tls
             .key_path
@@ -20,22 +20,22 @@ pub(super) fn validate_http_tls(http: &HttpConfig) -> Result<(), ConfigError> {
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
             .ok_or(ConfigError::Invalid(
-                "server.http.tls.key_path muss gesetzt sein, wenn TLS aktiviert ist",
+                "server.http.tls.key_path must be set when TLS is enabled",
             ))?;
         if cert == key {
             return Err(ConfigError::Invalid(
-                "server.http.tls.cert_path und key_path dürfen nicht identisch sein",
+                "server.http.tls.cert_path and key_path must differ",
             ));
         }
         if tls.cipher_suites.is_empty() {
             return Err(ConfigError::Invalid(
-                "server.http.tls.cipher_suites darf bei aktiviertem TLS nicht leer sein",
+                "server.http.tls.cipher_suites must not be empty when TLS is enabled",
             ));
         }
         if let Some(interval) = tls.reload_interval_seconds {
             if interval == 0 {
                 return Err(ConfigError::Invalid(
-                    "server.http.tls.reload_interval_seconds muss > 0 sein",
+                    "server.http.tls.reload_interval_seconds must be > 0",
                 ));
             }
         }
@@ -103,7 +103,7 @@ pub(super) fn validate_ssh_tls(ssh: &SshConfig) -> Result<(), ConfigError> {
     if let Some(interval) = ssh.tls.host_key_reload_seconds {
         if interval == 0 {
             return Err(ConfigError::Invalid(
-                "server.ssh.tls.host_key_reload_seconds muss > 0 sein",
+                "server.ssh.tls.host_key_reload_seconds must be > 0",
             ));
         }
     }
@@ -114,7 +114,7 @@ pub(super) fn validate_ssh_tls(ssh: &SshConfig) -> Result<(), ConfigError> {
         .any(|cipher| cipher.trim().is_empty())
     {
         return Err(ConfigError::Invalid(
-            "server.ssh.tls.allowed_ciphers darf keine leeren Einträge enthalten",
+            "server.ssh.tls.allowed_ciphers must not contain empty entries",
         ));
     }
     Ok(())
@@ -166,7 +166,7 @@ pub(super) fn validate_module_registry_tls(cfg: &ModuleRegistrySection) -> Resul
     if let Some(ca) = tls.ca_cert_path.as_ref() {
         if ca.trim().is_empty() {
             return Err(ConfigError::Invalid(
-                "modules.registry.tls.ca_cert_path darf nicht leer sein",
+                "modules.registry.tls.ca_cert_path must not be empty",
             ));
         }
     }
@@ -175,14 +175,14 @@ pub(super) fn validate_module_registry_tls(cfg: &ModuleRegistrySection) -> Resul
         (Some(cert), Some(key)) => {
             if cert.trim().is_empty() || key.trim().is_empty() {
                 return Err(ConfigError::Invalid(
-                    "modules.registry.tls.client_cert_path und client_key_path dürfen nicht leer sein",
+                    "modules.registry.tls.client_cert_path and client_key_path must not be empty",
                 ));
             }
         }
         (None, None) => {}
         _ => {
             return Err(ConfigError::Invalid(
-                "modules.registry.tls.client_cert_path und client_key_path müssen gemeinsam gesetzt werden",
+                "modules.registry.tls.client_cert_path and client_key_path must be provided together",
             ));
         }
     }

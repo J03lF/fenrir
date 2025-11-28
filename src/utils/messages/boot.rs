@@ -55,7 +55,7 @@ pub mod services {
     pub mod names {
         pub const DB_SHELL: &str = "DB Shell Service";
         pub const SSH: &str = "SSH Transport";
-        pub const CLI: &str = "Lokale CLI";
+        pub const CLI: &str = "Local CLI";
         pub const MODULE_RUNTIME: &str = "Module Runtime";
         pub const SCHEDULER: &str = "Background Scheduler";
         pub const HTTP: &str = "HTTP Transport";
@@ -63,27 +63,27 @@ pub mod services {
     }
 
     pub mod descriptions {
-        pub const DB_SHELL: &str = "Interaktive Datenbank-Subshell für Admin-Kommandos";
-        pub const SSH: &str = "Secure Shell Zugang und interaktive Sitzungen";
-        pub const CLI: &str = "Interaktive CLI-Shell (lokal)";
-        pub const MODULE_RUNTIME: &str = "Verwaltet installierte CLI-Module";
-        pub const SCHEDULER: &str = "Verwaltet periodische Jobs und Tasks";
-        pub const HTTP: &str = "REST-API, Health und Telemetrie";
-        pub const IDENTITY: &str = "Ausstellung und Prüfung von Control-Plane-Token";
+        pub const DB_SHELL: &str = "Interactive database subshell for admin commands";
+        pub const SSH: &str = "Secure shell access and interactive sessions";
+        pub const CLI: &str = "Interactive CLI shell (local)";
+        pub const MODULE_RUNTIME: &str = "Manages installed CLI modules";
+        pub const SCHEDULER: &str = "Manages periodic jobs and tasks";
+        pub const HTTP: &str = "REST API, health, and telemetry";
+        pub const IDENTITY: &str = "Issues and validates control-plane tokens";
     }
 
     pub mod notes {
-        pub const READY: &str = "bereit";
-        pub const INITIALIZATION: &str = "Initialisierung";
-        pub const WAITING_FOR_INVOKE: &str = "Wartend auf Aufruf";
-        pub const NO_MODULES: &str = "Keine Module installiert";
-        pub const HTTP_WAITING: &str = "wartet auf Start";
-        pub const HTTP_DISABLED: &str = "deaktiviert (enable_http=false)";
-        pub const MODULE_READY: &str = "Bereit für Module";
-        pub const DB_SHELL_ENABLED: &str = "DB-Shell aktiviert";
-        pub const DB_SHELL_DISABLED: &str = "DB-Shell deaktiviert";
-        pub const CLI_READY_FOR_SESSIONS: &str = "Bereit für neue Sessions";
-        pub const CLI_DISABLED: &str = "CLI deaktiviert";
+        pub const READY: &str = "ready";
+        pub const INITIALIZATION: &str = "initializing";
+        pub const WAITING_FOR_INVOKE: &str = "waiting for invoke";
+        pub const NO_MODULES: &str = "no modules installed";
+        pub const HTTP_WAITING: &str = "waiting to start";
+        pub const HTTP_DISABLED: &str = "disabled (enable_http=false)";
+        pub const MODULE_READY: &str = "ready for modules";
+        pub const DB_SHELL_ENABLED: &str = "db-shell enabled";
+        pub const DB_SHELL_DISABLED: &str = "db-shell disabled";
+        pub const CLI_READY_FOR_SESSIONS: &str = "ready for new sessions";
+        pub const CLI_DISABLED: &str = "cli disabled";
     }
 }
 
@@ -96,25 +96,24 @@ pub mod transports {
     pub const SSH_SERVER_EXITED_WITH_ERROR: &str = "ssh server exited with error";
     pub const HTTP_SERVER_START_FAILED: &str = "http server start failed";
     pub const TRANSPORT_INITIALISATION_TRIGGERED: &str = "transport initialisation triggered";
-    pub const SSH_STARTING_NOTE: &str = "Starte Listener";
-    pub const HTTP_STARTING_NOTE: &str = "initialisiere";
+    pub const SSH_STARTING_NOTE: &str = "starting listener";
+    pub const HTTP_STARTING_NOTE: &str = "initializing";
 
     pub fn ssh_failure_note(err: impl fmt::Display) -> String {
-        format!("Fehler: {err}")
+        format!("error: {err}")
     }
 
     pub fn http_start_failure_note(err: impl fmt::Display) -> String {
-        format!("Start-Fehler: {err}")
+        format!("startup error: {err}")
     }
 }
 
 pub mod config_reload {
-    pub const SIGNAL_HANDLER_INIT_FAILED: &str =
-        "konnte SIGHUP-Signal-Handler nicht initialisieren";
-    pub const LOG_LEVEL_UPDATE_FAILED: &str = "konnte Logging-Level nicht aktualisieren";
-    pub const TLS_RELOAD_FAILED: &str = "TLS-Reload fehlgeschlagen";
-    pub const CONFIG_RELOADED: &str = "Konfiguration (Logging/Telemetry/TLS) neu geladen";
-    pub const CONFIG_RELOAD_FAILED: &str = "Konfigurations-Reload fehlgeschlagen";
+    pub const SIGNAL_HANDLER_INIT_FAILED: &str = "failed to initialize SIGHUP signal handler";
+    pub const LOG_LEVEL_UPDATE_FAILED: &str = "failed to update logging level";
+    pub const TLS_RELOAD_FAILED: &str = "TLS reload failed";
+    pub const CONFIG_RELOADED: &str = "configuration (logging/telemetry/TLS) reloaded";
+    pub const CONFIG_RELOAD_FAILED: &str = "configuration reload failed";
     pub const HOT_RELOAD_UNSUPPORTED: &str =
-        "Config-Hot-Reload wird auf dieser Plattform nicht unterstützt; SIGHUP-Replay übersprungen";
+        "config hot reload is not supported on this platform; skipping SIGHUP replay";
 }

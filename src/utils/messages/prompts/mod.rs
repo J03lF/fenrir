@@ -66,7 +66,7 @@ pub fn welcome_line(
     reset: &str,
 ) -> String {
     format!(
-        "{dim}Willkommen auf {accent}{server}{dim} - {primary}{app} v{version}{reset}",
+        "{dim}Welcome to {accent}{server}{dim} - {primary}{app} v{version}{reset}",
         dim = dim,
         accent = accent,
         server = server_name,
@@ -79,7 +79,7 @@ pub fn welcome_line(
 
 pub fn help_hint(dim: &str, reset: &str) -> String {
     format!(
-        "{dim}Tippe 'help' zur Anzeige aller verfügbaren Befehle.{reset}",
+        "{dim}Type 'help' to list all available commands.{reset}",
         dim = dim,
         reset = reset,
     )

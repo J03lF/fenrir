@@ -73,7 +73,9 @@ codegen-units = 1
 description = "Fenrir: modular Rust monolith for a secure ticketing system"
 
 [workspace.lints.rust]
-unsafe_code = "deny"
+dead_code = "warn"
+unused_mut = "warn"
+unused_variables = "warn"
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }

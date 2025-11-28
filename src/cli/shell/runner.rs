@@ -5,7 +5,7 @@ use crate::cli::commands::registry::{
 };
 use crate::cli::completion::ContextualCompleter;
 use crate::config::AppConfig;
-use crate::prompts::{self, PromptContext};
+use crate::prompts::{self, PromptContext, PromptSet};
 use crate::services::{AppServices, ServiceStatus};
 use crate::utils::messages::cli::shell::runner as shell_runner_messages;
 use rustyline::history::DefaultHistory;
@@ -73,40 +73,16 @@ pub fn run_shell(config: Arc<AppConfig>, services: Arc<AppServices>) -> io::Resu
             match editor.readline(request.prompt()) {
                 Ok(line) => {
                     if let Some(answer) = parse_confirmation_answer(&line) {
-                        let context = request.command_context();
-                        let started = Instant::now();
-                        match request.resolve(answer, &dependencies, &mut stdout) {
-                            Ok(outcome) => {
-                                let duration = started.elapsed();
-                                if let Some((cmd, cmd_args)) = context.as_ref() {
-                                    let arg_refs: Vec<&str> =
-                                        cmd_args.iter().map(|s| s.as_str()).collect();
-                                    show_success(
-                                        &mut stdout,
-                                        cmd.as_str(),
-                                        &arg_refs,
-                                        duration,
-                                        &outcome,
-                                    )?;
-                                }
-                                if !handle_outcome(
-                                    &mut stdout,
-                                    &services,
-                                    &prompt_set,
-                                    &mut pending_confirmation,
-                                    outcome,
-                                )? {
-                                    break;
-                                }
-                            }
-                            Err(err) => {
-                                show_error(
-                                    &mut stdout,
-                                    "CLI-0004",
-                                    shell_runner_messages::confirmation_failed(&err),
-                                    started.elapsed(),
-                                )?;
-                            }
+                        if !resolve_confirmation_request(
+                            request,
+                            answer,
+                            &dependencies,
+                            &mut stdout,
+                            &services,
+                            &prompt_set,
+                            &mut pending_confirmation,
+                        )? {
+                            break;
                         }
                     } else {
                         writeln!(&mut stdout, "{}", shell_runner_messages::CONFIRMATION_RETRY)?;
@@ -114,40 +90,16 @@ pub fn run_shell(config: Arc<AppConfig>, services: Arc<AppServices>) -> io::Resu
                     }
                 }
                 Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => {
-                    let context = request.command_context();
-                    let started = Instant::now();
-                    match request.resolve(false, &dependencies, &mut stdout) {
-                        Ok(outcome) => {
-                            let duration = started.elapsed();
-                            if let Some((cmd, cmd_args)) = context.as_ref() {
-                                let arg_refs: Vec<&str> =
-                                    cmd_args.iter().map(|s| s.as_str()).collect();
-                                show_success(
-                                    &mut stdout,
-                                    cmd.as_str(),
-                                    &arg_refs,
-                                    duration,
-                                    &outcome,
-                                )?;
-                            }
-                            if !handle_outcome(
-                                &mut stdout,
-                                &services,
-                                &prompt_set,
-                                &mut pending_confirmation,
-                                outcome,
-                            )? {
-                                break;
-                            }
-                        }
-                        Err(err) => {
-                            show_error(
-                                &mut stdout,
-                                "CLI-0004",
-                                shell_runner_messages::confirmation_failed(&err),
-                                started.elapsed(),
-                            )?;
-                        }
+                    if !resolve_confirmation_request(
+                        request,
+                        false,
+                        &dependencies,
+                        &mut stdout,
+                        &services,
+                        &prompt_set,
+                        &mut pending_confirmation,
+                    )? {
+                        break;
                     }
                 }
                 Err(ReadlineError::Io(err)) => return Err(err),
@@ -243,4 +195,36 @@ pub fn run_shell(config: Arc<AppConfig>, services: Arc<AppServices>) -> io::Resu
         Some(shell_runner_messages::CLI_STANDBY_NOTE.to_string()),
     );
     Ok(())
+}
+
+fn resolve_confirmation_request(
+    request: ConfirmationRequest,
+    accepted: bool,
+    dependencies: &CliDependencies,
+    stdout: &mut dyn Write,
+    services: &AppServices,
+    prompt_set: &PromptSet,
+    pending_confirmation: &mut Option<ConfirmationRequest>,
+) -> io::Result<bool> {
+    let context = request.command_context();
+    let started = Instant::now();
+    match request.resolve(accepted, dependencies, stdout) {
+        Ok(outcome) => {
+            let duration = started.elapsed();
+            if let Some((cmd, cmd_args)) = context.as_ref() {
+                let arg_refs: Vec<&str> = cmd_args.iter().map(|s| s.as_str()).collect();
+                show_success(stdout, cmd.as_str(), &arg_refs, duration, &outcome)?;
+            }
+            handle_outcome(stdout, services, prompt_set, pending_confirmation, outcome)
+        }
+        Err(err) => {
+            show_error(
+                stdout,
+                "CLI-0004",
+                shell_runner_messages::confirmation_failed(&err),
+                started.elapsed(),
+            )?;
+            Ok(true)
+        }
+    }
 }

@@ -5,11 +5,11 @@ use time::OffsetDateTime;
 
 use super::duration::format_brief_duration;
 
-/// Render how long ago a timestamp occurred in a short form (e.g. `vor 3m`).
+/// Render how long ago a timestamp occurred in a short form (e.g. `3m ago`).
 pub fn format_relative_time(time: SystemTime) -> String {
     match SystemTime::now().duration_since(time) {
-        Ok(duration) => format!("vor {}", format_brief_duration(duration)),
-        Err(_) => "in der Zukunft".to_string(),
+        Ok(duration) => format!("{} ago", format_brief_duration(duration)),
+        Err(_) => "in the future".to_string(),
     }
 }
 

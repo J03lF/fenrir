@@ -2,7 +2,7 @@ use std::fmt;
 
 pub mod install {
     pub const DISTRIBUTION_LABEL: &str = "Distribution";
-    pub const LOCAL_OVERRIDE_LABEL: &str = "Synchronisiert";
+    pub const LOCAL_OVERRIDE_LABEL: &str = "Synchronized";
 }
 
 pub mod id {
@@ -34,7 +34,7 @@ pub mod registry_errors {
     }
 
     pub fn not_found(module: &str) -> String {
-        format!("module `{module}` wurde nicht gefunden")
+        format!("module `{module}` was not found")
     }
 
     pub fn protocol(details: impl fmt::Display) -> String {

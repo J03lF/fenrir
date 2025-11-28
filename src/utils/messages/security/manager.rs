@@ -19,5 +19,5 @@ pub fn empty_token_placeholder() -> &'static str {
 }
 
 pub fn fingerprint_display(prefix: &str, total_len: usize) -> String {
-    format!("{prefix}…({total_len} bytes)")
+    format!("{prefix}...({total_len} bytes)")
 }

@@ -51,7 +51,7 @@ exp_seconds = 3600
 control_tokens = []
 
 [security.identity]
-provider = "external"
+provider = "embedded"
 environment = "development"
 instance_id = "local"
 

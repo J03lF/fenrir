@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -14,7 +15,6 @@ use axum::Json;
 use axum::Router;
 use serde::{Deserialize, Serialize};
 use serde_json;
-use time::format_description::well_known::Rfc3339;
 use time::Duration as TimeDuration;
 use time::OffsetDateTime;
 use tokio_stream::{
@@ -33,7 +33,13 @@ use crate::infra::{logging, telemetry};
 use crate::security::auth::{AuthError, ControlPlaneAuthorizer, Role};
 use crate::security::identity::{IdentityProvider, IssueTokenRequest};
 use crate::services::scheduler::ScheduledJobSnapshot;
-use crate::services::{AppServices, ServiceControlError, ServiceRegistry, ServiceSnapshot};
+use crate::services::{
+    AppServices, ServiceActionKind, ServiceControlError, ServiceRegistry, ServiceSnapshot,
+};
+use crate::utils::messages::infra::http::{self as http_messages, ProblemText};
+use crate::utils::{
+    format_offset_datetime, format_optional_offset_datetime, system_time_to_rfc3339,
+};
 
 use super::state::{HttpInfo, HttpState};
 
@@ -362,30 +368,6 @@ struct ModuleUpdateResponse {
     results: Vec<ModuleInstallResponse>,
 }
 
-enum ServiceActionKind {
-    Start,
-    Stop,
-    Restart,
-}
-
-impl ServiceActionKind {
-    fn as_str(&self) -> &'static str {
-        match self {
-            ServiceActionKind::Start => "start",
-            ServiceActionKind::Stop => "stop",
-            ServiceActionKind::Restart => "restart",
-        }
-    }
-
-    fn required_role(&self) -> Role {
-        match self {
-            ServiceActionKind::Start => Role::Operator,
-            ServiceActionKind::Stop => Role::Operator,
-            ServiceActionKind::Restart => Role::Admin,
-        }
-    }
-}
-
 enum BulkServiceActionKind {
     Start,
     Stop,
@@ -402,11 +384,7 @@ impl BulkServiceActionKind {
     }
 
     fn required_role(&self) -> Role {
-        match self {
-            BulkServiceActionKind::Start => Role::Operator,
-            BulkServiceActionKind::Stop => Role::Operator,
-            BulkServiceActionKind::Restart => Role::Admin,
-        }
+        self.kind().required_role()
     }
 
     fn execute(
@@ -414,10 +392,18 @@ impl BulkServiceActionKind {
         services: &AppServices,
         force: bool,
     ) -> Vec<crate::services::ServiceActionReport> {
+        match self.kind() {
+            ServiceActionKind::Start => services.start_all_non_core(),
+            ServiceActionKind::Stop => services.stop_all_non_core(force),
+            ServiceActionKind::Restart => services.restart_all_non_core(force),
+        }
+    }
+
+    fn kind(&self) -> ServiceActionKind {
         match self {
-            BulkServiceActionKind::Start => services.start_all_non_core(),
-            BulkServiceActionKind::Stop => services.stop_all_non_core(force),
-            BulkServiceActionKind::Restart => services.restart_all_non_core(force),
+            BulkServiceActionKind::Start => ServiceActionKind::Start,
+            BulkServiceActionKind::Stop => ServiceActionKind::Stop,
+            BulkServiceActionKind::Restart => ServiceActionKind::Restart,
         }
     }
 }
@@ -476,19 +462,35 @@ fn snapshot_to_state_event(snapshot: ServiceSnapshot) -> ServiceStateEvent {
     }
 }
 
+fn http_problem(status: StatusCode, text: ProblemText) -> ServiceActionProblem {
+    ServiceActionProblem::new(status, text.code, text.message)
+}
+
 fn module_service_unavailable() -> ServiceActionProblem {
-    ServiceActionProblem::new(
+    http_problem(
         StatusCode::SERVICE_UNAVAILABLE,
-        "module_service_unavailable",
-        "Modul-Service nicht verfügbar",
+        http_messages::problems::module_service_unavailable(),
     )
 }
 
 fn identity_service_unavailable() -> ServiceActionProblem {
-    ServiceActionProblem::new(
+    http_problem(
         StatusCode::SERVICE_UNAVAILABLE,
-        "identity_service_unavailable",
-        "Identity-Service nicht verfügbar",
+        http_messages::problems::identity_service_unavailable(),
+    )
+}
+
+fn viewer_role_required() -> ServiceActionProblem {
+    http_problem(
+        StatusCode::FORBIDDEN,
+        http_messages::problems::role_insufficient_viewer(),
+    )
+}
+
+fn admin_role_required() -> ServiceActionProblem {
+    http_problem(
+        StatusCode::FORBIDDEN,
+        http_messages::problems::role_insufficient_admin(),
     )
 }
 
@@ -505,20 +507,12 @@ fn authorize_identity(
 }
 
 fn parse_role_string(value: &str) -> Result<Role, ServiceActionProblem> {
-    match value.to_ascii_lowercase().as_str() {
-        "admin" => Ok(Role::Admin),
-        "operator" => Ok(Role::Operator),
-        "viewer" => Ok(Role::Viewer),
-        other => Err(ServiceActionProblem::new(
+    Role::from_str(value).map_err(|err| {
+        http_problem(
             StatusCode::BAD_REQUEST,
-            "invalid_role",
-            format!("Unbekannte Rolle '{other}'"),
-        )),
-    }
-}
-
-fn system_time_to_rfc3339(time: SystemTime) -> Option<String> {
-    OffsetDateTime::from(time).format(&Rfc3339).ok()
+            http_messages::problems::invalid_role(err.value()),
+        )
+    })
 }
 
 fn installed_module_to_view(installed: InstalledModule) -> InstalledModuleView {
@@ -528,10 +522,6 @@ fn installed_module_to_view(installed: InstalledModule) -> InstalledModuleView {
         path: installed.path,
         source: installed.source,
     }
-}
-
-fn format_offset_datetime(value: OffsetDateTime) -> String {
-    value.format(&Rfc3339).unwrap_or_else(|_| value.to_string())
 }
 
 fn module_install_status_label(status: ModuleInstallStatus) -> &'static str {
@@ -889,21 +879,8 @@ async fn health_ready() -> impl IntoResponse {
 }
 
 async fn list_services(State(state): State<HttpState>, headers: HeaderMap) -> Response {
-    if state.auth.is_configured() {
-        let token = extract_bearer_token(&headers);
-        let role = state.auth.authorize_token(token).map_err(map_auth_error);
-        match role {
-            Ok(role) if role.satisfies(Role::Viewer) => {}
-            Ok(_) => {
-                return ServiceActionProblem::new(
-                    StatusCode::FORBIDDEN,
-                    "role_insufficient",
-                    "Mindestens Rolle viewer erforderlich",
-                )
-                .into_response()
-            }
-            Err(problem) => return problem.into_response(),
-        }
+    if let Some(response) = ensure_viewer_access(&state, &headers) {
+        return response;
     }
     let mut services: Vec<ServiceSummary> = state
         .registry
@@ -916,21 +893,8 @@ async fn list_services(State(state): State<HttpState>, headers: HeaderMap) -> Re
 }
 
 async fn list_scheduler_jobs(State(state): State<HttpState>, headers: HeaderMap) -> Response {
-    if state.auth.is_configured() {
-        let token = extract_bearer_token(&headers);
-        let role = state.auth.authorize_token(token).map_err(map_auth_error);
-        match role {
-            Ok(role) if role.satisfies(Role::Viewer) => {}
-            Ok(_) => {
-                return ServiceActionProblem::new(
-                    StatusCode::FORBIDDEN,
-                    "role_insufficient",
-                    "Mindestens Rolle viewer erforderlich",
-                )
-                .into_response()
-            }
-            Err(problem) => return problem.into_response(),
-        }
+    if let Some(response) = ensure_viewer_access(&state, &headers) {
+        return response;
     }
 
     let jobs: Vec<SchedulerJobSummary> = state
@@ -954,24 +918,11 @@ async fn list_audit_events(
     headers: HeaderMap,
     Query(query): Query<AuditQuery>,
 ) -> Response {
-    if state.auth.is_configured() {
-        let token = extract_bearer_token(&headers);
-        let role = state.auth.authorize_token(token).map_err(map_auth_error);
-        match role {
-            Ok(role) if role.satisfies(Role::Viewer) => {}
-            Ok(_) => {
-                return ServiceActionProblem::new(
-                    StatusCode::FORBIDDEN,
-                    "role_insufficient",
-                    "Mindestens Rolle viewer erforderlich",
-                )
-                .into_response()
-            }
-            Err(problem) => return problem.into_response(),
-        }
+    if let Some(response) = ensure_viewer_access(&state, &headers) {
+        return response;
     }
 
-    let limit = query.limit.unwrap_or(20).max(1).min(200);
+    let limit = query.limit.unwrap_or(20).clamp(1, 200);
 
     match state.services.audit_recent(limit) {
         Ok(events) => {
@@ -1003,10 +954,9 @@ async fn list_audit_events(
             )
                 .into_response()
         }
-        Err(err) => ServiceActionProblem::new(
+        Err(err) => http_problem(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "audit_unavailable",
-            format!("Audit-Store nicht verfügbar: {err}"),
+            http_messages::problems::audit_unavailable(err),
         )
         .into_response(),
     }
@@ -1023,12 +973,7 @@ async fn audit_events_stream(
         match state.auth.authorize_token(token.as_deref()) {
             Ok(role) if role.satisfies(Role::Viewer) => {}
             Ok(_) => {
-                return ServiceActionProblem::new(
-                    StatusCode::FORBIDDEN,
-                    "role_insufficient",
-                    "Mindestens Rolle viewer erforderlich",
-                )
-                .into_response();
+                return viewer_role_required().into_response();
             }
             Err(err) => {
                 return map_auth_error(err).into_response();
@@ -1107,19 +1052,17 @@ async fn list_identity_users(State(state): State<HttpState>, headers: HeaderMap)
             }
             Ok(Err(err)) => {
                 warn!(error = %err, "identity users listing failed");
-                ServiceActionProblem::new(
+                http_problem(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    "identity_list_failed",
-                    "Identity-Benutzer konnten nicht geladen werden",
+                    http_messages::problems::identity_list_failed(),
                 )
                 .into_response()
             }
             Err(err) => {
                 warn!(error = %err, "identity users task failed");
-                ServiceActionProblem::new(
+                http_problem(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    "identity_task_failed",
-                    "Identity-Benutzer konnten nicht geladen werden",
+                    http_messages::problems::identity_task_failed(),
                 )
                 .into_response()
             }
@@ -1147,7 +1090,7 @@ async fn issue_identity_token(
                 actor: AuditActor::System,
                 user_id: payload.user_id.clone(),
                 display_name: payload.display_name.clone(),
-                role: role.clone(),
+                role,
             };
             match tokio::task::spawn_blocking(move || identity.issue_token(request)).await {
                 Ok(Ok(issued)) => {
@@ -1164,19 +1107,17 @@ async fn issue_identity_token(
                 }
                 Ok(Err(err)) => {
                     warn!(error = %err, "token issuance failed");
-                    ServiceActionProblem::new(
+                    http_problem(
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        "identity_issue_failed",
-                        "Token konnte nicht ausgestellt werden",
+                        http_messages::problems::identity_issue_failed(),
                     )
                     .into_response()
                 }
                 Err(err) => {
                     warn!(error = %err, "identity token task failed");
-                    ServiceActionProblem::new(
+                    http_problem(
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        "identity_task_failed",
-                        "Token konnte nicht ausgestellt werden",
+                        http_messages::problems::identity_issue_task_failed(),
                     )
                     .into_response()
                 }
@@ -1212,7 +1153,7 @@ async fn metrics_snapshot() -> impl IntoResponse {
 fn service_resource_view(resource: telemetry::ServiceResourceSnapshot) -> ServiceResourceView {
     let now = OffsetDateTime::now_utc();
     let stale_threshold = TimeDuration::seconds(SERVICE_RESOURCE_STALE_AFTER_SECS);
-    let updated_at = resource.updated_at.and_then(|ts| ts.format(&Rfc3339).ok());
+    let updated_at = format_optional_offset_datetime(resource.updated_at);
     let stale = if resource.reported {
         match resource.updated_at {
             Some(ts) => now - ts >= stale_threshold,
@@ -1255,12 +1196,7 @@ async fn audit_history(
         match role {
             Ok(role) if role.satisfies(Role::Viewer) => {}
             Ok(_) => {
-                return ServiceActionProblem::new(
-                    StatusCode::FORBIDDEN,
-                    "role_insufficient",
-                    "Mindestens Rolle viewer erforderlich",
-                )
-                .into_response();
+                return viewer_role_required().into_response();
             }
             Err(problem) => return problem.into_response(),
         }
@@ -1302,10 +1238,9 @@ async fn update_logging_level(
 ) -> Response {
     let level = payload.level.trim();
     if level.is_empty() {
-        return ServiceActionProblem::new(
+        return http_problem(
             StatusCode::BAD_REQUEST,
-            "invalid_level",
-            "Loglevel darf nicht leer sein",
+            http_messages::problems::invalid_level_empty(),
         )
         .into_response();
     }
@@ -1315,12 +1250,7 @@ async fn update_logging_level(
         match state.auth.authorize_token(token) {
             Ok(role) => {
                 if !role.satisfies(Role::Admin) {
-                    return ServiceActionProblem::new(
-                        StatusCode::FORBIDDEN,
-                        "role_insufficient",
-                        "Aktion erfordert Rolle admin",
-                    )
-                    .into_response();
+                    return admin_role_required().into_response();
                 }
                 role
             }
@@ -1333,20 +1263,18 @@ async fn update_logging_level(
     let handle = match state.services.logging_handle() {
         Some(handle) => handle,
         None => {
-            return ServiceActionProblem::new(
+            return http_problem(
                 StatusCode::NOT_IMPLEMENTED,
-                "logging_reload_unavailable",
-                "Kein Logging-Reload-Handle registriert",
+                http_messages::problems::logging_reload_unavailable(),
             )
             .into_response();
         }
     };
 
     if let Err(err) = logging::reload(&handle, level) {
-        return ServiceActionProblem::new(
+        return http_problem(
             StatusCode::BAD_REQUEST,
-            "logging_reload_failed",
-            format!("Loglevel konnte nicht gesetzt werden: {err}"),
+            http_messages::problems::logging_reload_failed(err),
         )
         .into_response();
     }
@@ -1481,7 +1409,7 @@ async fn service_action(
             })
         }
         Err(err) => {
-            let problem = map_service_control_error(err, &id);
+            let problem: ServiceActionProblem = err.into();
             let metadata = base_metadata
                 .clone()
                 .insert("error_code", problem.body.error)
@@ -1600,39 +1528,30 @@ async fn bulk_service_action(
     }
 }
 
-fn map_service_control_error(err: ServiceControlError, id: &str) -> ServiceActionProblem {
-    match err {
-        ServiceControlError::UnknownService(_) => ServiceActionProblem::new(
-            StatusCode::NOT_FOUND,
-            "unknown_service",
-            format!("Service `{}` ist nicht registriert.", id),
-        ),
-        ServiceControlError::NotControllable(_) => ServiceActionProblem::new(
-            StatusCode::CONFLICT,
-            "not_controllable",
-            format!("Service `{}` lässt sich nicht über HTTP steuern.", id),
-        ),
-        ServiceControlError::ForceRequired(_) => ServiceActionProblem::new(
-            StatusCode::PRECONDITION_FAILED,
-            "force_required",
-            format!(
-                "Service `{}` ist als kritisch markiert. Bitte Aktion mit force=true bestätigen.",
-                id
+impl From<ServiceControlError> for ServiceActionProblem {
+    fn from(err: ServiceControlError) -> Self {
+        match err {
+            ServiceControlError::UnknownService(id) => http_problem(
+                StatusCode::NOT_FOUND,
+                http_messages::problems::service_unknown(&id),
             ),
-        ),
-        ServiceControlError::CoreLocked(_) => ServiceActionProblem::new(
-            StatusCode::CONFLICT,
-            "core_locked",
-            format!(
-                "Service `{}` gehört zur core-Plattform und kann nicht gestoppt oder neu gestartet werden.",
-                id
+            ServiceControlError::NotControllable(id) => http_problem(
+                StatusCode::CONFLICT,
+                http_messages::problems::service_not_controllable(&id),
             ),
-        ),
-        ServiceControlError::OperationFailed { source, .. } => ServiceActionProblem::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "operation_failed",
-            format!("Aktion fehlgeschlagen: {source}"),
-        ),
+            ServiceControlError::ForceRequired(id) => http_problem(
+                StatusCode::PRECONDITION_FAILED,
+                http_messages::problems::service_force_required(&id),
+            ),
+            ServiceControlError::CoreLocked(id) => http_problem(
+                StatusCode::CONFLICT,
+                http_messages::problems::service_core_locked(&id),
+            ),
+            ServiceControlError::OperationFailed { source, .. } => http_problem(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                http_messages::problems::service_operation_failed(source),
+            ),
+        }
     }
 }
 
@@ -1695,9 +1614,7 @@ fn audit_actor_matches(actor: &AuditActor, filter: &str) -> bool {
 
 fn audit_event_to_view(event: AuditEvent) -> AuditEventView {
     let timestamp = OffsetDateTime::from(event.timestamp);
-    let ts = timestamp
-        .format(&Rfc3339)
-        .unwrap_or_else(|_| timestamp.to_string());
+    let ts = system_time_to_rfc3339(event.timestamp).unwrap_or_else(|| timestamp.to_string());
 
     let actor_view = match event.actor {
         AuditActor::System => AuditActorView {
@@ -1747,13 +1664,12 @@ fn audit_event_to_view(event: AuditEvent) -> AuditEventView {
 
 fn map_auth_error(err: AuthError) -> ServiceActionProblem {
     match err {
-        AuthError::Unauthorized => ServiceActionProblem::new(
+        AuthError::Unauthorized => http_problem(
             StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "Autorisierung erforderlich",
+            http_messages::problems::unauthorized(),
         ),
         AuthError::Forbidden => {
-            ServiceActionProblem::new(StatusCode::FORBIDDEN, "forbidden", "Zugriff verweigert")
+            http_problem(StatusCode::FORBIDDEN, http_messages::problems::forbidden())
         }
     }
 }
@@ -1779,25 +1695,18 @@ fn authorize(
     let token = extract_bearer_token(headers);
     match auth.authorize_token(token) {
         Ok(role) => {
-            if role.satisfies(required.clone()) {
+            if role.satisfies(required) {
                 if let Some(security) = services.security_manager() {
-                    security.audit_control_plane_token(token, required.clone(), &Ok(role.clone()));
+                    security.audit_control_plane_token(token, required, &Ok(role));
                 }
                 Ok(role)
             } else {
                 if let Some(security) = services.security_manager() {
-                    security.audit_control_plane_token(
-                        token,
-                        required.clone(),
-                        &Err(AuthError::Forbidden),
-                    );
+                    security.audit_control_plane_token(token, required, &Err(AuthError::Forbidden));
                 }
-                Err(ServiceActionProblem::new(
+                Err(http_problem(
                     StatusCode::FORBIDDEN,
-                    "role_insufficient",
-                    format!(
-                        "Aktion erfordert Rolle {required:?}, aktuelle Rolle {role:?} reicht nicht aus"
-                    ),
+                    http_messages::problems::role_insufficient(required.as_str(), role.as_str()),
                 ))
             }
         }
@@ -1807,7 +1716,7 @@ fn authorize(
                     AuthError::Unauthorized => AuthError::Unauthorized,
                     AuthError::Forbidden => AuthError::Forbidden,
                 };
-                security.audit_control_plane_token(token, required.clone(), &Err(audit_err));
+                security.audit_control_plane_token(token, required, &Err(audit_err));
             }
             Err(map_auth_error(err))
         }
@@ -1834,13 +1743,24 @@ fn history_timestamp_iso(timestamp_ms: i64) -> String {
     let secs = timestamp_ms.div_euclid(1000);
     let millis = timestamp_ms.rem_euclid(1000);
     match OffsetDateTime::from_unix_timestamp(secs) {
-        Ok(dt) => match dt.checked_add(TimeDuration::milliseconds(millis as i64)) {
-            Some(adjusted) => adjusted
-                .format(&Rfc3339)
-                .unwrap_or_else(|_| timestamp_ms.to_string()),
+        Ok(dt) => match dt.checked_add(TimeDuration::milliseconds(millis)) {
+            Some(adjusted) => format_offset_datetime(adjusted),
             None => timestamp_ms.to_string(),
         },
         Err(_) => timestamp_ms.to_string(),
     }
+}
+
+fn ensure_viewer_access(state: &HttpState, headers: &HeaderMap) -> Option<Response> {
+    if state.auth.is_configured() {
+        let token = extract_bearer_token(headers);
+        let role = state.auth.authorize_token(token).map_err(map_auth_error);
+        match role {
+            Ok(role) if role.satisfies(Role::Viewer) => {}
+            Ok(_) => return Some(viewer_role_required().into_response()),
+            Err(problem) => return Some(problem.into_response()),
+        }
+    }
+    None
 }
 const INDEX_HTML: &str = include_str!("../../../static/index.html");

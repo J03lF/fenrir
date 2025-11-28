@@ -9,6 +9,7 @@ use crate::domain::module::{
     ModuleId, ModuleRuntimeError, ModuleRuntimeInfo, ModuleRuntimePort, ModuleRuntimeStatus,
     ModuleStartConfig, ModuleStoragePort, ModuleVersion,
 };
+use crate::utils::messages;
 
 /// In-process runtime stub that simulates module lifecycle without spawning OS processes.
 ///
@@ -55,10 +56,24 @@ impl InProcessModuleRuntime {
         state.stopped_at = None;
         state.status = ModuleRuntimeStatus::Running;
         state.env_keys = env_keys;
-        state.logs.push(format!(
-            "[stub] Module {} started in-process",
-            state.module_id
-        ));
+        state
+            .logs
+            .push(messages::infra::modules::runtime::in_process::started(
+                state.module_id.clone(),
+            ));
+    }
+
+    fn info_from_state(state: &ModuleRuntimeState) -> ModuleRuntimeInfo {
+        ModuleRuntimeInfo {
+            module_id: state.module_id.clone(),
+            version: state.version.clone(),
+            status: state.status.clone(),
+            pid: None,
+            port: state.port,
+            started_at: state.started_at,
+            stopped_at: state.stopped_at,
+            restart_count: state.restart_count,
+        }
     }
 }
 
@@ -79,16 +94,7 @@ impl ModuleRuntimePort for InProcessModuleRuntime {
             }
             let env_keys: Vec<String> = config.env_vars.drain(..).map(|(k, _)| k).collect();
             Self::update_state_for_start(existing, config.port, env_keys.clone());
-            return Ok(ModuleRuntimeInfo {
-                module_id: existing.module_id.clone(),
-                version: existing.version.clone(),
-                status: existing.status.clone(),
-                pid: None,
-                port: existing.port,
-                started_at: existing.started_at,
-                stopped_at: existing.stopped_at,
-                restart_count: existing.restart_count,
-            });
+            return Ok(Self::info_from_state(existing));
         }
 
         let installed = self
@@ -110,24 +116,15 @@ impl ModuleRuntimePort for InProcessModuleRuntime {
             stopped_at: None,
             restart_count: 0,
             status: ModuleRuntimeStatus::Starting,
-            logs: vec![format!(
-                "[stub] Module {} v{} prepared",
-                installed.manifest.id, version
+            logs: vec![messages::infra::modules::runtime::in_process::prepared(
+                &installed.manifest.id,
+                &version,
             )],
             env_keys,
         };
         let start_env_keys = state.env_keys.clone();
         Self::update_state_for_start(&mut state, config.port, start_env_keys);
-        let info = ModuleRuntimeInfo {
-            module_id: state.module_id.clone(),
-            version: state.version.clone(),
-            status: state.status.clone(),
-            pid: None,
-            port: state.port,
-            started_at: state.started_at,
-            stopped_at: state.stopped_at,
-            restart_count: state.restart_count,
-        };
+        let info = Self::info_from_state(&state);
         state_guard.insert(module_id_str, state);
         Ok(info)
     }
@@ -152,7 +149,9 @@ impl ModuleRuntimePort for InProcessModuleRuntime {
         state.stopped_at = Some(Self::now());
         state
             .logs
-            .push(format!("[stub] Module {} stopped", state.module_id));
+            .push(messages::infra::modules::runtime::in_process::stopped(
+                state.module_id.clone(),
+            ));
         Ok(())
     }
 
@@ -166,16 +165,7 @@ impl ModuleRuntimePort for InProcessModuleRuntime {
                     module_id: module_id_str.clone(),
                 })?;
 
-        Ok(ModuleRuntimeInfo {
-            module_id: state.module_id.clone(),
-            version: state.version.clone(),
-            status: state.status.clone(),
-            pid: None,
-            port: state.port,
-            started_at: state.started_at,
-            stopped_at: state.stopped_at,
-            restart_count: state.restart_count,
-        })
+        Ok(Self::info_from_state(state))
     }
 
     async fn list_running(&self) -> Result<Vec<ModuleRuntimeInfo>, ModuleRuntimeError> {
@@ -183,16 +173,7 @@ impl ModuleRuntimePort for InProcessModuleRuntime {
         Ok(state_guard
             .values()
             .filter(|state| matches!(state.status, ModuleRuntimeStatus::Running))
-            .map(|state| ModuleRuntimeInfo {
-                module_id: state.module_id.clone(),
-                version: state.version.clone(),
-                status: state.status.clone(),
-                pid: None,
-                port: state.port,
-                started_at: state.started_at,
-                stopped_at: state.stopped_at,
-                restart_count: state.restart_count,
-            })
+            .map(Self::info_from_state)
             .collect())
     }
 
@@ -213,24 +194,18 @@ impl ModuleRuntimePort for InProcessModuleRuntime {
         }
 
         state.restart_count = state.restart_count.saturating_add(1);
-        state.logs.push(format!(
-            "[stub] Module {} restart requested",
-            state.module_id
-        ));
+        state.logs.push(
+            messages::infra::modules::runtime::in_process::restart_requested(
+                state.module_id.clone(),
+            ),
+        );
         Self::update_state_for_start(state, state.port, state.env_keys.clone());
         state
             .logs
-            .push(format!("[stub] Module {} restarted", state.module_id));
-        Ok(ModuleRuntimeInfo {
-            module_id: state.module_id.clone(),
-            version: state.version.clone(),
-            status: state.status.clone(),
-            pid: None,
-            port: state.port,
-            started_at: state.started_at,
-            stopped_at: state.stopped_at,
-            restart_count: state.restart_count,
-        })
+            .push(messages::infra::modules::runtime::in_process::restarted(
+                state.module_id.clone(),
+            ));
+        Ok(Self::info_from_state(state))
     }
 
     async fn logs(

@@ -6,6 +6,7 @@ use crate::infra::telemetry;
 use crate::security::auth::{AuthError, Role};
 use crate::security::manager::{SecurityError, SecurityManager};
 use crate::security::session::Session;
+use crate::utils::messages::services::security::logs as security_logs;
 
 pub struct SessionService {
     manager: Arc<SecurityManager>,
@@ -53,7 +54,7 @@ impl SessionService {
         match self.manager.sessions_active_count() {
             Ok(count) => Some(count),
             Err(err) => {
-                warn!(error = %err, "konnte aktive Sessions nicht abrufen");
+                warn!(error = %err, "{}", security_logs::ACTIVE_SESSIONS_FAILED);
                 None
             }
         }
@@ -62,7 +63,11 @@ impl SessionService {
     fn refresh_active_metric(&self) {
         match self.manager.sessions_active_count() {
             Ok(count) => telemetry::set_counter("security.sessions.active", count as u64),
-            Err(err) => warn!(error = %err, "Session-Metrik konnte nicht aktualisiert werden"),
+            Err(err) => warn!(
+                error = %err,
+                "{}",
+                security_logs::ACTIVE_METRIC_FAILED
+            ),
         }
     }
 }

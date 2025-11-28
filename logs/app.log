@@ -1,37 +1,23 @@
-2025-11-27T18:33:17.064806Z  INFO main ThreadId(01) fenrir::infra::logging: dateilogging initialisiert log_path=logs/app.log
-2025-11-27T18:33:17.064935Z  INFO main ThreadId(01) fenrir::infra::logging: db-logdatei vorbereitet log_path=logs/db.log
-2025-11-27T18:33:17.125103Z  INFO main ThreadId(01) fenrir::boot: core services registered in registry
-2025-11-27T18:33:17.125735Z  INFO main ThreadId(01) fenrir::boot: scheduler service started
-2025-11-27T18:33:17.125872Z  INFO tokio-runtime-worker ThreadId(04) fenrir::services::scheduler: scheduler heartbeat loop started
-2025-11-27T18:33:17.128182Z  INFO                 main ThreadId(01) fenrir::boot: audit log persistence configured path=/opt/fenrir/development/tmp/runtime/audit/fenrir-audit-history.json capacity=2048 retention_hours=24 persist_seconds=30
-2025-11-27T18:33:17.134965Z  WARN                 main ThreadId(01) fenrir::infra::modules::verifier: allowlisted signers missing from keyring - signature verification will be skipped for them missing=["module-registry"]
-2025-11-27T18:33:17.135916Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: loaded 0 module states from disk
-2025-11-27T18:33:17.183829Z  INFO                 main ThreadId(01) fenrir::infra::http::server: HTTP control-plane authentication via identity broker
-2025-11-27T18:33:17.183900Z  INFO                 main ThreadId(01) fenrir::boot: boot complete app=fenrir version=0.1.4
-2025-11-27T18:33:17.188405Z  INFO                 main ThreadId(01) fenrir::boot: bootstrap module ready module=fenrir-api version="latest" status=AlreadyCurrent
-2025-11-27T18:33:17.189501Z  WARN                 main ThreadId(01) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
-2025-11-27T18:33:17.191186Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: module process started module_id=fenrir-api pid=51901 port=None
-2025-11-27T18:33:17.191623Z  INFO                 main ThreadId(01) fenrir::services::module: module started successfully module_id=fenrir-api pid=Some(51901) port=None
-2025-11-27T18:33:17.193042Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: module process started module_id=notification-hub pid=51902 port=None
-2025-11-27T18:33:17.193296Z  INFO                 main ThreadId(01) fenrir::services::module: module started successfully module_id=notification-hub pid=Some(51902) port=None
-2025-11-27T18:33:17.193362Z  INFO tokio-runtime-worker ThreadId(12) fenrir::boot: ssh server task spawned
-2025-11-27T18:33:17.193376Z  INFO                 main ThreadId(01) fenrir::boot: transport initialisation triggered
-2025-11-27T18:33:17.193604Z  INFO tokio-runtime-worker ThreadId(12) fenrir::infra::ssh: starting SSH server host=127.0.0.1 port=2222
-2025-11-27T18:33:17.193898Z  INFO tokio-runtime-worker ThreadId(14) fenrir::infra::http::server: HTTP server task spawned
-2025-11-27T18:33:20.921854Z  INFO tokio-runtime-worker ThreadId(13) thrussh::server::encrypted: pty-req: unknown pty code 42
-2025-11-27T18:33:23.532914Z  WARN ThreadId(19) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
-2025-11-27T18:33:25.652593Z  WARN ThreadId(51) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
-2025-11-27T18:33:37.399021Z  WARN ThreadId(83) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
-2025-11-27T18:33:41.162194Z  WARN ThreadId(115) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
-2025-11-27T18:33:43.106956Z  WARN ThreadId(147) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
-2025-11-27T18:34:11.162819Z  WARN ThreadId(196) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
-2025-11-27T18:34:11.838660Z  INFO tokio-runtime-worker ThreadId(04) fenrir::infra::modules::runtime::process: module stopped module_id=fenrir-api pid=51901
-2025-11-27T18:34:12.343321Z  INFO tokio-runtime-worker ThreadId(13) fenrir::infra::modules::runtime::process: module stopped module_id=notification-hub pid=51902
-2025-11-27T18:34:12.345338Z  INFO tokio-runtime-worker ThreadId(13) fenrir::services::module: activating module dev service override module=fenrir-api services=1
-2025-11-27T18:34:17.935381Z  WARN ThreadId(213) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
-2025-11-27T18:34:18.114217Z  WARN tokio-runtime-worker ThreadId(14) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
-2025-11-27T18:34:18.120374Z  INFO tokio-runtime-worker ThreadId(04) fenrir::infra::modules::runtime::process: module process started module_id=fenrir-api pid=52073 port=None
-2025-11-27T18:34:18.121668Z  INFO tokio-runtime-worker ThreadId(04) fenrir::services::module: module started successfully module_id=fenrir-api pid=Some(52073) port=None
-2025-11-27T18:34:18.128491Z  INFO tokio-runtime-worker ThreadId(14) fenrir::infra::modules::runtime::process: module process started module_id=notification-hub pid=52074 port=None
-2025-11-27T18:34:18.134012Z  INFO tokio-runtime-worker ThreadId(14) fenrir::services::module: module started successfully module_id=notification-hub pid=Some(52074) port=None
-2025-11-27T18:34:35.775224Z  WARN ThreadId(229) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-11-28T18:56:20.446919Z  INFO main ThreadId(01) fenrir::infra::logging::init: dateilogging initialisiert log_path=logs/app.log
+2025-11-28T18:56:20.447065Z  INFO main ThreadId(01) fenrir::infra::logging::init: db-logdatei vorbereitet log_path=logs/db.log
+2025-11-28T18:56:20.533848Z  INFO main ThreadId(01) fenrir::boot::startup: core services registered in registry
+2025-11-28T18:56:20.534546Z  INFO main ThreadId(01) fenrir::boot::startup: scheduler service started
+2025-11-28T18:56:20.534688Z  INFO tokio-runtime-worker ThreadId(02) fenrir::services::scheduler::service: scheduler heartbeat loop started
+2025-11-28T18:56:20.536268Z  INFO                 main ThreadId(01) fenrir::boot::startup: audit log persistence configured path=/opt/fenrir/development/tmp/runtime/audit/fenrir-audit-history.json capacity=2048 retention_hours=24 persist_seconds=30
+2025-11-28T18:56:20.543847Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: loaded 2 module states from disk
+2025-11-28T18:56:20.543921Z  WARN                 main ThreadId(01) fenrir::infra::modules::runtime::process: module was running but process no longer exists module_id=notification-hub pid=61015
+2025-11-28T18:56:20.543933Z  WARN                 main ThreadId(01) fenrir::infra::modules::runtime::process: module was running but process no longer exists module_id=fenrir-api pid=61014
+2025-11-28T18:56:20.619150Z  INFO                 main ThreadId(01) fenrir::infra::http::server: HTTP control-plane authentication via identity broker
+2025-11-28T18:56:20.619226Z  INFO                 main ThreadId(01) fenrir::boot::startup: boot complete app=fenrir version=0.1.4
+2025-11-28T18:56:20.629878Z  INFO                 main ThreadId(01) fenrir::boot::bootstrap: bootstrap module ready module=fenrir-api version="latest" status=AlreadyCurrent
+2025-11-28T18:56:20.630706Z  WARN                 main ThreadId(01) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-11-28T18:56:20.633700Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: module process started module_id=fenrir-api pid=85395 port=None
+2025-11-28T18:56:20.634159Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: module started successfully module_id=fenrir-api pid=Some(85395) port=None
+2025-11-28T18:56:20.635686Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: module process started module_id=notification-hub pid=85396 port=None
+2025-11-28T18:56:20.635882Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: module started successfully module_id=notification-hub pid=Some(85396) port=None
+2025-11-28T18:56:20.635967Z  INFO                 main ThreadId(01) fenrir::boot::transports: transport initialisation triggered
+2025-11-28T18:56:20.635990Z  INFO tokio-runtime-worker ThreadId(15) fenrir::boot::transports: ssh server task spawned
+2025-11-28T18:56:20.636223Z  INFO tokio-runtime-worker ThreadId(15) fenrir::infra::ssh::server: starting SSH server host=127.0.0.1 port=2222
+2025-11-28T18:56:20.636517Z  INFO tokio-runtime-worker ThreadId(06) fenrir::infra::http::server: HTTP server task spawned
+2025-11-28T18:56:29.293561Z  INFO tokio-runtime-worker ThreadId(10) thrussh::server::encrypted: pty-req: unknown pty code 42
+2025-11-28T18:56:41.440780Z  WARN ThreadId(19) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"

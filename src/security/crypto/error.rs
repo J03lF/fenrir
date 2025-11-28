@@ -1,24 +1,42 @@
-use thiserror::Error;
+use std::error::Error as StdError;
+use std::fmt;
 
-#[derive(Debug, Error)]
+use crate::utils::messages::security::crypto as crypto_messages;
+
+#[derive(Debug)]
 pub enum CryptoError {
-    #[error("unsupported cipher algorithm: {0}")]
     UnsupportedAlgorithm(String),
-    #[error("invalid key length for selected cipher")]
     InvalidKeyLength,
-    #[error("invalid nonce length for selected cipher")]
     InvalidNonceLength,
-    #[error("key derivation failed: {0}")]
     Derivation(String),
-    #[error("password hashing failed: {0}")]
     PasswordHash(String),
-    #[error("encryption failed")]
     Encryption,
-    #[error("decryption failed")]
     Decryption,
-    #[error("randomness source unavailable: {0}")]
     Random(String),
 }
+
+impl fmt::Display for CryptoError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CryptoError::UnsupportedAlgorithm(msg) => f.write_str(msg),
+            CryptoError::InvalidKeyLength => f.write_str(crypto_messages::invalid_key_length()),
+            CryptoError::InvalidNonceLength => f.write_str(crypto_messages::invalid_nonce_length()),
+            CryptoError::Derivation(reason) => {
+                f.write_str(&crypto_messages::derivation_failed(reason))
+            }
+            CryptoError::PasswordHash(reason) => {
+                f.write_str(&crypto_messages::password_hash_failed(reason))
+            }
+            CryptoError::Encryption => f.write_str(crypto_messages::encryption_failed()),
+            CryptoError::Decryption => f.write_str(crypto_messages::decryption_failed()),
+            CryptoError::Random(reason) => {
+                f.write_str(&crypto_messages::randomness_unavailable(reason))
+            }
+        }
+    }
+}
+
+impl StdError for CryptoError {}
 
 impl From<password_hash::Error> for CryptoError {
     fn from(err: password_hash::Error) -> Self {

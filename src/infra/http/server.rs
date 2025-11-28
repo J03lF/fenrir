@@ -12,7 +12,7 @@ use tracing::{debug, info, warn};
 use crate::audit::{AuditActor, AuditEvent, AuditMetadata, AuditOutcome};
 use crate::config::AppConfig;
 use crate::infra::telemetry;
-use crate::security::auth::{ControlPlaneAuthorizer, Role};
+use crate::security::auth::ControlPlaneAuthorizer;
 use crate::services::{AppServices, ManagedService, ServiceRegistry, ServiceStatus};
 
 use super::routes::build_router;
@@ -118,20 +118,8 @@ impl HttpServer {
                 .map_err(|err| anyhow!(err))?;
             let entries = control_tokens
                 .into_iter()
-                .map(|token| {
-                    let role = match token.role.as_str() {
-                        "admin" => Role::Admin,
-                        "operator" => Role::Operator,
-                        "viewer" => Role::Viewer,
-                        other => {
-                            return Err(anyhow!(
-                                "unbekannte Rolle in security.http.control_tokens: {other}"
-                            ))
-                        }
-                    };
-                    Ok((role, token.secret))
-                })
-                .collect::<Result<Vec<_>>>()?;
+                .map(|token| (token.role, token.secret))
+                .collect::<Vec<_>>();
             if entries.is_empty() {
                 return Err(anyhow!(
                     "keine Kontrollebenen-Authentifizierung konfiguriert (Identity-Service fehlt, security.http.control_tokens leer)"

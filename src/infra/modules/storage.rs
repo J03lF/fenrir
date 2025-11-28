@@ -13,6 +13,7 @@ use crate::domain::module::{
     InstalledModule, ModuleBundle, ModuleId, ModuleInstallResult, ModuleInstallSource,
     ModuleInstallStatus, ModuleManifest, ModuleStorageError, ModuleStoragePort,
 };
+use crate::utils::messages;
 use tracing::warn;
 
 #[derive(Debug, Clone)]
@@ -92,10 +93,12 @@ impl FilesystemModuleStorage {
         match fs::read(&manifest_path).await {
             Ok(bytes) => {
                 let manifest: ModuleManifest = serde_json::from_slice(&bytes).map_err(|err| {
-                    ModuleStorageError::InvalidState(format!(
-                        "failed to parse manifest {}: {err}",
-                        manifest_path.display()
-                    ))
+                    ModuleStorageError::InvalidState(
+                        messages::infra::modules::storage::manifest_parse_failed(
+                            manifest_path.display(),
+                            err,
+                        ),
+                    )
                 })?;
                 let installed_at = fs::metadata(&manifest_path)
                     .await
@@ -109,10 +112,12 @@ impl FilesystemModuleStorage {
                 }))
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(ModuleStorageError::Io(format!(
-                "cannot read manifest {}: {err}",
-                manifest_path.display()
-            ))),
+            Err(err) => Err(ModuleStorageError::Io(
+                messages::infra::modules::storage::manifest_read_failed(
+                    manifest_path.display(),
+                    err,
+                ),
+            )),
         }
     }
 
@@ -127,7 +132,8 @@ impl FilesystemModuleStorage {
                         module = %id,
                         path = %metadata_path.display(),
                         error = %err,
-                        "failed to parse install metadata, using distribution source"
+                        "{}",
+                        messages::infra::modules::storage::INSTALL_METADATA_PARSE_FAILED
                     );
                     ModuleInstallSource::Distribution
                 }),
@@ -140,7 +146,8 @@ impl FilesystemModuleStorage {
                     module = %id,
                     path = %metadata_path.display(),
                     error = %err,
-                    "failed to read install metadata, using distribution source"
+                    "{}",
+                    messages::infra::modules::storage::INSTALL_METADATA_READ_FAILED
                 );
                 ModuleInstallSource::Distribution
             }
@@ -154,19 +161,20 @@ impl FilesystemModuleStorage {
     ) -> Result<(), ModuleStorageError> {
         let metadata = ModuleInstallMetadata { source };
         let metadata_bytes = serde_json::to_vec_pretty(&metadata).map_err(|err| {
-            ModuleStorageError::InvalidState(format!(
-                "failed to encode install metadata for {}: {err}",
-                id
-            ))
+            ModuleStorageError::InvalidState(
+                messages::infra::modules::storage::install_metadata_encode_failed(id, err),
+            )
         })?;
         let metadata_path = self.install_metadata_path(id);
         fs::write(&metadata_path, &metadata_bytes)
             .await
             .map_err(|err| {
-                ModuleStorageError::Io(format!(
-                    "cannot write install metadata {}: {err}",
-                    metadata_path.display()
-                ))
+                ModuleStorageError::Io(
+                    messages::infra::modules::storage::install_metadata_write_failed(
+                        metadata_path.display(),
+                        err,
+                    ),
+                )
             })
     }
 }
@@ -176,15 +184,15 @@ impl ModuleStoragePort for FilesystemModuleStorage {
     async fn list(&self) -> Result<Vec<InstalledModule>, ModuleStorageError> {
         let mut entries = Vec::new();
         let mut dir = fs::read_dir(&self.install_dir).await.map_err(|err| {
-            ModuleStorageError::Io(format!(
-                "cannot open module directory {}: {err}",
-                self.install_dir.display()
+            ModuleStorageError::Io(messages::infra::modules::storage::open_dir_failed(
+                self.install_dir.display(),
+                err,
             ))
         })?;
         while let Some(entry) = dir.next_entry().await.map_err(|err| {
-            ModuleStorageError::Io(format!(
-                "failed to iterate module directory {}: {err}",
-                self.install_dir.display()
+            ModuleStorageError::Io(messages::infra::modules::storage::iterate_dir_failed(
+                self.install_dir.display(),
+                err,
             ))
         })? {
             let path = entry.path();
@@ -192,10 +200,12 @@ impl ModuleStoragePort for FilesystemModuleStorage {
                 .file_type()
                 .await
                 .map_err(|err| {
-                    ModuleStorageError::Io(format!(
-                        "cannot read file type {}: {err}",
-                        path.display()
-                    ))
+                    ModuleStorageError::Io(
+                        messages::infra::modules::storage::file_type_read_failed(
+                            path.display(),
+                            err,
+                        ),
+                    )
                 })?
                 .is_dir()
             {
@@ -204,7 +214,8 @@ impl ModuleStoragePort for FilesystemModuleStorage {
             let Some(module_name) = path.file_name().and_then(|name| name.to_str()) else {
                 warn!(
                     path = %path.display(),
-                    "Skipping module entry with non-UTF8 name"
+                    "{}",
+                    messages::infra::modules::storage::SKIP_NON_UTF8_ENTRY
                 );
                 continue;
             };
@@ -213,7 +224,8 @@ impl ModuleStoragePort for FilesystemModuleStorage {
                 warn!(
                     path = %path.display(),
                     name = module_name,
-                    "Skipping hidden module entry"
+                    "{}",
+                    messages::infra::modules::storage::SKIP_HIDDEN_ENTRY
                 );
                 continue;
             }
@@ -224,7 +236,8 @@ impl ModuleStoragePort for FilesystemModuleStorage {
                     warn!(
                         path = %path.display(),
                         error = %err,
-                        "Skipping module entry with invalid identifier"
+                        "{}",
+                        messages::infra::modules::storage::SKIP_INVALID_IDENTIFIER
                     );
                     continue;
                 }
@@ -255,27 +268,29 @@ impl ModuleStoragePort for FilesystemModuleStorage {
         if let Some(installed) = &current {
             let installed_version = installed.manifest.module_version();
             if installed_version.as_semver() > version.as_semver() {
-                return Err(ModuleStorageError::InvalidState(format!(
-                    "installed version {} newer than requested {}",
-                    installed_version, version
-                )));
+                return Err(ModuleStorageError::InvalidState(
+                    messages::infra::modules::storage::installed_version_newer(
+                        installed_version,
+                        version,
+                    ),
+                ));
             }
         }
         let module_dir = self.module_dir(&id);
 
         if module_dir.exists() {
             fs::remove_dir_all(&module_dir).await.map_err(|err| {
-                ModuleStorageError::Io(format!(
-                    "cannot clean existing module directory {}: {err}",
-                    module_dir.display()
+                ModuleStorageError::Io(messages::infra::modules::storage::clean_dir_failed(
+                    module_dir.display(),
+                    err,
                 ))
             })?;
         }
 
         fs::create_dir_all(&module_dir).await.map_err(|err| {
-            ModuleStorageError::Io(format!(
-                "cannot prepare module directory {}: {err}",
-                module_dir.display()
+            ModuleStorageError::Io(messages::infra::modules::storage::prepare_dir_failed(
+                module_dir.display(),
+                err,
             ))
         })?;
 
@@ -283,25 +298,26 @@ impl ModuleStoragePort for FilesystemModuleStorage {
 
         let metadata_dir = self.metadata_dir(&id);
         fs::create_dir_all(&metadata_dir).await.map_err(|err| {
-            ModuleStorageError::Io(format!(
-                "cannot prepare metadata directory {}: {err}",
-                metadata_dir.display()
-            ))
+            ModuleStorageError::Io(
+                messages::infra::modules::storage::prepare_metadata_dir_failed(
+                    metadata_dir.display(),
+                    err,
+                ),
+            )
         })?;
 
         let manifest_bytes = serde_json::to_vec_pretty(&bundle.manifest).map_err(|err| {
-            ModuleStorageError::InvalidState(format!(
-                "failed to encode manifest for {}: {err}",
-                bundle.manifest.id
-            ))
+            ModuleStorageError::InvalidState(
+                messages::infra::modules::storage::manifest_encode_failed(&bundle.manifest.id, err),
+            )
         })?;
         let manifest_path = self.manifest_path(&id);
         fs::write(&manifest_path, &manifest_bytes)
             .await
             .map_err(|err| {
-                ModuleStorageError::Io(format!(
-                    "cannot write manifest {}: {err}",
-                    manifest_path.display()
+                ModuleStorageError::Io(messages::infra::modules::storage::manifest_write_failed(
+                    manifest_path.display(),
+                    err,
                 ))
             })?;
 
@@ -309,21 +325,25 @@ impl ModuleStoragePort for FilesystemModuleStorage {
         fs::write(&artifact_path, &bundle.archive)
             .await
             .map_err(|err| {
-                ModuleStorageError::Io(format!(
-                    "cannot write artifact {}: {err}",
-                    artifact_path.display()
+                ModuleStorageError::Io(messages::infra::modules::storage::artifact_write_failed(
+                    artifact_path.display(),
+                    err,
                 ))
             })?;
 
         fs::write(self.signature_path(&id), &bundle.signature)
             .await
             .map_err(|err| {
-                ModuleStorageError::Io(format!("cannot write signature for {}: {err}", id))
+                ModuleStorageError::Io(messages::infra::modules::storage::signature_write_failed(
+                    &id, err,
+                ))
             })?;
         fs::write(self.checksum_path(&id), &bundle.checksum)
             .await
             .map_err(|err| {
-                ModuleStorageError::Io(format!("cannot write checksum for {}: {err}", id))
+                ModuleStorageError::Io(messages::infra::modules::storage::checksum_write_failed(
+                    &id, err,
+                ))
             })?;
 
         // Store the original download URL for reference
@@ -333,7 +353,9 @@ impl ModuleStoragePort for FilesystemModuleStorage {
         )
         .await
         .map_err(|err| {
-            ModuleStorageError::Io(format!("cannot write download URL for {}: {err}", id))
+            ModuleStorageError::Io(
+                messages::infra::modules::storage::download_url_write_failed(&id, err),
+            )
         })?;
 
         self.persist_install_metadata(&id, source).await?;
@@ -363,10 +385,9 @@ impl ModuleStoragePort for FilesystemModuleStorage {
         match fs::remove_dir_all(&module_dir).await {
             Ok(_) => Ok(()),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(err) => Err(ModuleStorageError::Io(format!(
-                "cannot remove module directory {}: {err}",
-                module_dir.display()
-            ))),
+            Err(err) => Err(ModuleStorageError::Io(
+                messages::infra::modules::storage::remove_dir_failed(module_dir.display(), err),
+            )),
         }
     }
 }
@@ -388,7 +409,7 @@ fn resolve_path(path: &str) -> Result<PathBuf, ModuleStorageInitError> {
 fn artifact_file_name(manifest: &ModuleManifest) -> String {
     let raw = manifest.artifact.download_url.trim();
     raw.split('/')
-        .last()
+        .next_back()
         .filter(|segment| !segment.is_empty())
         .map(|segment| segment.to_string())
         .unwrap_or_else(|| format!("{}-{}.module", manifest.id, manifest.version))
@@ -406,9 +427,9 @@ async fn extract_module_archive(
         let decoder = GzDecoder::new(cursor);
         let mut archive = Archive::new(decoder);
         archive.unpack(&destination).map_err(|err| {
-            ModuleStorageError::Io(format!(
-                "failed to unpack module archive into {}: {err}",
-                destination.display()
+            ModuleStorageError::Io(messages::infra::modules::storage::unpack_failed(
+                destination.display(),
+                err,
             ))
         })?;
 
@@ -416,7 +437,11 @@ async fn extract_module_archive(
         Ok(())
     })
     .await
-    .map_err(|err| ModuleStorageError::Io(format!("archive extraction task failed: {err}")))??;
+    .map_err(|err| {
+        ModuleStorageError::Io(messages::infra::modules::storage::extraction_task_failed(
+            err,
+        ))
+    })??;
 
     Ok(())
 }
@@ -424,16 +449,18 @@ async fn extract_module_archive(
 fn flatten_module_root(destination: &std::path::Path) -> Result<(), ModuleStorageError> {
     let mut entries = Vec::new();
     for entry in std::fs::read_dir(destination).map_err(|err| {
-        ModuleStorageError::Io(format!(
-            "cannot list extracted contents of {}: {err}",
-            destination.display()
+        ModuleStorageError::Io(messages::infra::modules::storage::list_extracted_failed(
+            destination.display(),
+            err,
         ))
     })? {
         let entry = entry.map_err(|err| {
-            ModuleStorageError::Io(format!(
-                "cannot access extracted entry in {}: {err}",
-                destination.display()
-            ))
+            ModuleStorageError::Io(
+                messages::infra::modules::storage::access_extracted_entry_failed(
+                    destination.display(),
+                    err,
+                ),
+            )
         })?;
         let name = entry.file_name();
         let Some(name_str) = name.to_str() else {
@@ -454,40 +481,44 @@ fn flatten_module_root(destination: &std::path::Path) -> Result<(), ModuleStorag
     if entries.len() == 1 {
         let entry = entries.pop().unwrap();
         let file_type = entry.file_type().map_err(|err| {
-            ModuleStorageError::Io(format!(
-                "cannot inspect extracted entry {}: {err}",
-                entry.path().display()
+            ModuleStorageError::Io(messages::infra::modules::storage::inspect_entry_failed(
+                entry.path().display(),
+                err,
             ))
         })?;
 
         if file_type.is_dir() {
             let inner = entry.path();
             for child in std::fs::read_dir(&inner).map_err(|err| {
-                ModuleStorageError::Io(format!(
-                    "cannot read nested module directory {}: {err}",
-                    inner.display()
+                ModuleStorageError::Io(messages::infra::modules::storage::read_nested_dir_failed(
+                    inner.display(),
+                    err,
                 ))
             })? {
                 let child = child.map_err(|err| {
-                    ModuleStorageError::Io(format!(
-                        "cannot access nested entry in {}: {err}",
-                        inner.display()
-                    ))
+                    ModuleStorageError::Io(
+                        messages::infra::modules::storage::access_nested_entry_failed(
+                            inner.display(),
+                            err,
+                        ),
+                    )
                 })?;
                 let target = destination.join(child.file_name());
                 std::fs::rename(child.path(), &target).map_err(|err| {
-                    ModuleStorageError::Io(format!(
-                        "cannot relocate module entry {} to {}: {err}",
-                        child.path().display(),
-                        target.display()
-                    ))
+                    ModuleStorageError::Io(
+                        messages::infra::modules::storage::relocate_entry_failed(
+                            child.path().display(),
+                            target.display(),
+                            err,
+                        ),
+                    )
                 })?;
             }
 
             std::fs::remove_dir_all(&inner).map_err(|err| {
-                ModuleStorageError::Io(format!(
-                    "cannot remove nested module directory {}: {err}",
-                    inner.display()
+                ModuleStorageError::Io(messages::infra::modules::storage::remove_nested_dir_failed(
+                    inner.display(),
+                    err,
                 ))
             })?;
         }

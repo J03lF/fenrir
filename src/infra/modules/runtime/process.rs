@@ -13,6 +13,7 @@ use crate::domain::module::{
     ModuleId, ModuleRuntimeError, ModuleRuntimeInfo, ModuleRuntimePort, ModuleRuntimeStatus,
     ModuleStartConfig, ModuleStoragePort, ModuleVersion,
 };
+use crate::utils::messages;
 
 /// Classification result for executable validation.
 enum ExecCheck {
@@ -63,7 +64,8 @@ impl ProcessModuleRuntime {
             warn!(
                 path = %state_dir.display(),
                 error = %err,
-                "failed to prepare module runtime state directory"
+                "{}",
+                messages::infra::modules::runtime::process::STATE_DIR_PREPARE_FAILED
             );
         }
         Self {
@@ -78,7 +80,10 @@ impl ProcessModuleRuntime {
         let state_file = self.state_dir.join(STATE_FILE_NAME);
 
         if !state_file.exists() {
-            debug!("no runtime state file found, starting fresh");
+            debug!(
+                "{}",
+                messages::infra::modules::runtime::process::NO_STATE_FOUND
+            );
             return Ok(());
         }
 
@@ -86,30 +91,44 @@ impl ProcessModuleRuntime {
             Ok(contents) => {
                 match serde_json::from_str::<Vec<PersistedModuleState>>(&contents) {
                     Ok(states) => {
-                        info!("loaded {} module states from disk", states.len());
+                        info!(
+                            "{}",
+                            messages::infra::modules::runtime::process::state_loaded(states.len())
+                        );
 
                         // Check which modules are still running
                         for state in states {
                             if self.is_process_alive(state.pid) {
                                 if let Err(err) = self.reattach_running_module(state).await {
-                                    warn!(error = %err, "failed to reattach running module");
+                                    warn!(
+                                        error = %err,
+                                        "{}",
+                                        messages::infra::modules::runtime::process::REATTACH_FAILED
+                                    );
                                 }
                             } else {
                                 warn!(
                                     module_id = %state.module_id,
                                     pid = state.pid,
-                                    "module was running but process no longer exists"
+                                    "{}",
+                                    messages::infra::modules::runtime::process::PROCESS_MISSING
                                 );
                             }
                         }
                     }
                     Err(e) => {
-                        error!("failed to parse runtime state file: {}", e);
+                        error!(
+                            "{}",
+                            messages::infra::modules::runtime::process::state_parse_failed(e)
+                        );
                     }
                 }
             }
             Err(e) => {
-                error!("failed to read runtime state file: {}", e);
+                error!(
+                    "{}",
+                    messages::infra::modules::runtime::process::state_read_failed(e)
+                );
             }
         }
 
@@ -138,13 +157,15 @@ impl ProcessModuleRuntime {
                     module_id = %module_id,
                     expected = %expected_version,
                     actual = %installed_version,
-                    "reattach version mismatch"
+                    "{}",
+                    messages::infra::modules::runtime::process::REATTACH_VERSION_MISMATCH
                 );
             }
         } else {
             warn!(
                 module_id = %module_id,
-                "installed module missing during runtime reattach"
+                "{}",
+                messages::infra::modules::runtime::process::REATTACH_MISSING
             );
             return Ok(());
         }
@@ -174,7 +195,8 @@ impl ProcessModuleRuntime {
         info!(
             module_id = %module_id,
             pid = persisted.pid,
-            "reattached running module process"
+            "{}",
+            messages::infra::modules::runtime::process::REATTACH_RUNNING
         );
 
         Ok(())
@@ -203,12 +225,16 @@ impl ProcessModuleRuntime {
 
         let state_file = self.state_dir.join(STATE_FILE_NAME);
         let contents = serde_json::to_string_pretty(&states).map_err(|e| {
-            ModuleRuntimeError::InvalidState(format!("failed to serialize state: {}", e))
+            ModuleRuntimeError::InvalidState(
+                messages::infra::modules::runtime::process::state_serialize_failed(e),
+            )
         })?;
 
-        fs::write(&state_file, contents)
-            .await
-            .map_err(|e| ModuleRuntimeError::Io(format!("failed to write state file: {}", e)))?;
+        fs::write(&state_file, contents).await.map_err(|e| {
+            ModuleRuntimeError::Io(
+                messages::infra::modules::runtime::process::state_write_failed(e),
+            )
+        })?;
 
         Ok(())
     }
@@ -220,10 +246,7 @@ impl ProcessModuleRuntime {
             use nix::sys::signal::{kill, Signal};
             use nix::unistd::Pid;
 
-            match kill(Pid::from_raw(pid as i32), Signal::SIGCONT) {
-                Ok(_) => true,
-                Err(_) => false,
-            }
+            kill(Pid::from_raw(pid as i32), Signal::SIGCONT).is_ok()
         }
 
         #[cfg(not(unix))]
@@ -242,17 +265,30 @@ impl ProcessModuleRuntime {
                 Ok(config) => {
                     let port = config.server.and_then(|s| s.port);
                     if let Some(p) = port {
-                        debug!(module_path = ?module_path, port = p, "read port from module config");
+                        debug!(
+                            module_path = ?module_path,
+                            port = p,
+                            "{}",
+                            messages::infra::modules::runtime::process::MODULE_CONFIG_PORT
+                        );
                     }
                     port
                 }
                 Err(e) => {
-                    debug!(error = %e, "failed to parse module config.toml");
+                    debug!(
+                        error = %e,
+                        "{}",
+                        messages::infra::modules::runtime::process::MODULE_CONFIG_PARSE_FAILED
+                    );
                     None
                 }
             },
             Err(_) => {
-                debug!(config_path = ?config_path, "no config.toml found in module");
+                debug!(
+                    config_path = ?config_path,
+                    "{}",
+                    messages::infra::modules::runtime::process::MODULE_CONFIG_MISSING
+                );
                 None
             }
         }
@@ -302,10 +338,8 @@ impl ProcessModuleRuntime {
         if let Ok(mut file) = std::fs::File::open(path) {
             use std::io::Read;
             let mut shebang = [0u8; 2];
-            if file.read(&mut shebang).map(|n| n == 2).unwrap_or(false) {
-                if shebang == [b'#', b'!'] {
-                    return ExecCheck::Script;
-                }
+            if file.read(&mut shebang).map(|n| n == 2).unwrap_or(false) && shebang == [b'#', b'!'] {
+                return ExecCheck::Script;
             }
         }
 
@@ -321,11 +355,14 @@ impl ProcessModuleRuntime {
 
             // Try SIGTERM first
             if let Err(e) = kill(Pid::from_raw(pid as i32), Signal::SIGTERM) {
-                warn!("SIGTERM failed: {}, trying SIGKILL", e);
+                warn!(
+                    "{}",
+                    messages::infra::modules::runtime::process::sigterm_failed(e)
+                );
                 kill(Pid::from_raw(pid as i32), Signal::SIGKILL).map_err(|e| {
                     ModuleRuntimeError::StopFailed {
                         module_id: "unknown".to_string(),
-                        reason: format!("failed to kill process: {}", e),
+                        reason: messages::infra::modules::runtime::process::kill_failed(e),
                     }
                 })?;
             }
@@ -383,7 +420,9 @@ impl ModuleRuntimePort for ProcessModuleRuntime {
         // Setup log file
         let log_dir = self.state_dir.join("logs");
         fs::create_dir_all(&log_dir).await.map_err(|e| {
-            ModuleRuntimeError::Io(format!("failed to create log directory: {}", e))
+            ModuleRuntimeError::Io(
+                messages::infra::modules::runtime::process::log_dir_create_failed(e),
+            )
         })?;
 
         let log_file = log_dir.join(format!("{}.log", module_id_str));
@@ -391,7 +430,11 @@ impl ModuleRuntimePort for ProcessModuleRuntime {
             .create(true)
             .append(true)
             .open(&log_file)
-            .map_err(|e| ModuleRuntimeError::Io(format!("failed to open log file: {}", e)))?;
+            .map_err(|e| {
+                ModuleRuntimeError::Io(
+                    messages::infra::modules::runtime::process::log_file_open_failed(e),
+                )
+            })?;
 
         // Resolve executable path (binary inside module directory)
         // Try multiple common locations and naming patterns
@@ -429,10 +472,9 @@ impl ModuleRuntimePort for ProcessModuleRuntime {
                                     ExecCheck::Foreign(target) => {
                                         return Err(ModuleRuntimeError::StartFailed {
                                             module_id: module_id_str.clone(),
-                                            reason: format!(
-                                                "Modul-Binary ist für {} gebaut und nicht mit {} kompatibel",
+                                            reason: messages::infra::modules::runtime::process::exec_foreign_target(
                                                 target,
-                                                std::env::consts::OS
+                                                std::env::consts::OS,
                                             ),
                                         });
                                     }
@@ -452,18 +494,12 @@ impl ModuleRuntimePort for ProcessModuleRuntime {
                 }
             }
 
-            found_path.ok_or_else(|| {
-                ModuleRuntimeError::StartFailed {
-                    module_id: module_id_str.clone(),
-                    reason: format!(
-                        "kein ausführbares Modul in {} gefunden. Gesucht in: {}, bin/{}, {}.exe, bin/{}.exe",
-                        module_path.display(),
-                        module_id_str,
-                        module_id_str,
-                        module_id_str,
-                        module_id_str
-                    ),
-                }
+            found_path.ok_or_else(|| ModuleRuntimeError::StartFailed {
+                module_id: module_id_str.clone(),
+                reason: messages::infra::modules::runtime::process::exec_not_found(
+                    module_path.display(),
+                    &module_id_str,
+                ),
             })?
         };
 
@@ -484,7 +520,7 @@ impl ModuleRuntimePort for ProcessModuleRuntime {
         // Spawn process
         let child = cmd.spawn().map_err(|e| ModuleRuntimeError::StartFailed {
             module_id: module_id_str.clone(),
-            reason: format!("failed to spawn process: {}", e),
+            reason: messages::infra::modules::runtime::process::spawn_failed(e),
         })?;
 
         let pid = child.id();
@@ -494,7 +530,8 @@ impl ModuleRuntimePort for ProcessModuleRuntime {
             module_id = %config.module_id,
             pid = pid,
             port = ?port,
-            "module process started"
+            "{}",
+            messages::infra::modules::runtime::process::PROCESS_STARTED
         );
 
         // Update telemetry with real module process metrics
@@ -522,7 +559,10 @@ impl ModuleRuntimePort for ProcessModuleRuntime {
 
         // Persist state
         if let Err(e) = self.save_state().await {
-            error!("failed to persist runtime state: {}", e);
+            error!(
+                "{}",
+                messages::infra::modules::runtime::process::state_persist_failed(e)
+            );
         }
 
         Ok(ModuleRuntimeInfo {
@@ -560,10 +600,18 @@ impl ModuleRuntimePort for ProcessModuleRuntime {
 
         // Persist state
         if let Err(e) = self.save_state().await {
-            error!("failed to persist runtime state: {}", e);
+            error!(
+                "{}",
+                messages::infra::modules::runtime::process::state_persist_failed(e)
+            );
         }
 
-        info!(module_id = %module_id, pid = pid, "module stopped");
+        info!(
+            module_id = %module_id,
+            pid = pid,
+            "{}",
+            messages::infra::modules::runtime::process::MODULE_STOPPED
+        );
 
         // Refresh telemetry sample after shutdown
         let sample = crate::infra::telemetry::get_service_specific_metrics("module-runtime");
@@ -677,9 +725,11 @@ impl ModuleRuntimePort for ProcessModuleRuntime {
                 module_id: module_id_str.clone(),
             })?;
 
-        let contents = fs::read_to_string(&state.log_file)
-            .await
-            .map_err(|e| ModuleRuntimeError::Io(format!("failed to read log file: {}", e)))?;
+        let contents = fs::read_to_string(&state.log_file).await.map_err(|e| {
+            ModuleRuntimeError::Io(
+                messages::infra::modules::runtime::process::log_file_read_failed(e),
+            )
+        })?;
 
         let lines: Vec<String> = contents.lines().map(String::from).collect();
 

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -11,13 +12,15 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use tracing::{debug, warn};
 
+use super::jwt::{fingerprint_token, parse_jwt, Claims};
 use super::{
-    fingerprint_token, parse_jwt, Claims, IdentityClaims, IdentityError, IdentityProvider,
-    IdentityTokenRecord, IdentityUserProfile, IdentityUserRecord, IssueTokenRequest, IssuedToken,
+    IdentityClaims, IdentityError, IdentityProvider, IdentityTokenRecord, IdentityUserProfile,
+    IdentityUserRecord, IssueTokenRequest, IssuedToken,
 };
 use crate::audit::{AuditActor, AuditEvent, AuditMetadata};
 use crate::security::auth::Role;
 use crate::security::manager::AuditSink;
+use crate::utils::messages::security::identity as identity_messages;
 
 const TOKENS_ISSUE_PATH: &str = "tokens/issue";
 const USERS_LIST_PATH: &str = "users";
@@ -64,6 +67,7 @@ impl ExternalIdentityTlsOptions {
 }
 
 impl ExternalIdentityProvider {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         base_url: Url,
         jwks_url: Url,
@@ -114,15 +118,22 @@ impl ExternalIdentityProvider {
         let response = self
             .send(client.post(url).json(&body))?
             .json::<IssueTokenResponse>()
-            .map_err(|err| IdentityError::Invalid(format!("invalid identity response: {err}")))?;
+            .map_err(|err| {
+                IdentityError::Invalid(identity_messages::invalid_identity_response(
+                    &err.to_string(),
+                ))
+            })?;
 
         let (header, raw_claims, _) = parse_jwt(&response.token)?;
-        let claims: Claims = serde_json::from_slice(&raw_claims.decoded)
-            .map_err(|err| IdentityError::Invalid(format!("invalid token claims: {err}")))?;
-        let issued_at = OffsetDateTime::from_unix_timestamp(claims.iat)
-            .map_err(|_| IdentityError::Invalid("token issued-at timestamp out of range".into()))?;
-        let expires_at = OffsetDateTime::from_unix_timestamp(claims.exp)
-            .map_err(|_| IdentityError::Invalid("token expiry timestamp out of range".into()))?;
+        let claims: Claims = serde_json::from_slice(&raw_claims.decoded).map_err(|err| {
+            IdentityError::Invalid(identity_messages::invalid_token_claims(&err.to_string()))
+        })?;
+        let issued_at = OffsetDateTime::from_unix_timestamp(claims.iat).map_err(|_| {
+            IdentityError::Invalid(identity_messages::token_timestamp_out_of_range("issued-at"))
+        })?;
+        let expires_at = OffsetDateTime::from_unix_timestamp(claims.exp).map_err(|_| {
+            IdentityError::Invalid(identity_messages::token_timestamp_out_of_range("expiry"))
+        })?;
         let fingerprint = response
             .fingerprint
             .unwrap_or_else(|| fingerprint_token(&response.token));
@@ -148,16 +159,23 @@ impl ExternalIdentityProvider {
             .send(client.get(url))?
             .json::<ListUsersResponse>()
             .map_err(|err| {
-                IdentityError::Invalid(format!("invalid identity users response: {err}"))
+                IdentityError::Invalid(identity_messages::invalid_identity_users_response(
+                    &err.to_string(),
+                ))
             })?;
 
         let users = response
             .users
             .into_iter()
-            .filter_map(|user| match parse_role(&user.role) {
+            .filter_map(|user| match Role::from_str(&user.role) {
                 Ok(role) => Some((user, role)),
                 Err(err) => {
-                    warn!(user = %user.user_id, error = %err, "skipping identity user with invalid role");
+                    warn!(
+                        user = %user.user_id,
+                        error = %err,
+                        "{}",
+                        identity_messages::skipping_identity_user_invalid_role()
+                    );
                     None
                 }
             })
@@ -179,9 +197,7 @@ impl ExternalIdentityProvider {
                     .filter_map(|token| IdentityTokenRecord::try_from(token).ok())
                     .collect(),
                 password_hash: None,
-                password_updated_at: user
-                    .password_updated_at
-                    .and_then(|ts| parse_timestamp(&ts)),
+                password_updated_at: user.password_updated_at.and_then(|ts| parse_timestamp(&ts)),
                 last_login_at: user.last_login_at.and_then(|ts| parse_timestamp(&ts)),
             })
             .collect();
@@ -202,7 +218,8 @@ impl ExternalIdentityProvider {
             .map_err(|err| {
                 IdentityError::Invalid(format!("invalid identity login response: {err}"))
             })?;
-        let role = parse_role(&response.role)?;
+        let role = Role::from_str(&response.role)
+            .map_err(|err| IdentityError::Invalid(format!("unknown role '{}'", err.value())))?;
         let last_login_at = response.last_login_at.as_deref().and_then(parse_timestamp);
         let password_updated_at = response
             .password_updated_at
@@ -229,7 +246,8 @@ impl ExternalIdentityProvider {
         self.validate_claims(&claims)?;
         Ok(IdentityClaims {
             user_id: claims.sub,
-            role: parse_role(&claims.role)?,
+            role: Role::from_str(&claims.role)
+                .map_err(|err| IdentityError::Invalid(format!("unknown role '{}'", err.value())))?,
             environment: claims.env,
             instance_id: claims.inst,
             app_version: claims.ver,
@@ -330,7 +348,7 @@ impl ExternalIdentityProvider {
         }
         let mut map = HashMap::with_capacity(jwks.keys.len());
         for key in jwks.keys {
-            if key.kty != "OKP" || key.crv.to_ascii_uppercase() != "ED25519" {
+            if key.kty != "OKP" || !key.crv.eq_ignore_ascii_case("ED25519") {
                 warn!(kid = %key.kid, "skipping unsupported JWKS key type");
                 continue;
             }
@@ -546,13 +564,4 @@ struct JwkEntry {
 
 fn parse_timestamp(value: &str) -> Option<OffsetDateTime> {
     OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339).ok()
-}
-
-fn parse_role(value: &str) -> Result<Role, IdentityError> {
-    match value.to_ascii_lowercase().as_str() {
-        "admin" => Ok(Role::Admin),
-        "operator" => Ok(Role::Operator),
-        "viewer" => Ok(Role::Viewer),
-        other => Err(IdentityError::Invalid(format!("unknown role '{other}'"))),
-    }
 }

@@ -24,6 +24,7 @@ use tower::service_fn;
 use tower::util::ServiceExt;
 
 use crate::config::HttpTlsConfig;
+use crate::utils::messages;
 
 type TlsReloadHook = dyn Fn(&TlsReloadEvent) + Send + Sync + 'static;
 
@@ -73,14 +74,10 @@ impl HttpTlsRuntime {
     pub(super) fn validate(&self) -> Result<()> {
         if self.enabled {
             if self.cert_path.as_os_str().is_empty() {
-                return Err(anyhow!(
-                    "server.http.tls.cert_path muss gesetzt sein, wenn TLS aktiviert ist"
-                ));
+                return Err(anyhow!(messages::infra::http::tls::CERT_PATH_REQUIRED));
             }
             if self.key_path.as_os_str().is_empty() {
-                return Err(anyhow!(
-                    "server.http.tls.key_path muss gesetzt sein, wenn TLS aktiviert ist"
-                ));
+                return Err(anyhow!(messages::infra::http::tls::KEY_PATH_REQUIRED));
             }
         }
         Ok(())
@@ -129,7 +126,7 @@ impl HttpTlsProvider {
         let runtime = self
             .runtime
             .read()
-            .map_err(|_| anyhow!("tls runtime lock poisoned"))?
+            .map_err(|_| anyhow!(messages::infra::http::tls::RUNTIME_LOCK_POISONED))?
             .clone();
         if runtime.enabled {
             self.start_watcher(runtime)?;
@@ -150,14 +147,14 @@ impl HttpTlsProvider {
         let key_path = runtime.key_path.clone();
         if !cert_path.exists() {
             return Err(anyhow!(
-                "TLS-Zertifikat '{}' wurde nicht gefunden",
-                cert_path.display()
+                "{}",
+                messages::infra::http::tls::cert_not_found(cert_path.display())
             ));
         }
         if !key_path.exists() {
             return Err(anyhow!(
-                "TLS-Schlüssel '{}' wurde nicht gefunden",
-                key_path.display()
+                "{}",
+                messages::infra::http::tls::key_not_found(key_path.display())
             ));
         }
         let weak = Arc::downgrade(self);
@@ -174,7 +171,11 @@ impl HttpTlsProvider {
                 ) {
                     Ok(watcher) => watcher,
                     Err(err) => {
-                        tracing::error!(error = %err, "TLS-Datei-Watcher konnte nicht erstellt werden");
+                        tracing::error!(
+                            error = %err,
+                            "{}",
+                            messages::infra::http::tls::FILE_WATCHER_CREATE_FAILED
+                        );
                         return;
                     }
                 };
@@ -183,7 +184,8 @@ impl HttpTlsProvider {
                     tracing::error!(
                         path = %cert_path.display(),
                         error = %err,
-                        "TLS-Zertifikat kann nicht beobachtet werden"
+                        "{}",
+                        messages::infra::http::tls::CERT_WATCH_FAILED
                     );
                     return;
                 }
@@ -192,7 +194,8 @@ impl HttpTlsProvider {
                         tracing::error!(
                             path = %key_path.display(),
                             error = %err,
-                            "TLS-Schlüssel kann nicht beobachtet werden"
+                            "{}",
+                            messages::infra::http::tls::KEY_WATCH_FAILED
                         );
                         return;
                     }
@@ -206,13 +209,19 @@ impl HttpTlsProvider {
                         Ok(Ok(event)) => {
                             if tls_event_requires_reload(&event.kind) {
                                 if let Some(provider) = weak.upgrade() {
-                                    if let Err(err) = provider.refresh_sync(TlsReloadReason::Filesystem) {
+                                    if let Err(err) =
+                                        provider.refresh_sync(TlsReloadReason::Filesystem)
+                                    {
                                         tracing::warn!(
                                             error = %err,
-                                            "TLS-Zertifikate konnten nicht neu geladen werden"
+                                            "{}",
+                                            messages::infra::http::tls::RELOAD_FAILED
                                         );
                                     } else {
-                                        tracing::info!("TLS-Zertifikate neu geladen (Filesystem-Event)");
+                                        tracing::info!(
+                                            "{}",
+                                            messages::infra::http::tls::RELOAD_SUCCESS_FILESYSTEM
+                                        );
                                     }
                                 } else {
                                     break;
@@ -220,7 +229,11 @@ impl HttpTlsProvider {
                             }
                         }
                         Ok(Err(err)) => {
-                            tracing::warn!(error = %err, "Fehler beim Beobachten der TLS-Artefakte");
+                            tracing::warn!(
+                                error = %err,
+                                "{}",
+                                messages::infra::http::tls::WATCH_ERROR
+                            );
                         }
                         Err(RecvTimeoutError::Timeout) => {}
                         Err(RecvTimeoutError::Disconnected) => break,
@@ -231,7 +244,7 @@ impl HttpTlsProvider {
         let mut guard = self
             .watcher
             .lock()
-            .map_err(|_| anyhow!("tls watcher lock poisoned"))?;
+            .map_err(|_| anyhow!(messages::infra::http::tls::WATCHER_LOCK_POISONED))?;
         *guard = Some(TlsFileWatcher {
             shutdown: shutdown_tx,
             thread: handle,
@@ -252,7 +265,7 @@ impl HttpTlsProvider {
         let runtime = self
             .runtime
             .read()
-            .map_err(|_| anyhow!("tls runtime lock poisoned"))?
+            .map_err(|_| anyhow!(messages::infra::http::tls::RUNTIME_LOCK_POISONED))?
             .clone();
         let config = load_server_config_sync(&runtime)?;
         self.config.store(Arc::new(config));
@@ -267,7 +280,10 @@ impl HttpTlsProvider {
 
     pub(super) fn spawn_auto_reload(self: &Arc<Self>) {
         let interval = {
-            let runtime = self.runtime.read().expect("tls runtime lock");
+            let runtime = self
+                .runtime
+                .read()
+                .expect(messages::infra::http::tls::RUNTIME_LOCK_POISONED);
             runtime.reload_interval
         };
         if let Some(interval) = interval {
@@ -276,7 +292,11 @@ impl HttpTlsProvider {
                 loop {
                     tokio::time::sleep(interval).await;
                     if let Err(err) = this.reload_now(TlsReloadReason::Interval).await {
-                        tracing::warn!(error = %err, "TLS-Zertifikate konnten nicht neu geladen werden");
+                        tracing::warn!(
+                            error = %err,
+                            "{}",
+                            messages::infra::http::tls::RELOAD_FAILED
+                        );
                     }
                 }
             });
@@ -305,8 +325,14 @@ impl HttpTlsProvider {
                 let response = match router_cloned.oneshot(axum_req).await {
                     Ok(resp) => resp,
                     Err(err) => {
-                        tracing::error!(error = %err, "TLS request handling failed");
-                        let body = axum::body::Body::from("internal server error");
+                        tracing::error!(
+                            error = %err,
+                            "{}",
+                            messages::infra::http::tls::REQUEST_FAILED
+                        );
+                        let body = axum::body::Body::from(
+                            messages::infra::http::tls::INTERNAL_SERVER_ERROR_BODY,
+                        );
                         let response = HyperResponse::builder()
                             .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
                             .body(body)
@@ -331,7 +357,7 @@ impl HttpTlsProvider {
         let runtime = self
             .runtime
             .read()
-            .map_err(|_| anyhow!("tls runtime lock poisoned"))?
+            .map_err(|_| anyhow!(messages::infra::http::tls::RUNTIME_LOCK_POISONED))?
             .clone();
         let config = load_server_config_async(&runtime).await?;
         self.config.store(Arc::new(config));
@@ -349,7 +375,7 @@ impl HttpTlsProvider {
             let mut guard = self
                 .next_reload
                 .lock()
-                .map_err(|_| anyhow!("tls reload lock poisoned"))?;
+                .map_err(|_| anyhow!(messages::infra::http::tls::RELOAD_LOCK_POISONED))?;
             if let Some(next) = *guard {
                 if Instant::now() >= next {
                     *guard = None;
@@ -377,7 +403,7 @@ impl HttpTlsProvider {
             let mut guard = self
                 .runtime
                 .write()
-                .map_err(|_| anyhow!("tls runtime lock poisoned"))?;
+                .map_err(|_| anyhow!(messages::infra::http::tls::RUNTIME_LOCK_POISONED))?;
             *guard = runtime.clone();
             if let Some(interval) = runtime.reload_interval {
                 if let Ok(mut next) = self.next_reload.lock() {
@@ -396,7 +422,7 @@ impl HttpTlsProvider {
         if let Ok(mut guard) = self.hooks.write() {
             guard.push(hook);
         } else {
-            tracing::warn!("TLS reload hooks poisoned; unable to register new hook");
+            tracing::warn!("{}", messages::infra::http::tls::HOOKS_REGISTER_POISONED);
         }
     }
 
@@ -410,7 +436,7 @@ impl HttpTlsProvider {
         let hooks = match self.hooks.read() {
             Ok(guard) => guard.clone(),
             Err(_) => {
-                tracing::warn!("TLS reload hooks poisoned; skipping notifications");
+                tracing::warn!("{}", messages::infra::http::tls::HOOKS_NOTIFY_POISONED);
                 return;
             }
         };
@@ -421,7 +447,7 @@ impl HttpTlsProvider {
             }))
             .is_err()
             {
-                tracing::warn!("TLS reload hook panicked");
+                tracing::warn!("{}", messages::infra::http::tls::HOOK_PANICKED);
             }
         }
     }
@@ -435,17 +461,10 @@ impl Drop for HttpTlsProvider {
 
 fn load_server_config_sync(runtime: &HttpTlsRuntime) -> Result<RustlsServerConfig> {
     let cert_bytes = std::fs::read(&runtime.cert_path).with_context(|| {
-        format!(
-            "konnte Zertifikat '{}' nicht lesen",
-            runtime.cert_path.display()
-        )
+        messages::infra::http::tls::cert_read_failed(runtime.cert_path.display())
     })?;
-    let key_bytes = std::fs::read(&runtime.key_path).with_context(|| {
-        format!(
-            "konnte Schlüssel '{}' nicht lesen",
-            runtime.key_path.display()
-        )
-    })?;
+    let key_bytes = std::fs::read(&runtime.key_path)
+        .with_context(|| messages::infra::http::tls::key_read_failed(runtime.key_path.display()))?;
     build_server_config(runtime, cert_bytes, key_bytes)
 }
 
@@ -454,10 +473,10 @@ async fn load_server_config_async(runtime: &HttpTlsRuntime) -> Result<RustlsServ
     let key_path = runtime.key_path.clone();
     let cert_bytes = tokio::fs::read(&cert_path)
         .await
-        .with_context(|| format!("konnte Zertifikat '{}' nicht lesen", cert_path.display()))?;
+        .with_context(|| messages::infra::http::tls::cert_read_failed(cert_path.display()))?;
     let key_bytes = tokio::fs::read(&key_path)
         .await
-        .with_context(|| format!("konnte Schlüssel '{}' nicht lesen", key_path.display()))?;
+        .with_context(|| messages::infra::http::tls::key_read_failed(key_path.display()))?;
     build_server_config(runtime, cert_bytes, key_bytes)
 }
 
@@ -468,26 +487,26 @@ fn build_server_config(
 ) -> Result<RustlsServerConfig> {
     let mut cert_reader: &[u8] = &cert_bytes;
     let cert_chain = certs(&mut cert_reader)
-        .map_err(|_| anyhow!("Zertifikat konnte nicht geparst werden"))?
+        .map_err(|_| anyhow!(messages::infra::http::tls::CERT_PARSE_FAILED))?
         .into_iter()
         .map(rustls::Certificate)
         .collect::<Vec<_>>();
     if cert_chain.is_empty() {
-        return Err(anyhow!("keine Zertifikatsketten gefunden"));
+        return Err(anyhow!(messages::infra::http::tls::CERT_CHAIN_EMPTY));
     }
 
     let mut key_reader: &[u8] = &key_bytes;
     let mut keys = pkcs8_private_keys(&mut key_reader)
-        .map_err(|_| anyhow!("Privater Schlüssel (PKCS8) konnte nicht geparst werden"))?;
+        .map_err(|_| anyhow!(messages::infra::http::tls::PKCS8_PARSE_FAILED))?;
     if keys.is_empty() {
         key_reader = &key_bytes;
         keys = rsa_private_keys(&mut key_reader)
-            .map_err(|_| anyhow!("Privater Schlüssel (RSA) konnte nicht geparst werden"))?;
+            .map_err(|_| anyhow!(messages::infra::http::tls::RSA_PARSE_FAILED))?;
     }
     let key = keys
         .into_iter()
         .next()
-        .ok_or_else(|| anyhow!("keinen privaten Schlüssel gefunden"))?;
+        .ok_or_else(|| anyhow!(messages::infra::http::tls::PRIVATE_KEY_MISSING))?;
     let key = rustls::PrivateKey(key);
 
     let cipher_suites = resolve_cipher_suites(&runtime.cipher_suites)?;
@@ -519,7 +538,10 @@ fn resolve_cipher_suites(names: &[String]) -> Result<Vec<rustls::SupportedCipher
             "TLS_CHACHA20_POLY1305_SHA256" => {
                 Ok(rustls::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256)
             }
-            other => Err(anyhow!(format!("unbekannte Cipher Suite: {other}"))),
+            other => Err(anyhow!(
+                "{}",
+                messages::infra::http::tls::cipher_suite_unknown(other)
+            )),
         })
         .collect()
 }

@@ -10,6 +10,7 @@ use chacha20poly1305::XChaCha20Poly1305;
 use rand_core::{OsRng, RngCore};
 
 use super::error::CryptoError;
+use crate::utils::messages::security::crypto as crypto_messages;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CipherAlgorithm {
@@ -50,7 +51,9 @@ impl TryFrom<&str> for CipherAlgorithm {
         match value.trim().to_ascii_lowercase().as_str() {
             "aes-gcm" | "aes256-gcm" | "aes_256_gcm" => Ok(CipherAlgorithm::Aes256Gcm),
             "xchacha20-poly1305" | "xchacha20poly1305" => Ok(CipherAlgorithm::XChaCha20Poly1305),
-            other => Err(CryptoError::UnsupportedAlgorithm(other.to_string())),
+            other => Err(CryptoError::UnsupportedAlgorithm(
+                crypto_messages::unsupported_cipher_algorithm(other),
+            )),
         }
     }
 }
@@ -70,7 +73,9 @@ impl AeadRegistry {
         if self.allowed.contains(&algorithm) {
             Ok(())
         } else {
-            Err(CryptoError::UnsupportedAlgorithm(algorithm.to_string()))
+            Err(CryptoError::UnsupportedAlgorithm(
+                crypto_messages::unsupported_cipher_algorithm(algorithm.as_str()),
+            ))
         }
     }
 

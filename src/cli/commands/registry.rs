@@ -12,7 +12,7 @@ use std::sync::Arc;
 #[async_trait]
 pub trait CommandOutput: Send + Sync + 'static {
     fn push(&self, text: &str);
-    
+
     /// Flush all pending output (for async implementations)
     async fn flush_all(&self) {
         // Default: no-op for sync implementations
@@ -281,6 +281,12 @@ pub enum ShellEnvironment {
 pub struct CommandRegistry {
     commands: BTreeMap<String, CommandEntry>,
     alias_index: BTreeMap<String, String>,
+}
+
+impl Default for CommandRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CommandRegistry {

@@ -10,6 +10,11 @@
       "id": "Fenrir Team",
       "algorithm": "ed25519",
       "public_key": "E//neJQIOVpYpARioskKo5R9588coW3a27JHekngDio="
+    },
+    {
+      "id": "module-registry",
+      "algorithm": "ed25519",
+      "public_key": "E//neJQIOVpYpARioskKo5R9588coW3a27JHekngDio="
     }
   ]
 }

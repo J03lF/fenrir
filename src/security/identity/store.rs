@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::RwLock;
 
 use base64::Engine;
@@ -14,6 +15,7 @@ use uuid::Uuid;
 
 use super::IdentityError;
 use crate::security::auth::Role;
+use crate::utils::messages::security::identity as identity_messages;
 
 const STORE_VERSION: u32 = 1;
 
@@ -44,13 +46,15 @@ impl IdentityKeyMaterial {
         let mut bytes = [0u8; 64];
         bytes[..32].copy_from_slice(&self.secret_key);
         bytes[32..].copy_from_slice(&self.public_key);
-        Keypair::from_bytes(&bytes)
-            .map_err(|_| IdentityError::Invalid("stored key material invalid".into()))
+        Keypair::from_bytes(&bytes).map_err(|_| {
+            IdentityError::Invalid(identity_messages::stored_key_material_invalid().into())
+        })
     }
 
     pub fn verifying_key(&self) -> Result<PublicKey, IdentityError> {
-        PublicKey::from_bytes(&self.public_key)
-            .map_err(|_| IdentityError::Invalid("stored public key invalid".into()))
+        PublicKey::from_bytes(&self.public_key).map_err(|_| {
+            IdentityError::Invalid(identity_messages::stored_public_key_invalid().into())
+        })
     }
 
     pub fn secret_bytes(&self) -> &[u8; 32] {
@@ -106,22 +110,25 @@ impl IdentityStore {
             let bytes = fs::read(&path)?;
             let persisted: PersistedIdentityState = serde_json::from_slice(&bytes)?;
             if persisted.version != STORE_VERSION {
-                return Err(IdentityError::Invalid(format!(
-                    "unsupported identity store version {}",
-                    persisted.version
-                )));
+                return Err(IdentityError::Invalid(
+                    identity_messages::unsupported_identity_store_version(persisted.version),
+                ));
             }
             if persisted.environment != environment {
-                return Err(IdentityError::Invalid(format!(
-                    "identity store environment mismatch (expected {}, found {})",
-                    environment, persisted.environment
-                )));
+                return Err(IdentityError::Invalid(
+                    identity_messages::identity_store_environment_mismatch(
+                        &environment,
+                        &persisted.environment,
+                    ),
+                ));
             }
             if persisted.instance_id != instance_id {
-                return Err(IdentityError::Invalid(format!(
-                    "identity store instance mismatch (expected {}, found {})",
-                    instance_id, persisted.instance_id
-                )));
+                return Err(IdentityError::Invalid(
+                    identity_messages::identity_store_instance_mismatch(
+                        &instance_id,
+                        &persisted.instance_id,
+                    ),
+                ));
             }
 
             IdentityState {
@@ -141,8 +148,9 @@ impl IdentityStore {
         } else {
             let mut secret_bytes = [0u8; 32];
             OsRng.fill_bytes(&mut secret_bytes);
-            let secret = SecretKey::from_bytes(&secret_bytes)
-                .map_err(|_| IdentityError::Invalid("unable to initialize secret key".into()))?;
+            let secret = SecretKey::from_bytes(&secret_bytes).map_err(|_| {
+                IdentityError::Invalid(identity_messages::unable_to_initialize_secret_key().into())
+            })?;
             let public: PublicKey = (&secret).into();
             let created_at = OffsetDateTime::now_utc();
             IdentityState {
@@ -329,7 +337,11 @@ impl TryFrom<PersistedIdentityUser> for IdentityUserRecord {
         Ok(Self {
             user_id: value.user_id,
             display_name: value.display_name,
-            role: role_from_str(&value.role)?,
+            role: Role::from_str(&value.role).map_err(|err| {
+                IdentityError::Invalid(identity_messages::unknown_role_in_identity_store(
+                    err.value(),
+                ))
+            })?,
             created_at: value.created_at,
             last_issued_at: value.last_issued_at,
             token_count: value.token_count,
@@ -392,24 +404,15 @@ impl TryFrom<PersistedIdentityToken> for IdentityTokenRecord {
     }
 }
 
-fn role_from_str(value: &str) -> Result<Role, IdentityError> {
-    match value {
-        "admin" => Ok(Role::Admin),
-        "operator" => Ok(Role::Operator),
-        "viewer" => Ok(Role::Viewer),
-        other => Err(IdentityError::Invalid(format!(
-            "unknown role '{other}' in identity store"
-        ))),
-    }
-}
-
 fn decode_key_component(encoded: &str) -> Result<[u8; 32], IdentityError> {
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(encoded.as_bytes())
-        .map_err(|err| IdentityError::Invalid(format!("invalid base64: {err}")))?;
+        .map_err(|err| {
+            IdentityError::Invalid(identity_messages::invalid_base64(&err.to_string()))
+        })?;
     if bytes.len() != 32 {
         return Err(IdentityError::Invalid(
-            "unexpected key length in identity store".into(),
+            identity_messages::unexpected_key_length_in_store().into(),
         ));
     }
     let mut data = [0u8; 32];

@@ -5,6 +5,7 @@ use anyhow::Result;
 
 use crate::config::{AppConfig, DbConnectionSettings};
 use crate::domain::db::{DbAdminPort, DbEngine};
+use crate::utils::messages::infra::db as infra_db_messages;
 
 use super::adapters;
 
@@ -34,5 +35,9 @@ fn build_postgres(settings: &DbConnectionSettings) -> Result<adapters::postgres:
 }
 
 fn warn_unimplemented(engine: DbEngine, _settings: &DbConnectionSettings) {
-    tracing::warn!(engine = %engine, "DB-Adapter noch nicht implementiert");
+    tracing::warn!(
+        engine = %engine,
+        "{}",
+        infra_db_messages::manager::ADAPTER_UNIMPLEMENTED
+    );
 }

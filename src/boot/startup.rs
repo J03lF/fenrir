@@ -1,0 +1,501 @@
+use std::env;
+use std::fs;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::anyhow;
+use tokio::runtime::Handle;
+use tokio::task;
+use tracing::{info, warn};
+
+use crate::audit::{AuditLog, InMemoryAuditLog};
+use crate::config::{self, ModuleRuntimeEngine};
+use crate::domain::db::DbEngine;
+use crate::infra::http::{HttpServer, HTTP_SERVICE_ID};
+use crate::infra::modules::{
+    CompositeModuleRegistry, Ed25519ModuleVerifier, FilesystemModuleStorage, HttpModuleRegistry,
+    InProcessModuleRuntime, LocalModuleRegistry, ProcessModuleRuntime,
+};
+use crate::infra::{db, logging, telemetry};
+use crate::security::identity::build_identity_provider;
+use crate::security::manager::{AuditSink, SecurityManager};
+use crate::services::scheduler::install_default_jobs;
+use crate::services::{
+    AppServices, DbShellService, ModuleService, SchedulerService, ServiceDescriptor, ServiceKind,
+    ServiceRegistry, ServiceStatus, ServiceTag, SessionService,
+};
+use crate::utils::messages::boot::{
+    errors as boot_errors, logs as boot_logs, runtime as runtime_messages,
+    services::{
+        descriptions as service_descriptions, names as service_names, notes as service_notes,
+    },
+};
+
+use super::context::BootContext;
+use super::error::{wrap_boot, BootError, BootErrorCode};
+use super::helpers::{resolve_runtime_dir, resolve_storage_path};
+use super::registry::register_registry_toggle_service;
+
+pub fn boot() -> Result<BootContext, BootError> {
+    let cfg = config::load().map_err(BootError::from_config)?;
+    let runtime_dir = resolve_runtime_dir();
+    env::set_var(
+        "FENRIR_RUNTIME_DIR",
+        runtime_dir.to_string_lossy().into_owned(),
+    );
+    let logging_handle = wrap_boot(
+        logging::init_tracing(&cfg),
+        BootErrorCode::LoggingInit,
+        boot_errors::LOGGING_INIT_FAILED,
+    )?;
+    wrap_boot(
+        telemetry::init(&cfg),
+        BootErrorCode::TelemetryInit,
+        boot_errors::TELEMETRY_INIT_FAILED,
+    )?;
+
+    let adapters = wrap_boot(
+        db::manager::build_adapters(&cfg),
+        BootErrorCode::DbAdapters,
+        boot_errors::DB_ADAPTERS_FAILED,
+    )?;
+    let default_engine = wrap_boot(
+        cfg.db.default_engine.parse::<DbEngine>(),
+        BootErrorCode::DbEngine,
+        boot_errors::DEFAULT_DB_ENGINE_INVALID,
+    )?;
+    let registry = Arc::new(ServiceRegistry::new());
+    registry.register(
+        ServiceDescriptor::new(
+            "db-shell",
+            service_names::DB_SHELL,
+            service_descriptions::DB_SHELL,
+            ServiceKind::Infrastructure,
+        )
+        .with_tags(&[ServiceTag::Platform]),
+        ServiceStatus::Active,
+        Some(service_notes::READY.to_string()),
+    );
+    info!("{}", boot_logs::CORE_SERVICES_REGISTERED);
+    registry.register(
+        ServiceDescriptor::new(
+            "ssh-server",
+            service_names::SSH,
+            service_descriptions::SSH,
+            ServiceKind::Transport,
+        )
+        .with_tags(&[ServiceTag::Core, ServiceTag::Platform])
+        .critical(),
+        ServiceStatus::Starting,
+        Some(service_notes::INITIALIZATION.to_string()),
+    );
+    registry.register(
+        ServiceDescriptor::new(
+            "cli-shell",
+            service_names::CLI,
+            service_descriptions::CLI,
+            ServiceKind::Cli,
+        )
+        .with_tags(&[ServiceTag::Auxiliary]),
+        ServiceStatus::Standby,
+        Some(service_notes::WAITING_FOR_INVOKE.to_string()),
+    );
+    registry.register(
+        ServiceDescriptor::new(
+            "module-runtime",
+            service_names::MODULE_RUNTIME,
+            service_descriptions::MODULE_RUNTIME,
+            ServiceKind::Infrastructure,
+        )
+        .with_tags(&[ServiceTag::Core, ServiceTag::Platform])
+        .critical(),
+        ServiceStatus::Standby,
+        Some(service_notes::NO_MODULES.to_string()),
+    );
+    registry.register(
+        ServiceDescriptor::new(
+            "scheduler",
+            service_names::SCHEDULER,
+            service_descriptions::SCHEDULER,
+            ServiceKind::BackgroundJob,
+        )
+        .with_tags(&[ServiceTag::Core])
+        .critical(),
+        ServiceStatus::Starting,
+        Some(service_notes::INITIALIZATION.to_string()),
+    );
+
+    registry.register(
+        ServiceDescriptor::new(
+            HTTP_SERVICE_ID,
+            service_names::HTTP,
+            service_descriptions::HTTP,
+            ServiceKind::Transport,
+        )
+        .with_tags(&[ServiceTag::Core]),
+        if cfg.server.enable_http {
+            ServiceStatus::Standby
+        } else {
+            ServiceStatus::Stopped
+        },
+        Some(if cfg.server.enable_http {
+            service_notes::HTTP_WAITING.to_string()
+        } else {
+            service_notes::HTTP_DISABLED.to_string()
+        }),
+    );
+
+    telemetry::attach_service_registry(Arc::clone(&registry));
+    telemetry::start_system_metrics_sampler(&cfg);
+
+    wrap_boot(
+        crate::infra::telemetry::register_readiness_probe("services", {
+            let registry = Arc::clone(&registry);
+            move || {
+                registry
+                    .snapshot()
+                    .into_iter()
+                    .all(|svc| !matches!(svc.status, ServiceStatus::Failed))
+            }
+        }),
+        BootErrorCode::TelemetryProbe,
+        boot_errors::TELEMETRY_PROBE_FAILED,
+    )?;
+
+    let db_shell_service = Arc::new(wrap_boot(
+        DbShellService::new(default_engine, adapters),
+        BootErrorCode::DbShellInit,
+        boot_errors::DB_SHELL_INIT_FAILED,
+    )?);
+    let scheduler_service = Arc::new(SchedulerService::new(Arc::clone(&registry)));
+    scheduler_service.start();
+    info!("{}", boot_logs::SCHEDULER_STARTED);
+
+    let audit_capacity = if cfg.audit.enabled {
+        cfg.audit.buffer_capacity()
+    } else {
+        0
+    };
+    let audit_log: Arc<dyn AuditLog> = if audit_capacity == 0 {
+        Arc::new(InMemoryAuditLog::new(audit_capacity))
+    } else {
+        let configured_path = cfg
+            .audit
+            .storage
+            .path()
+            .expect("audit storage path validated during configuration");
+        let resolved_path = resolve_storage_path(&runtime_dir, configured_path);
+        if let Some(parent) = resolved_path.parent() {
+            wrap_boot(
+                fs::create_dir_all(parent),
+                BootErrorCode::AuditInit,
+                boot_errors::AUDIT_DIR_PREP_FAILED,
+            )?;
+        }
+        let retention_hours = cfg.audit.storage.retention_hours().unwrap_or(24);
+        let retention_seconds = retention_hours.saturating_mul(3600);
+        let persist_seconds = cfg.audit.storage.persist_interval_seconds().unwrap_or(30);
+        let log_path = resolved_path.clone();
+        let audit = wrap_boot(
+            InMemoryAuditLog::with_persistence(
+                audit_capacity,
+                resolved_path,
+                Duration::from_secs(retention_seconds),
+                Duration::from_secs(persist_seconds),
+            )
+            .map_err(anyhow::Error::new),
+            BootErrorCode::AuditInit,
+            boot_errors::AUDIT_PERSISTENCE_INIT_FAILED,
+        )?;
+        tracing::info!(
+            path = %log_path.display(),
+            capacity = audit_capacity,
+            retention_hours,
+            persist_seconds,
+            "{}",
+            boot_logs::AUDIT_PERSISTENCE_CONFIGURED
+        );
+        Arc::new(audit)
+    };
+
+    let remote_registry: Arc<dyn crate::domain::module::ModuleRegistryPort> = Arc::new(wrap_boot(
+        HttpModuleRegistry::new(&cfg.modules.registry),
+        BootErrorCode::ModuleRegistry,
+        boot_errors::MODULE_REGISTRY_INIT_FAILED,
+    )?);
+
+    let mut registry_chain: Vec<Arc<dyn crate::domain::module::ModuleRegistryPort>> = Vec::new();
+    if cfg.modules.registry.allow_offline {
+        if let Some(local) = LocalModuleRegistry::try_new(&cfg.modules.registry) {
+            let local_arc: Arc<dyn crate::domain::module::ModuleRegistryPort> = Arc::new(local);
+            registry_chain.push(local_arc);
+        }
+    }
+    registry_chain.push(Arc::clone(&remote_registry));
+
+    let module_registry: Arc<dyn crate::domain::module::ModuleRegistryPort> =
+        if registry_chain.len() == 1 {
+            registry_chain
+                .pop()
+                .expect("registry_chain contains remote registry")
+        } else {
+            Arc::new(CompositeModuleRegistry::new(registry_chain))
+        };
+    let module_storage: Arc<dyn crate::domain::module::ModuleStoragePort> = Arc::new(wrap_boot(
+        FilesystemModuleStorage::new(&cfg.modules.storage),
+        BootErrorCode::ModuleStorage,
+        boot_errors::MODULE_STORAGE_INIT_FAILED,
+    )?);
+    let module_verifier: Arc<dyn crate::domain::module::ModuleVerifierPort> = Arc::new(wrap_boot(
+        Ed25519ModuleVerifier::from_config(&cfg.modules.trust),
+        BootErrorCode::ModuleVerifier,
+        boot_errors::MODULE_VERIFIER_INIT_FAILED,
+    )?);
+    let module_runtime: Arc<dyn crate::domain::module::ModuleRuntimePort> =
+        match cfg.modules.runtime.engine {
+            ModuleRuntimeEngine::Process => {
+                let runtime_state_dir =
+                    PathBuf::from(&cfg.modules.storage.install_dir).join("runtime");
+                let runtime = Arc::new(ProcessModuleRuntime::new(
+                    Arc::clone(&module_storage),
+                    runtime_state_dir,
+                ));
+
+                if let Ok(handle) = Handle::try_current() {
+                    let handle_clone = handle.clone();
+                    let runtime_for_load = Arc::clone(&runtime);
+                    let load_result = task::block_in_place(move || {
+                        handle_clone.block_on(runtime_for_load.load_state())
+                    });
+                    if let Err(err) = load_result {
+                        warn!(
+                            error = %err,
+                            "{}",
+                            runtime_messages::STATE_RESTORE_FAILED
+                        );
+                    }
+                } else {
+                    warn!("{}", runtime_messages::HANDLE_MISSING);
+                }
+
+                runtime
+            }
+            ModuleRuntimeEngine::Stub => {
+                Arc::new(InProcessModuleRuntime::new(Arc::clone(&module_storage)))
+            }
+        };
+    let dev_sources = cfg
+        .modules
+        .dev_sources
+        .base_path
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let module_service = Arc::new(ModuleService::new(
+        Arc::clone(&module_registry),
+        Arc::clone(&module_storage),
+        Arc::clone(&module_verifier),
+        Arc::clone(&module_runtime),
+        Arc::clone(&registry),
+        dev_sources,
+    ));
+
+    let services = Arc::new(AppServices::new(
+        Arc::clone(&db_shell_service),
+        Arc::clone(&scheduler_service),
+        Arc::clone(&registry),
+        Arc::clone(&audit_log),
+    ));
+    services.set_logging_handle(logging_handle.clone());
+    services
+        .attach_module_service(Arc::clone(&module_service))
+        .map_err(|err| {
+            BootError::new(
+                BootErrorCode::ModuleAttach,
+                boot_errors::MODULE_SERVICE_ATTACH_FAILED,
+                anyhow!(err),
+            )
+        })?;
+    let audit_sink: Arc<dyn AuditSink> = Arc::clone(&services) as Arc<dyn AuditSink>;
+    let identity_service = wrap_boot(
+        build_identity_provider(&cfg, runtime_dir.as_path(), Arc::clone(&audit_sink)),
+        BootErrorCode::IdentityInit,
+        boot_errors::IDENTITY_PROVIDER_INIT_FAILED,
+    )?;
+    services
+        .attach_identity(Arc::clone(&identity_service))
+        .map_err(|err| {
+            BootError::new(
+                BootErrorCode::IdentityInit,
+                boot_errors::IDENTITY_SERVICE_ATTACH_FAILED,
+                anyhow!(err),
+            )
+        })?;
+    registry.register(
+        ServiceDescriptor::new(
+            "identity-service",
+            service_names::IDENTITY,
+            service_descriptions::IDENTITY,
+            ServiceKind::Security,
+        )
+        .with_tags(&[ServiceTag::Core]),
+        ServiceStatus::Active,
+        Some(service_notes::READY.to_string()),
+    );
+    let security_manager = Arc::new(wrap_boot(
+        SecurityManager::new(&cfg.security, audit_sink),
+        BootErrorCode::SecurityInit,
+        boot_errors::SECURITY_MANAGER_INIT_FAILED,
+    )?);
+    services
+        .attach_security(Arc::clone(&security_manager))
+        .map_err(|err| {
+            BootError::new(
+                BootErrorCode::SecurityAttach,
+                boot_errors::SECURITY_MANAGER_ATTACH_FAILED,
+                anyhow!(err),
+            )
+        })?;
+    let session_service = Arc::new(SessionService::new(Arc::clone(&security_manager)));
+    services
+        .attach_session(Arc::clone(&session_service))
+        .map_err(|err| {
+            BootError::new(
+                BootErrorCode::SessionAttach,
+                boot_errors::SESSION_SERVICE_ATTACH_FAILED,
+                anyhow!(err),
+            )
+        })?;
+    registry.set_status(
+        "module-runtime",
+        ServiceStatus::Active,
+        Some(service_notes::MODULE_READY.to_string()),
+    );
+
+    wrap_boot(
+        install_default_jobs(
+            &scheduler_service,
+            Arc::clone(&registry),
+            Arc::clone(&db_shell_service),
+        ),
+        BootErrorCode::SchedulerJobs,
+        boot_errors::SCHEDULER_JOBS_INSTALL_FAILED,
+    )?;
+
+    let http_server = Arc::new(wrap_boot(
+        HttpServer::new(&cfg, Arc::clone(&registry), Arc::downgrade(&services)),
+        BootErrorCode::HttpServerInit,
+        boot_errors::HTTP_SERVER_INIT_FAILED,
+    )?);
+    {
+        let http_start = Arc::clone(&http_server);
+        let http_stop = Arc::clone(&http_server);
+        services.register_dynamic_service(
+            HTTP_SERVICE_ID,
+            move || {
+                let server = Arc::clone(&http_start);
+                Box::pin(async move { HttpServer::start(&server).await })
+            },
+            move |force| {
+                let server = Arc::clone(&http_stop);
+                Box::pin(async move { HttpServer::stop(&server, force).await })
+            },
+        );
+    }
+    {
+        let scheduler_for_start = Arc::clone(&scheduler_service);
+        let scheduler_for_stop = Arc::clone(&scheduler_service);
+        let registry_for_jobs = Arc::clone(&registry);
+        let db_shell_for_jobs = Arc::clone(&db_shell_service);
+        services.register_dynamic_service(
+            "scheduler",
+            move || {
+                let scheduler = Arc::clone(&scheduler_for_start);
+                let registry = Arc::clone(&registry_for_jobs);
+                let db_shell = Arc::clone(&db_shell_for_jobs);
+                Box::pin(async move {
+                    if scheduler.start() {
+                        install_default_jobs(&scheduler, registry, db_shell)
+                            .map_err(|err| anyhow!(err))?;
+                        Ok(true)
+                    } else {
+                        Ok(false)
+                    }
+                })
+            },
+            move |_force| {
+                let scheduler = Arc::clone(&scheduler_for_stop);
+                Box::pin(async move { Ok(scheduler.stop()) })
+            },
+        );
+    }
+    {
+        let db_shell_start = Arc::clone(&db_shell_service);
+        let db_shell_stop = Arc::clone(&db_shell_service);
+        let registry_for_db_shell = Arc::clone(&registry);
+        let registry_for_db_shell_stop = Arc::clone(&registry);
+        services.register_dynamic_service(
+            "db-shell",
+            move || {
+                let service = Arc::clone(&db_shell_start);
+                let registry = Arc::clone(&registry_for_db_shell);
+                Box::pin(async move {
+                    if service.is_enabled() {
+                        Ok(false)
+                    } else {
+                        service.set_enabled(true);
+                        registry.set_status(
+                            "db-shell",
+                            ServiceStatus::Active,
+                            Some(service_notes::DB_SHELL_ENABLED.to_string()),
+                        );
+                        Ok(true)
+                    }
+                })
+            },
+            move |_force| {
+                let service = Arc::clone(&db_shell_stop);
+                let registry = Arc::clone(&registry_for_db_shell_stop);
+                Box::pin(async move {
+                    if !service.is_enabled() {
+                        Ok(false)
+                    } else {
+                        service.set_enabled(false);
+                        registry.set_status(
+                            "db-shell",
+                            ServiceStatus::Standby,
+                            Some(service_notes::DB_SHELL_DISABLED.to_string()),
+                        );
+                        Ok(true)
+                    }
+                })
+            },
+        );
+    }
+    register_registry_toggle_service(
+        &services,
+        &registry,
+        "cli-shell",
+        ServiceStatus::Standby,
+        service_notes::CLI_READY_FOR_SESSIONS,
+        ServiceStatus::Stopped,
+        service_notes::CLI_DISABLED,
+    );
+
+    crate::infra::telemetry::mark_ready();
+
+    tracing::info!(
+        app = %cfg.app.name,
+        version = %cfg.app.version,
+        "{}",
+        boot_logs::BOOT_COMPLETE
+    );
+    Ok(BootContext {
+        config: Arc::new(cfg),
+        services,
+        http_server,
+        logging: logging_handle,
+    })
+}

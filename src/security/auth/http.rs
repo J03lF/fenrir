@@ -66,7 +66,7 @@ impl ControlPlaneAuthorizer {
                 let token = bearer.ok_or(AuthError::Unauthorized)?.trim();
                 for entry in tokens {
                     if entry.secret.as_bytes().ct_eq(token.as_bytes()).into() {
-                        return Ok(entry.role.clone());
+                        return Ok(entry.role);
                     }
                 }
                 Err(AuthError::Forbidden)

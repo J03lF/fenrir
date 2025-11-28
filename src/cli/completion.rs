@@ -122,10 +122,10 @@ impl ContextualCompleter {
                 results.push(shape.name.to_string());
             }
             for alias in shape.aliases {
-                if prefix.is_empty() || alias.starts_with(prefix) {
-                    if !results.iter().any(|entry| entry == alias) {
-                        results.push((*alias).to_string());
-                    }
+                if (prefix.is_empty() || alias.starts_with(prefix))
+                    && !results.iter().any(|entry| entry == alias)
+                {
+                    results.push((*alias).to_string());
                 }
             }
         }
@@ -199,7 +199,7 @@ impl ContextualCompleter {
         }
 
         if let Some(scope) = self.detect_subcommand_scope(shape, state) {
-            if state.active_index <= scope.command_offset - 1 {
+            if state.active_index < scope.command_offset {
                 return self.subcommand_matches(shape, state.prefix);
             }
             return self.complete_arguments(
@@ -223,10 +223,10 @@ impl ContextualCompleter {
                 suggestions.push(sub.name.to_string());
             }
             for alias in sub.aliases {
-                if prefix.is_empty() || alias.starts_with(prefix) {
-                    if !suggestions.iter().any(|entry| entry == alias) {
-                        suggestions.push((*alias).to_string());
-                    }
+                if (prefix.is_empty() || alias.starts_with(prefix))
+                    && !suggestions.iter().any(|entry| entry == alias)
+                {
+                    suggestions.push((*alias).to_string());
                 }
             }
         }
@@ -252,7 +252,7 @@ impl ContextualCompleter {
     fn find_shape(&self, token: &str) -> Option<&CommandShape> {
         self.shapes
             .iter()
-            .find(|shape| shape.name == token || shape.aliases.iter().any(|alias| *alias == token))
+            .find(|shape| shape.name == token || shape.aliases.contains(&token))
     }
 
     fn find_subcommand<'a>(
@@ -263,7 +263,7 @@ impl ContextualCompleter {
         shape
             .subcommands
             .iter()
-            .find(|sub| sub.name == token || sub.aliases.iter().any(|alias| *alias == token))
+            .find(|sub| sub.name == token || sub.aliases.contains(&token))
     }
 
     fn complete_arguments(
@@ -417,10 +417,8 @@ fn parse_state<'a>(line: &'a str, pos: usize) -> CompletionState<'a> {
     let mut tokens: Vec<&str> = head.split_whitespace().collect();
     let prefix = if has_trailing {
         ""
-    } else if let Some(last) = tokens.pop() {
-        last
     } else {
-        ""
+        tokens.pop().unwrap_or_default()
     };
 
     let token_start = pos.saturating_sub(prefix.len());

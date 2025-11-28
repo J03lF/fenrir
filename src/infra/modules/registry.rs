@@ -22,6 +22,7 @@ use crate::domain::module::{
     ModuleSearchQuery, ModuleSignatureDescriptor, ModuleSummary, ModuleVersion, ProgressCallback,
     SignatureAlgorithm,
 };
+use crate::utils::messages;
 
 const DEFAULT_CONTENT_TYPE: &str = "application/gzip";
 const USER_AGENT_VALUE: &str = "fenrir-runtime/registry-client";
@@ -52,7 +53,7 @@ impl HttpModuleRegistry {
     pub fn new(config: &ModuleRegistrySection) -> Result<Self, ModuleRegistryInitError> {
         if config.url.trim().is_empty() {
             return Err(ModuleRegistryInitError::InvalidConfig(
-                "modules.registry.url must not be empty".to_string(),
+                messages::infra::modules::registry::URL_EMPTY.to_string(),
             ));
         }
 
@@ -65,7 +66,7 @@ impl HttpModuleRegistry {
             if !token.is_empty() {
                 let value = HeaderValue::from_str(&format!("Bearer {}", token)).map_err(|_| {
                     ModuleRegistryInitError::InvalidConfig(
-                        "modules.registry.auth_token contains invalid characters".to_string(),
+                        messages::infra::modules::registry::AUTH_TOKEN_INVALID_CHARS.to_string(),
                     )
                 })?;
                 headers.insert(AUTHORIZATION, value);
@@ -81,16 +82,17 @@ impl HttpModuleRegistry {
             "modules.registry.tls.ca_cert_path",
         )? {
             let pem = fs::read(&ca_path).map_err(|err| {
-                ModuleRegistryInitError::InvalidConfig(format!(
-                    "Failed to read {}: {}",
-                    ca_path, err
-                ))
+                ModuleRegistryInitError::InvalidConfig(
+                    messages::infra::modules::registry::ca_cert_read_failed(
+                        Path::new(&ca_path).display(),
+                        err,
+                    ),
+                )
             })?;
             let cert = Certificate::from_pem(&pem).map_err(|err| {
-                ModuleRegistryInitError::InvalidConfig(format!(
-                    "modules.registry.tls.ca_cert_path is not valid PEM: {}",
-                    err
-                ))
+                ModuleRegistryInitError::InvalidConfig(
+                    messages::infra::modules::registry::ca_cert_invalid_pem(err),
+                )
             })?;
             client_builder = client_builder.add_root_certificate(cert);
         }
@@ -106,23 +108,26 @@ impl HttpModuleRegistry {
 
         if client_cert.is_some() ^ client_key.is_some() {
             return Err(ModuleRegistryInitError::InvalidConfig(
-                "modules.registry.tls.client_cert_path and client_key_path must be provided together"
-                    .to_string(),
+                messages::infra::modules::registry::CLIENT_CERT_KEY_MISMATCH.to_string(),
             ));
         }
 
         if let (Some(cert_path), Some(key_path)) = (client_cert.as_ref(), client_key.as_ref()) {
             let cert_pem = fs::read(cert_path).map_err(|err| {
-                ModuleRegistryInitError::InvalidConfig(format!(
-                    "Failed to read client certificate {}: {}",
-                    cert_path, err
-                ))
+                ModuleRegistryInitError::InvalidConfig(
+                    messages::infra::modules::registry::client_cert_read_failed(
+                        Path::new(cert_path).display(),
+                        err,
+                    ),
+                )
             })?;
             let key_pem = fs::read(key_path).map_err(|err| {
-                ModuleRegistryInitError::InvalidConfig(format!(
-                    "Failed to read client key {}: {}",
-                    key_path, err
-                ))
+                ModuleRegistryInitError::InvalidConfig(
+                    messages::infra::modules::registry::client_key_read_failed(
+                        Path::new(key_path).display(),
+                        err,
+                    ),
+                )
             })?;
             let mut identity_pem = Vec::with_capacity(cert_pem.len() + key_pem.len() + 1);
             identity_pem.extend_from_slice(&cert_pem);
@@ -132,10 +137,9 @@ impl HttpModuleRegistry {
             identity_pem.extend_from_slice(&key_pem);
 
             let identity = Identity::from_pem(&identity_pem).map_err(|err| {
-                ModuleRegistryInitError::InvalidConfig(format!(
-                    "modules.registry.tls.client_cert_path/client_key_path could not be combined into a valid identity: {}",
-                    err
-                ))
+                ModuleRegistryInitError::InvalidConfig(
+                    messages::infra::modules::registry::client_identity_build_failed(err),
+                )
             })?;
             client_builder = client_builder.identity(identity);
         }
@@ -157,16 +161,17 @@ impl HttpModuleRegistry {
         }
 
         let base = Url::parse(&self.base_url).map_err(|err| {
-            ModuleRegistryError::Unavailable(format!("Invalid registry base URL: {}", err))
+            ModuleRegistryError::Unavailable(messages::infra::modules::registry::base_url_invalid(
+                err,
+            ))
         })?;
 
         base.join(url)
             .map(|joined| joined.to_string())
             .map_err(|err| {
-                ModuleRegistryError::Protocol(format!(
-                    "Failed to resolve download URL '{}': {}",
-                    url, err
-                ))
+                ModuleRegistryError::Protocol(
+                    messages::infra::modules::registry::download_url_resolve_failed(url, err),
+                )
             })
     }
 
@@ -177,50 +182,53 @@ impl HttpModuleRegistry {
         progress: Option<ProgressCallback>,
     ) -> Result<ModuleBundle, ModuleRegistryError> {
         use futures::StreamExt;
-        
+
         let mut current_manifest = manifest.clone();
         let mut retried_same = false;
         let mut refreshed_manifest = false;
 
         loop {
             let download_url = self.resolve_url(&current_manifest.artifact.download_url)?;
-            
+
             if let Some(ref callback) = progress {
                 callback(ModuleProgress::DownloadStarted {
                     module_id: current_manifest.id.clone(),
                     total_bytes: None,
                 });
             }
-            
+
             let response = self.client.get(download_url).send().await.map_err(|err| {
-                ModuleRegistryError::Unavailable(format!("Failed to download artifact: {}", err))
+                ModuleRegistryError::Unavailable(
+                    messages::infra::modules::registry::artifact_download_failed(err),
+                )
             })?;
 
             if !response.status().is_success() {
-                return Err(ModuleRegistryError::Unavailable(format!(
-                    "Download failed with status: {}",
-                    response.status()
-                )));
+                return Err(ModuleRegistryError::Unavailable(
+                    messages::infra::modules::registry::download_status_failed(response.status()),
+                ));
             }
 
             let total_bytes = response.content_length();
             let mut downloaded_bytes = 0u64;
             let mut archive_data = Vec::new();
-            
+
             if let Some(total) = total_bytes {
                 archive_data.reserve(total as usize);
             }
 
             let mut stream = response.bytes_stream();
-            
+
             while let Some(chunk_result) = stream.next().await {
                 let chunk = chunk_result.map_err(|err| {
-                    ModuleRegistryError::Unavailable(format!("Failed to read chunk: {}", err))
+                    ModuleRegistryError::Unavailable(
+                        messages::infra::modules::registry::download_chunk_failed(err),
+                    )
                 })?;
-                
+
                 archive_data.extend_from_slice(&chunk);
                 downloaded_bytes += chunk.len() as u64;
-                
+
                 if let Some(ref callback) = progress {
                     callback(ModuleProgress::DownloadProgress {
                         module_id: current_manifest.id.clone(),
@@ -229,7 +237,7 @@ impl HttpModuleRegistry {
                     });
                 }
             }
-            
+
             if let Some(ref callback) = progress {
                 callback(ModuleProgress::DownloadCompleted {
                     module_id: current_manifest.id.clone(),
@@ -239,7 +247,9 @@ impl HttpModuleRegistry {
 
             let expected_checksum =
                 hex::decode(&current_manifest.artifact.checksum.hash).map_err(|err| {
-                    ModuleRegistryError::Protocol(format!("Invalid checksum encoding: {}", err))
+                    ModuleRegistryError::Protocol(
+                        messages::infra::modules::registry::checksum_invalid_encoding(err),
+                    )
                 })?;
 
             let mut hasher = sha2::Sha256::new();
@@ -251,8 +261,9 @@ impl HttpModuleRegistry {
                     module = %current_manifest.id,
                     version = %current_manifest.version,
                     expected = %current_manifest.artifact.checksum.hash,
-                    actual = %hex::encode(&actual_checksum),
-                    "artifact checksum mismatch, attempting manifest refresh"
+                    actual = %hex::encode(actual_checksum),
+                    "{}",
+                    messages::infra::modules::registry::CHECKSUM_MISMATCH_RETRY
                 );
 
                 if allow_refresh && !retried_same {
@@ -260,7 +271,8 @@ impl HttpModuleRegistry {
                     tracing::info!(
                         module = %current_manifest.id,
                         version = %current_manifest.version,
-                        "retrying download once after checksum mismatch"
+                        "{}",
+                        messages::infra::modules::registry::CHECKSUM_MISMATCH_RETRY_ONCE
                     );
                     continue;
                 }
@@ -278,7 +290,8 @@ impl HttpModuleRegistry {
                                     tracing::info!(
                                         module = %fresh_manifest.id,
                                         version = %fresh_manifest.version,
-                                        "retrying download with refreshed manifest"
+                                        "{}",
+                                        messages::infra::modules::registry::CHECKSUM_MISMATCH_MANIFEST_REFRESH
                                     );
                                     current_manifest = fresh_manifest;
                                     refreshed_manifest = true;
@@ -291,7 +304,8 @@ impl HttpModuleRegistry {
                                     module = %current_manifest.id,
                                     version = %current_manifest.version,
                                     error = %err,
-                                    "failed to refresh manifest after checksum mismatch"
+                                    "{}",
+                                    messages::infra::modules::registry::CHECKSUM_REFRESH_FAILED
                                 );
                             }
                         }
@@ -299,7 +313,7 @@ impl HttpModuleRegistry {
                 }
 
                 return Err(ModuleRegistryError::Protocol(
-                    "Downloaded artifact checksum mismatch".to_string(),
+                    messages::infra::modules::registry::CHECKSUM_MISMATCH_FATAL.to_string(),
                 ));
             }
 
@@ -309,10 +323,9 @@ impl HttpModuleRegistry {
                 BASE64
                     .decode(current_manifest.signature.signature.as_bytes())
                     .map_err(|err| {
-                        ModuleRegistryError::Protocol(format!(
-                            "Invalid signature encoding: {}",
-                            err
-                        ))
+                        ModuleRegistryError::Protocol(
+                            messages::infra::modules::registry::signature_invalid_encoding(err),
+                        )
                     })?
             };
 
@@ -344,18 +357,21 @@ impl ModuleRegistryPort for HttpModuleRegistry {
         };
 
         let response = self.client.get(&url).send().await.map_err(|err| {
-            ModuleRegistryError::Unavailable(format!("Failed to query registry: {}", err))
+            ModuleRegistryError::Unavailable(
+                messages::infra::modules::registry::registry_query_failed(err),
+            )
         })?;
 
         if !response.status().is_success() {
-            return Err(ModuleRegistryError::Unavailable(format!(
-                "Registry returned status: {}",
-                response.status()
-            )));
+            return Err(ModuleRegistryError::Unavailable(
+                messages::infra::modules::registry::registry_status_failed(response.status()),
+            ));
         }
 
         let modules: Vec<RegistryModule> = response.json().await.map_err(|err| {
-            ModuleRegistryError::Protocol(format!("Failed to parse registry response: {}", err))
+            ModuleRegistryError::Protocol(
+                messages::infra::modules::registry::registry_response_parse_failed(err),
+            )
         })?;
 
         let summaries = modules
@@ -388,7 +404,9 @@ impl ModuleRegistryPort for HttpModuleRegistry {
         let url = format!("{}/v1/modules/{}", base, urlencoding::encode(id.as_str()));
 
         let response = self.client.get(&url).send().await.map_err(|err| {
-            ModuleRegistryError::Unavailable(format!("Failed to fetch module: {}", err))
+            ModuleRegistryError::Unavailable(
+                messages::infra::modules::registry::module_fetch_failed(err),
+            )
         })?;
 
         if response.status().as_u16() == 404 {
@@ -398,14 +416,15 @@ impl ModuleRegistryPort for HttpModuleRegistry {
         }
 
         if !response.status().is_success() {
-            return Err(ModuleRegistryError::Unavailable(format!(
-                "Registry returned status: {}",
-                response.status()
-            )));
+            return Err(ModuleRegistryError::Unavailable(
+                messages::infra::modules::registry::registry_status_failed(response.status()),
+            ));
         }
 
         let module: RegistryModule = response.json().await.map_err(|err| {
-            ModuleRegistryError::Protocol(format!("Failed to parse module payload: {}", err))
+            ModuleRegistryError::Protocol(
+                messages::infra::modules::registry::module_payload_parse_failed(err),
+            )
         })?;
 
         let target_version = if let Some(requested) = version {
@@ -418,12 +437,14 @@ impl ModuleRegistryPort for HttpModuleRegistry {
                 })?
         } else {
             module.versions.first().ok_or_else(|| {
-                ModuleRegistryError::Protocol(format!("Module {} has no published versions", id))
+                ModuleRegistryError::Protocol(
+                    messages::infra::modules::registry::module_no_versions(id),
+                )
             })?
         };
 
         let parsed_version = Version::parse(&target_version.version).map_err(|err| {
-            ModuleRegistryError::Protocol(format!("Invalid version string: {}", err))
+            ModuleRegistryError::Protocol(messages::infra::modules::registry::version_invalid(err))
         })?;
 
         let fenrir_req = parse_fenrir_version_req(
@@ -499,7 +520,9 @@ impl ModuleRegistryPort for HttpModuleRegistry {
         );
 
         let response = self.client.get(&url).send().await.map_err(|err| {
-            ModuleRegistryError::Unavailable(format!("Failed to query compatibility tree: {}", err))
+            ModuleRegistryError::Unavailable(
+                messages::infra::modules::registry::compatibility_query_failed(err),
+            )
         })?;
 
         if response.status().as_u16() == 404 {
@@ -507,14 +530,15 @@ impl ModuleRegistryPort for HttpModuleRegistry {
         }
 
         if !response.status().is_success() {
-            return Err(ModuleRegistryError::Unavailable(format!(
-                "Compatibility API returned status: {}",
-                response.status()
-            )));
+            return Err(ModuleRegistryError::Unavailable(
+                messages::infra::modules::registry::compatibility_status_failed(response.status()),
+            ));
         }
 
         let payload: CompatibilityTreeResponse = response.json().await.map_err(|err| {
-            ModuleRegistryError::Protocol(format!("Invalid compatibility response: {}", err))
+            ModuleRegistryError::Protocol(
+                messages::infra::modules::registry::compatibility_response_invalid(err),
+            )
         })?;
 
         if payload.tree.is_null() {
@@ -522,7 +546,9 @@ impl ModuleRegistryPort for HttpModuleRegistry {
         }
 
         let root: CompatibilityNodeDto = serde_json::from_value(payload.tree).map_err(|err| {
-            ModuleRegistryError::Protocol(format!("Invalid compatibility tree format: {}", err))
+            ModuleRegistryError::Protocol(
+                messages::infra::modules::registry::compatibility_tree_invalid(err),
+            )
         })?;
 
         let mut targets = HashMap::new();
@@ -581,7 +607,11 @@ impl LocalModuleRegistry {
             if path.exists() {
                 valid.push(path);
             } else {
-                warn!(root = %path.display(), "offline registry root missing, skipping");
+                warn!(
+                    root = %path.display(),
+                    "{}",
+                    messages::infra::modules::registry::OFFLINE_ROOT_MISSING
+                );
             }
         }
 
@@ -602,9 +632,19 @@ impl LocalModuleRegistry {
                 match LocalManifestFile::load(root) {
                     Ok(file) => match LocalModule::from_manifest(root, file) {
                         Ok(module) => modules.push(module),
-                        Err(err) => warn!(root = %root.display(), error = %err, "invalid local module manifest"),
+                        Err(err) => warn!(
+                            root = %root.display(),
+                            error = %err,
+                            "{}",
+                            messages::infra::modules::registry::LOCAL_MANIFEST_INVALID
+                        ),
                     },
-                    Err(err) => warn!(root = %root.display(), error = %err, "failed to load local module manifest"),
+                    Err(err) => warn!(
+                        root = %root.display(),
+                        error = %err,
+                        "{}",
+                        messages::infra::modules::registry::LOCAL_MANIFEST_LOAD_FAILED
+                    ),
                 }
             }
             Ok(modules)
@@ -619,7 +659,7 @@ impl LocalModuleRegistry {
         modules
             .into_iter()
             .find(|module| module.id.to_string() == needle)
-            .ok_or_else(|| ModuleRegistryError::NotFound { module: needle })
+            .ok_or(ModuleRegistryError::NotFound { module: needle })
     }
 }
 
@@ -661,15 +701,18 @@ impl ModuleRegistryPort for LocalModuleRegistry {
     ) -> Result<ModuleManifest, ModuleRegistryError> {
         let module = self.find_module(id).await?;
         let selected = module.pick_version(version)?;
-        Ok(selected.into_manifest(&module))
+        Ok(selected.as_manifest(&module))
     }
 
     async fn download(
         &self,
         manifest: &ModuleManifest,
     ) -> Result<ModuleBundle, ModuleRegistryError> {
-        let module_id = ModuleId::new(&manifest.id)
-            .map_err(|err| ModuleRegistryError::Protocol(format!("invalid module id: {err}")))?;
+        let module_id = ModuleId::new(&manifest.id).map_err(|err| {
+            ModuleRegistryError::Protocol(messages::infra::modules::registry::module_id_invalid(
+                err,
+            ))
+        })?;
         let module = self.find_module(&module_id).await?;
         let version = module.pick_version(Some(&ModuleVersion(manifest.version.clone())))?;
         version.load_bundle(&module).await
@@ -689,7 +732,9 @@ impl ModuleRegistryPort for LocalModuleRegistry {
         fenrir_version: &str,
     ) -> Result<Vec<DistributionTarget>, ModuleRegistryError> {
         let parsed = Version::parse(fenrir_version).map_err(|err| {
-            ModuleRegistryError::Protocol(format!("invalid Fenrir version: {}", err))
+            ModuleRegistryError::Protocol(
+                messages::infra::modules::registry::fenrir_version_invalid(err),
+            )
         })?;
         let modules = self.load_modules().await?;
         let mut targets = Vec::new();
@@ -720,7 +765,8 @@ impl CompositeModuleRegistry {
         sources.retain(|_| true);
         debug_assert!(
             !sources.is_empty(),
-            "composite registry requires at least one source"
+            "{}",
+            messages::infra::modules::registry::COMPOSITE_NO_SOURCES
         );
         Self { sources }
     }
@@ -787,7 +833,10 @@ impl ModuleRegistryPort for CompositeModuleRegistry {
         progress: Option<ProgressCallback>,
     ) -> Result<ModuleBundle, ModuleRegistryError> {
         for source in &self.sources {
-            match source.download_with_progress(manifest, progress.clone()).await {
+            match source
+                .download_with_progress(manifest, progress.clone())
+                .await
+            {
                 Ok(bundle) => return Ok(bundle),
                 Err(ModuleRegistryError::NotFound { .. }) => continue,
                 Err(err) => return Err(err),
@@ -848,20 +897,31 @@ impl LocalModule {
             match LocalModuleVersion::from_entry(root, &manifest.id, version) {
                 Ok(entry) => versions.push(entry),
                 Err(err) => {
-                    warn!(module = %module_id, error = %err, "skipping local module version")
+                    warn!(
+                        module = %module_id,
+                        error = %err,
+                        "{}",
+                        messages::infra::modules::registry::LOCAL_VERSION_SKIP
+                    )
                 }
             }
         }
 
         if versions.is_empty() {
-            return Err(LocalManifestError::InvalidField("no valid versions".into()));
+            return Err(LocalManifestError::InvalidField(
+                messages::infra::modules::registry::LOCAL_MANIFEST_NO_VALID_VERSIONS.into(),
+            ));
         }
 
         let latest = versions
             .iter()
             .max_by(|a, b| a.version.cmp(&b.version))
             .cloned()
-            .ok_or_else(|| LocalManifestError::InvalidField("no versions".into()))?;
+            .ok_or_else(|| {
+                LocalManifestError::InvalidField(
+                    messages::infra::modules::registry::LOCAL_MANIFEST_NO_VERSIONS.into(),
+                )
+            })?;
 
         Ok(Self {
             id: module_id,
@@ -927,9 +987,11 @@ impl LocalModuleVersion {
         if !artifact_path.exists() {
             return Err(LocalManifestError::MissingArtifact(artifact_path));
         }
-        let checksum_hex = version
-            .checksum
-            .ok_or_else(|| LocalManifestError::InvalidField("checksum missing".into()))?;
+        let checksum_hex = version.checksum.ok_or_else(|| {
+            LocalManifestError::InvalidField(
+                messages::infra::modules::registry::LOCAL_MANIFEST_CHECKSUM_MISSING.into(),
+            )
+        })?;
         let fenrir_req =
             parse_fenrir_version_req(version.fenrir_min.as_deref(), version.fenrir_max.as_deref());
         let published_at = version.released.and_then(|raw| parse_timestamp(&raw).ok());
@@ -946,7 +1008,7 @@ impl LocalModuleVersion {
         })
     }
 
-    fn into_manifest(&self, module: &LocalModule) -> ModuleManifest {
+    fn as_manifest(&self, module: &LocalModule) -> ModuleManifest {
         ModuleManifest {
             id: module.id.to_string(),
             version: self.version.0.clone(),
@@ -978,36 +1040,44 @@ impl LocalModuleVersion {
     }
 
     async fn load_bundle(&self, module: &LocalModule) -> Result<ModuleBundle, ModuleRegistryError> {
-        let manifest = self.into_manifest(module);
+        let manifest = self.as_manifest(module);
         let artifact_path = self.artifact_path.clone();
         let checksum_hex = self.checksum_hex.clone();
         let signature = self.signature.clone().unwrap_or_default();
 
         task::spawn_blocking(move || {
             let bytes = std::fs::read(&artifact_path).map_err(|err| {
-                ModuleRegistryError::Unavailable(format!(
-                    "failed to read artifact {}: {}",
-                    artifact_path.display(),
-                    err
-                ))
+                ModuleRegistryError::Unavailable(
+                    messages::infra::modules::registry::artifact_read_failed(
+                        artifact_path.display(),
+                        err,
+                    ),
+                )
             })?;
             let expected = hex::decode(checksum_hex).map_err(|err| {
-                ModuleRegistryError::Protocol(format!("invalid checksum hex: {err}"))
+                ModuleRegistryError::Protocol(
+                    messages::infra::modules::registry::artifact_checksum_invalid_hex(err),
+                )
             })?;
             let mut hasher = Sha256::new();
             hasher.update(&bytes);
             let digest = hasher.finalize();
             if digest.as_slice() != expected.as_slice() {
-                return Err(ModuleRegistryError::Protocol(format!(
-                    "checksum mismatch for artifact {}",
-                    artifact_path.display()
-                )));
+                return Err(ModuleRegistryError::Protocol(
+                    messages::infra::modules::registry::artifact_checksum_mismatch(
+                        artifact_path.display(),
+                    ),
+                ));
             }
             let signature_bytes = if signature.is_empty() {
                 Vec::new()
             } else {
                 BASE64.decode(signature.as_bytes()).map_err(|err| {
-                    ModuleRegistryError::Protocol(format!("invalid signature encoding: {err}"))
+                    ModuleRegistryError::Protocol(
+                        messages::infra::modules::registry::artifact_signature_invalid_encoding(
+                            err,
+                        ),
+                    )
                 })?
             };
             Ok(ModuleBundle {
@@ -1069,16 +1139,29 @@ enum LocalManifestError {
 impl std::fmt::Display for LocalManifestError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LocalManifestError::Io(path, err) => {
-                write!(f, "cannot read {}: {}", path.display(), err)
-            }
-            LocalManifestError::Parse(path, err) => {
-                write!(f, "cannot parse {}: {}", path.display(), err)
-            }
-            LocalManifestError::InvalidField(msg) => write!(f, "invalid manifest: {msg}"),
-            LocalManifestError::MissingArtifact(path) => {
-                write!(f, "missing artifact at {}", path.display())
-            }
+            LocalManifestError::Io(path, err) => write!(
+                f,
+                "{}",
+                messages::infra::modules::registry::local_manifest_read_failed(path.display(), err)
+            ),
+            LocalManifestError::Parse(path, err) => write!(
+                f,
+                "{}",
+                messages::infra::modules::registry::local_manifest_parse_failed(
+                    path.display(),
+                    err
+                )
+            ),
+            LocalManifestError::InvalidField(msg) => write!(
+                f,
+                "{}",
+                messages::infra::modules::registry::local_manifest_invalid_field(msg)
+            ),
+            LocalManifestError::MissingArtifact(path) => write!(
+                f,
+                "{}",
+                messages::infra::modules::registry::local_manifest_artifact_missing(path.display())
+            ),
         }
     }
 }
@@ -1152,10 +1235,9 @@ fn resolve_secret(raw: &str) -> Result<String, ModuleRegistryInitError> {
     }
     if let Some(env) = trimmed.strip_prefix("env:") {
         std::env::var(env.trim()).map_err(|_| {
-            ModuleRegistryInitError::InvalidConfig(format!(
-                "Environment variable {} referenced in modules.registry.auth_token is not set",
-                env.trim()
-            ))
+            ModuleRegistryInitError::InvalidConfig(
+                messages::infra::modules::registry::auth_token_env_missing(env.trim()),
+            )
         })
     } else {
         Ok(trimmed.to_string())
@@ -1170,10 +1252,9 @@ fn resolve_optional_path(
         let resolved = resolve_secret(value)?;
         let trimmed = resolved.trim();
         if trimmed.is_empty() {
-            return Err(ModuleRegistryInitError::InvalidConfig(format!(
-                "{} must not resolve to an empty value",
-                field
-            )));
+            return Err(ModuleRegistryInitError::InvalidConfig(
+                messages::infra::modules::registry::resolved_empty(field),
+            ));
         }
         Ok(Some(trimmed.to_string()))
     } else {

@@ -28,6 +28,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+      - name: Clippy lint
+        run: cargo clippy --workspace --all-features -- -D warnings
       - name: Test release build
         run: cargo test --workspace --all-features
       - name: Build release artifacts

@@ -9,6 +9,7 @@ use crate::security::crypto::{
     AeadRegistry, Argon2Kdf, CipherAlgorithm, CryptoError, KeyDerivationFunction, PasswordHashing,
 };
 use crate::security::session::{Session, SessionError, SessionStore};
+use crate::utils::messages::security::manager as security_manager_messages;
 
 pub trait AuditSink: Send + Sync {
     fn record(&self, event: AuditEvent) -> Result<(), crate::audit::AuditError>;
@@ -38,7 +39,7 @@ impl SecurityManager {
         }
         if algorithms.is_empty() {
             return Err(SecurityError::Crypto(CryptoError::UnsupportedAlgorithm(
-                "no ciphers configured".into(),
+                security_manager_messages::no_ciphers_configured(),
             )));
         }
         let aead = AeadRegistry::new(&algorithms);
@@ -90,7 +91,7 @@ impl SecurityManager {
     }
 
     pub fn issue_session(&self, user_id: &str, role: Role) -> Result<Session, SecurityError> {
-        let session = self.sessions.create_session(user_id, role.clone())?;
+        let session = self.sessions.create_session(user_id, role)?;
         self.record_event(
             AuditEvent::builder()
                 .actor(AuditActor::User {
@@ -139,7 +140,7 @@ impl SecurityManager {
     pub fn ensure_role(&self, token: &str, required: Role) -> Result<Session, AuthError> {
         match self.sessions.validate(token) {
             Ok(session) => {
-                if session.role.satisfies(required.clone()) {
+                if session.role.satisfies(required) {
                     self.record_event(
                         AuditEvent::builder()
                             .actor(AuditActor::User {
@@ -208,13 +209,13 @@ impl SecurityManager {
         result: &Result<Role, AuthError>,
     ) {
         let (outcome, granted_role) = match result {
-            Ok(role) if role.satisfies(required.clone()) => (AuditOutcome::Success, Some(role)),
+            Ok(role) if role.satisfies(required) => (AuditOutcome::Success, Some(role)),
             Ok(role) => (AuditOutcome::Denied, Some(role)),
             Err(_) => (AuditOutcome::Denied, None),
         };
         let fingerprint = token
             .map(|value| self.token_fingerprint(value))
-            .unwrap_or_else(|| "<none>".to_string());
+            .unwrap_or_else(|| security_manager_messages::missing_token_placeholder().to_string());
         let mut metadata = AuditMetadata::default().insert("required_role", required.as_str());
         if let Some(role) = granted_role {
             metadata = metadata.insert("granted_role", role.as_str());
@@ -233,21 +234,29 @@ impl SecurityManager {
         match builder.build() {
             Ok(event) => {
                 if let Err(err) = self.audit.record(event) {
-                    warn!(error = %err, "failed to append security audit event");
+                    warn!(
+                        error = %err,
+                        "{}",
+                        security_manager_messages::audit_append_failed()
+                    );
                 }
             }
             Err(err) => {
-                warn!(error = %err, "failed to build security audit event");
+                warn!(
+                    error = %err,
+                    "{}",
+                    security_manager_messages::audit_build_failed()
+                );
             }
         }
     }
 
     fn token_fingerprint(&self, token: &str) -> String {
         if token.is_empty() {
-            return "<empty>".to_string();
+            return security_manager_messages::empty_token_placeholder().to_string();
         }
         let prefix_len = token.len().min(6);
-        format!("{}…({} bytes)", &token[..prefix_len], token.len())
+        security_manager_messages::fingerprint_display(&token[..prefix_len], token.len())
     }
 }
 

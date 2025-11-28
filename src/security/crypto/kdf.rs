@@ -5,6 +5,7 @@ use argon2::{
 use rand_core::{OsRng, RngCore};
 
 use crate::config::KdfConfig;
+use crate::utils::messages::security::crypto as crypto_messages;
 
 use super::error::CryptoError;
 
@@ -32,7 +33,7 @@ impl Argon2Kdf {
         let memory_kib = cfg
             .memory_mib
             .checked_mul(1024)
-            .ok_or_else(|| CryptoError::Derivation("memory parameter overflow".into()))?;
+            .ok_or_else(|| CryptoError::Derivation(crypto_messages::memory_parameter_overflow()))?;
         builder.m_cost(memory_kib);
         builder.t_cost(cfg.iterations);
         builder.p_cost(cfg.parallelism);
@@ -53,11 +54,9 @@ impl Argon2Kdf {
 impl KeyDerivationFunction for Argon2Kdf {
     fn derive_key(&self, password: &[u8], salt: &[u8]) -> Result<Vec<u8>, CryptoError> {
         if salt.len() < self.salt_length {
-            return Err(CryptoError::Derivation(format!(
-                "provided salt smaller than configured length ({} < {})",
-                salt.len(),
-                self.salt_length
-            )));
+            return Err(CryptoError::Derivation(
+                crypto_messages::salt_length_too_short(salt.len(), self.salt_length),
+            ));
         }
         let mut output = vec![0u8; self.output_length];
         self.argon2

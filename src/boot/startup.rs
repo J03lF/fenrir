@@ -22,8 +22,8 @@ use crate::security::identity::build_identity_provider;
 use crate::security::manager::{AuditSink, SecurityManager};
 use crate::services::scheduler::install_default_jobs;
 use crate::services::{
-    AppServices, DbShellService, ModuleService, SchedulerService, ServiceDescriptor, ServiceKind,
-    ServiceRegistry, ServiceStatus, ServiceTag, SessionService,
+    AppServices, DbShellService, ModulePortAllocator, ModuleService, SchedulerService,
+    ServiceDescriptor, ServiceKind, ServiceRegistry, ServiceStatus, ServiceTag, SessionService,
 };
 use crate::utils::messages::boot::{
     errors as boot_errors, logs as boot_logs, runtime as runtime_messages,
@@ -252,14 +252,13 @@ pub fn boot() -> Result<BootContext, BootError> {
         BootErrorCode::ModuleVerifier,
         boot_errors::MODULE_VERIFIER_INIT_FAILED,
     )?);
+    let runtime_state_dir = PathBuf::from(&cfg.modules.storage.install_dir).join("runtime");
     let module_runtime: Arc<dyn crate::domain::module::ModuleRuntimePort> =
         match cfg.modules.runtime.engine {
             ModuleRuntimeEngine::Process => {
-                let runtime_state_dir =
-                    PathBuf::from(&cfg.modules.storage.install_dir).join("runtime");
                 let runtime = Arc::new(ProcessModuleRuntime::new(
                     Arc::clone(&module_storage),
-                    runtime_state_dir,
+                    runtime_state_dir.clone(),
                 ));
 
                 if let Ok(handle) = Handle::try_current() {
@@ -285,6 +284,11 @@ pub fn boot() -> Result<BootContext, BootError> {
                 Arc::new(InProcessModuleRuntime::new(Arc::clone(&module_storage)))
             }
         };
+    let port_allocator = Arc::new(ModulePortAllocator::new(
+        cfg.modules.runtime.ports.strategy,
+        cfg.modules.runtime.ports.range,
+        runtime_state_dir.join("ports.json"),
+    ));
     let dev_sources = cfg
         .modules
         .dev_sources
@@ -299,6 +303,7 @@ pub fn boot() -> Result<BootContext, BootError> {
         Arc::clone(&module_verifier),
         Arc::clone(&module_runtime),
         Arc::clone(&registry),
+        Arc::clone(&port_allocator),
         dev_sources,
     ));
 

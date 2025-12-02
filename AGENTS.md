@@ -92,6 +92,7 @@ src/
   - `audit.enabled`, `audit.buffer_capacity`, `audit.storage.path|retention_hours|persist_interval_seconds`.
   - `cli.prompt_theme`, `modules.registry` (URL, Auth-Token via ENV, TLS-Settings), `modules.storage`, `modules.trust.require_signature|allowed_signers|keyring_path`.
   - `modules.registry.offline_dirs` (lokale Modul-Repositories), `modules.runtime.engine ∈ {process, stub}`, `modules.bootstrap` (Auto-Install-Liste – Default `fenrir-api`).
+  - `[modules.runtime.ports]` definiert die Port-Strategie (`dynamic` vergibt einen freien Port aus `range`, `fixed` respektiert Modul-Config). Fenrir persistiert diese Zuteilungen unter `runtime/ports.json`.
 - Fehlende Secrets/ENV triggern `BootErrorCode::ConfigMissingSecret`.
 
 # Boot & Diagnostics
@@ -119,6 +120,7 @@ src/
 - Dev-Builds können ohne manuelles Kopieren genutzt werden: `[modules.dev_sources]` mit `base_path` setzen, `synchronize module` packt dann automatisch den Build unter `<base_path>/<module-id>` (Override per `.fenrir-dev.toml` möglich) und markiert das Modul als `local_override`.
 - `.fenrir-dev.toml` **oder** `.fenrir/config.toml` im Modul-Repo können `output = ".."` und `[[services]]` definieren (mindestens `id` + `endpoint`, optional `name|description|kind`). `sync module` (bzw. Auto-Detection bei gesetztem `[modules.dev_sources]`) stoppt dann den Modulprozess und registriert die angegebenen Dev-Service-Endpunkte über den `ServiceRegistry`, statt ein Artifact zu packen; `release module` stellt wieder auf Distribution zurück.
 - Module laufen dauerhaft ohne manuelles Start/Stop: CLI/HTTP expose keine manuellen Start/Stop-Kommandos mehr. Fenrir startet installierte Module beim Boot automatisch (`module:<id>` taucht im Service-Registry auf) und Distribution-Imports stoppen/aktualisieren/starts Module inklusive echter Progress-Anzeige. `.fenrir-dev.toml`-Services erscheinen separat als `module:<id>::service`.
+- Laufende Module erhalten automatisch `FENRIR_MODULE_ID`, `FENRIR_SERVICE_ID`, `FENRIR_SERVICE_URI` sowie – bei dynamischer Portvergabe – `FENRIR_SERVICE_PORT` und `FENRIR_SERVICE_ADDR`. Diese ENV-Variablen ersetzen harte Ports/URIs innerhalb der Module.
 - Modul-Katalog: Überblick der benötigten Ticketsystem-Module inklusive Abhängigkeiten in `docs/modules_overview.md` pflegen und bei Änderungen an Erweiterungspunkten (z. B. Ports, Signaturanforderungen) mitziehen.
 
 # Telemetry & Logging

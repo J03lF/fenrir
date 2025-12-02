@@ -70,8 +70,7 @@ pub mod launch {
         format!("[{label}] No log file available.")
     }
 
-    pub const UNSUPPORTED_OS: &str =
-        "no supported terminal integration for this operating system";
+    pub const UNSUPPORTED_OS: &str = "no supported terminal integration for this operating system";
     pub const NO_TERMINAL_LAUNCHER: &str =
         "no supported terminal program found (e.g. gnome-terminal, konsole)";
     pub const WINDOWS_TAB_TITLE: &str = "Fenrir Logs";

@@ -414,8 +414,12 @@ impl ModuleRuntimePort for ProcessModuleRuntime {
         let version = ModuleVersion(installed.manifest.version.clone());
         let module_path = PathBuf::from(&installed.path);
 
-        // Read port from module's config.toml (if it exists)
-        let port = self.read_port_from_config(&module_path).await;
+        // Read port from module's config.toml (if it exists) unless provided
+        let port = if config.port.is_some() {
+            config.port
+        } else {
+            self.read_port_from_config(&module_path).await
+        };
 
         // Setup log file
         let log_dir = self.state_dir.join("logs");

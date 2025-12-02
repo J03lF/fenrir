@@ -66,7 +66,8 @@ pub mod metadata {
 
     pub const RESTART_DESCRIPTION: &str = "Restart services or modules";
     pub const RESTART_SYNOPSIS: &str = "restart <service|module> <target> [--force]";
-    pub const RESTART_USAGE: &str = "Usage: restart service <id|--all> [--force]  (modules are managed automatically)";
+    pub const RESTART_USAGE: &str =
+        "Usage: restart service <id|--all> [--force]  (modules are managed automatically)";
     pub const RESTART_DETAILS: &[&str] = &[
         "restart service <id|--all> [--force] – restart services",
         AUTO_MANAGED_SUMMARY,
@@ -115,9 +116,7 @@ pub mod control {
     }
 
     pub fn core_locked(id: &str) -> String {
-        format!(
-            "Service {id} is part of the core platform and cannot be stopped or restarted."
-        )
+        format!("Service {id} is part of the core platform and cannot be stopped or restarted.")
     }
 
     pub fn operation_failed(err: &str) -> String {

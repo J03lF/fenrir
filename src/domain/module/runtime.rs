@@ -91,6 +91,8 @@ pub enum ModuleRuntimeError {
 
     PortInUse { port: u16 },
 
+    NoAvailablePorts { range_start: u16, range_end: u16 },
+
     Io(String),
 
     InvalidState(String),
@@ -123,6 +125,13 @@ impl std::fmt::Display for ModuleRuntimeError {
             ModuleRuntimeError::PortInUse { port } => {
                 f.write_str(&module_messages::runtime_errors::port_in_use(*port))
             }
+            ModuleRuntimeError::NoAvailablePorts {
+                range_start,
+                range_end,
+            } => f.write_str(&module_messages::runtime_errors::no_available_ports(
+                *range_start,
+                *range_end,
+            )),
             ModuleRuntimeError::Io(message) => {
                 f.write_str(&module_messages::runtime_errors::io_error(message))
             }

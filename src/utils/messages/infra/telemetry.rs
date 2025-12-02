@@ -1,7 +1,6 @@
 use std::fmt;
 
-pub const HISTORY_DIR_CREATE_FAILED: &str =
-    "telemetry history directory could not be created";
+pub const HISTORY_DIR_CREATE_FAILED: &str = "telemetry history directory could not be created";
 pub const HISTORY_WRITE_FAILED: &str = "telemetry history could not be written";
 pub const HISTORY_SERIALIZE_FAILED: &str = "telemetry history could not be serialized";
 pub const HISTORY_PARSE_FAILED: &str = "telemetry history could not be parsed";
@@ -12,15 +11,13 @@ pub const NOT_INITIALIZED: &str = "telemetry has not been initialized yet";
 pub const READINESS_LOCK_POISONED: &str = "readiness probes lock poisoned";
 pub const METRICS_DISABLED_CONFIG: &str =
     "process metrics disabled (telemetry.metrics.enabled=false)";
-pub const METRICS_UNSUPPORTED_OS: &str =
-    "process metrics not supported on this operating system";
+pub const METRICS_UNSUPPORTED_OS: &str = "process metrics not supported on this operating system";
 pub const SYSTEM_METRICS_DISABLED: &str =
     "process metrics disabled (telemetry.system.enabled=false)";
 pub const TELEMETRY_STATE_MISSING: &str =
     "telemetry state not initialized – process metrics will not be collected";
 pub const PROCESS_METRICS_INIT_FAILED: &str = "failed to initialize process metrics";
-pub const PROCESS_METRICS_SAMPLE_INITIAL_FAILED: &str =
-    "initial process metrics sample failed";
+pub const PROCESS_METRICS_SAMPLE_INITIAL_FAILED: &str = "initial process metrics sample failed";
 pub const PROCESS_METRICS_SAMPLE_FAILED: &str = "process metrics sample failed";
 pub const READINESS_PROBE_FAILED: &str = "readiness probe failed";
 pub const PROCESS_MEMORY_SAMPLE_FAILED: &str = "process memory sample failed";

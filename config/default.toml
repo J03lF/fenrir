@@ -125,6 +125,13 @@ accept_invalid_certs = false
 # stub = expiremtel (fake engine)
 engine = "process"
 
+[modules.runtime.ports]
+strategy = "dynamic"
+
+[modules.runtime.ports.range]
+min = 41000
+max = 46000
+
 
 [modules.storage]
 install_dir = "/Users/jfurocket/Documents/personal/modules"

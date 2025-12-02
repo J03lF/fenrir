@@ -184,6 +184,7 @@ pub(super) fn runtime_error_code(err: &ModuleRuntimeError) -> &'static str {
         ModuleRuntimeError::StartFailed { .. } => "start_failed",
         ModuleRuntimeError::StopFailed { .. } => "stop_failed",
         ModuleRuntimeError::PortInUse { .. } => "port_in_use",
+        ModuleRuntimeError::NoAvailablePorts { .. } => "no_available_ports",
         ModuleRuntimeError::InvalidState(_) => "invalid_state",
         ModuleRuntimeError::Io(_) => "io_error",
     }
@@ -207,6 +208,10 @@ fn runtime_error_message(err: &ModuleRuntimeError) -> String {
             msg_modules::runtime_errors::stop_failed(module_id, reason)
         }
         ModuleRuntimeError::PortInUse { port } => msg_modules::runtime_errors::port_in_use(*port),
+        ModuleRuntimeError::NoAvailablePorts {
+            range_start,
+            range_end,
+        } => msg_modules::runtime_errors::no_available_ports(*range_start, *range_end),
         ModuleRuntimeError::InvalidState(msg) => msg_modules::runtime_errors::invalid_state(msg),
         ModuleRuntimeError::Io(msg) => msg_modules::runtime_errors::io_error(msg),
     }

@@ -115,6 +115,10 @@ pub mod runtime_errors {
         format!("port {port} is already in use")
     }
 
+    pub fn no_available_ports(start: u16, end: u16) -> String {
+        format!("no ports available in range {start}-{end}")
+    }
+
     pub fn io_error(details: impl fmt::Display) -> String {
         format!("io error: {details}")
     }

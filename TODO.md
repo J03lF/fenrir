@@ -41,12 +41,12 @@
   - Lesbare, modulare Aufteilung je Schicht (Domain/Security/Services/Infra)
 
 ## Nächste Schritte (priorisiert)
-1. Port-Strategie + Registry-Persistenz + Env-Injection (dynamic ports).
-2. Service-Rollen/Scopes + internal_only Policy im Gateway; delegated tokens.
-3. Ingress-Mounting für Module (HTTP) mit Auth/Rate-Limits.
-4. DB-Connector-Prototyp (IPC/gRPC) + Scoped Tokens.
-5. Lifecycle-API (start/stop/restart) und Health/Quarantäne.
-6. CLI: `modules services` Anzeige und Start/Stop-Commands über Registry.
+- [x] 1. Port-Strategie + Registry-Persistenz + Env-Injection (dynamic ports).
+- [ ] 2. Service-Rollen/Scopes + internal_only Policy im Gateway; delegated tokens.
+- [ ] 3. Ingress-Mounting für Module (HTTP) mit Auth/Rate-Limits.
+- [ ] 4. DB-Connector-Prototyp (IPC/gRPC) + Scoped Tokens.
+- [ ] 5. Lifecycle-API (start/stop/restart) und Health/Quarantäne.
+- [ ] 6. CLI: `modules services` Anzeige und Start/Stop-Commands über Registry.
 
 ## Hinweise
 - Konfig-Pfad: `config/default.toml` → `config/<env>.toml` (FENRIR_ENV/FENRIR_CONFIG_ENV) → `config/local.toml` → `FENRIR_CONFIG_FILE` → ENV Overrides.

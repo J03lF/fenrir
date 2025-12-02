@@ -17,10 +17,7 @@ pub mod problems {
     use std::fmt;
 
     pub fn module_service_unavailable() -> ProblemText {
-        ProblemText::new(
-            "module_service_unavailable",
-            "module service unavailable",
-        )
+        ProblemText::new("module_service_unavailable", "module service unavailable")
     }
 
     pub fn identity_service_unavailable() -> ProblemText {
@@ -75,31 +72,19 @@ pub mod problems {
     }
 
     pub fn identity_list_failed() -> ProblemText {
-        ProblemText::new(
-            "identity_list_failed",
-            "failed to load identity users",
-        )
+        ProblemText::new("identity_list_failed", "failed to load identity users")
     }
 
     pub fn identity_task_failed() -> ProblemText {
-        ProblemText::new(
-            "identity_task_failed",
-            "failed to load identity users",
-        )
+        ProblemText::new("identity_task_failed", "failed to load identity users")
     }
 
     pub fn identity_issue_failed() -> ProblemText {
-        ProblemText::new(
-            "identity_issue_failed",
-            "failed to issue token",
-        )
+        ProblemText::new("identity_issue_failed", "failed to issue token")
     }
 
     pub fn identity_issue_task_failed() -> ProblemText {
-        ProblemText::new(
-            "identity_task_failed",
-            "failed to issue token",
-        )
+        ProblemText::new("identity_task_failed", "failed to issue token")
     }
 
     pub fn service_unknown(id: &str) -> ProblemText {
@@ -152,8 +137,7 @@ pub mod tls {
 
     pub const CERT_PATH_REQUIRED: &str =
         "server.http.tls.cert_path must be set when TLS is enabled";
-    pub const KEY_PATH_REQUIRED: &str =
-        "server.http.tls.key_path must be set when TLS is enabled";
+    pub const KEY_PATH_REQUIRED: &str = "server.http.tls.key_path must be set when TLS is enabled";
     pub const RUNTIME_LOCK_POISONED: &str = "tls runtime lock poisoned";
     pub const WATCHER_LOCK_POISONED: &str = "tls watcher lock poisoned";
     pub const RELOAD_LOCK_POISONED: &str = "tls reload lock poisoned";

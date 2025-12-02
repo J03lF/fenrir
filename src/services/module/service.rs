@@ -8,13 +8,16 @@ use crate::domain::module::{
     ModuleSearchQuery, ModuleServiceError, ModuleStorageError, ModuleStoragePort, ModuleSummary,
     ModuleVerifierPort, ModuleVersion, ProgressCallback,
 };
-use crate::services::{ServiceDescriptorOwned, ServiceKind, ServiceRegistry, ServiceStatus};
+use crate::services::{
+    ServiceDescriptorOwned, ServiceKind, ServiceRegistry, ServiceStatus, ServiceTag,
+};
 use crate::utils::messages::services::module::service::{
     errors as module_service_errors, logs as module_service_logs, notes as module_service_notes,
 };
 use tokio::sync::RwLock;
 
 use super::dev::{DeclaredServicesState, DevOverrideState, DevSourceConfig};
+use super::ports::ModulePortAllocator;
 use super::types::{DistributionAction, DistributionPlanEntry, ModuleUpdateInfo};
 
 #[derive(Clone)]
@@ -24,6 +27,7 @@ pub struct ModuleService {
     pub(super) verifier: Arc<dyn ModuleVerifierPort>,
     pub(super) runtime: Arc<dyn ModuleRuntimePort>,
     pub(super) service_registry: Arc<ServiceRegistry>,
+    pub(super) port_allocator: Arc<ModulePortAllocator>,
     pub(super) dev_sources: Option<DevSourceConfig>,
     pub(super) dev_overrides: Arc<RwLock<HashMap<ModuleId, DevOverrideState>>>,
     pub(super) declared_services: Arc<RwLock<HashMap<ModuleId, DeclaredServicesState>>>,
@@ -36,6 +40,7 @@ impl ModuleService {
         verifier: Arc<dyn ModuleVerifierPort>,
         runtime: Arc<dyn ModuleRuntimePort>,
         service_registry: Arc<ServiceRegistry>,
+        port_allocator: Arc<ModulePortAllocator>,
         dev_sources: Option<PathBuf>,
     ) -> Self {
         Self {
@@ -44,6 +49,7 @@ impl ModuleService {
             verifier,
             runtime,
             service_registry,
+            port_allocator,
             dev_sources: dev_sources.map(DevSourceConfig::new),
             dev_overrides: Arc::new(RwLock::new(HashMap::new())),
             declared_services: Arc::new(RwLock::new(HashMap::new())),
@@ -51,7 +57,7 @@ impl ModuleService {
     }
 
     #[allow(dead_code)]
-    fn module_service_id(module_id: &ModuleId) -> String {
+    pub(super) fn module_service_id(module_id: &ModuleId) -> String {
         format!("module:{}", module_id)
     }
 
@@ -60,17 +66,30 @@ impl ModuleService {
         module_id: &ModuleId,
         manifest: &ModuleManifest,
     ) -> ServiceDescriptorOwned {
-        let _ = (module_id, manifest);
-        ServiceDescriptorOwned::new(
-            String::new(),
-            String::new(),
-            String::new(),
-            ServiceKind::Other,
-        )
+        let service_id = Self::module_service_id(module_id);
+        let name = manifest
+            .title
+            .clone()
+            .unwrap_or_else(|| manifest.id.clone());
+        let description = manifest
+            .description
+            .clone()
+            .unwrap_or_else(|| format!("module {}", manifest.id));
+        ServiceDescriptorOwned::new(service_id, name, description, ServiceKind::Other)
+            .with_tags(vec![ServiceTag::Core])
     }
 
     fn ensure_module_service_entry(&self, module_id: &ModuleId, manifest: &ModuleManifest) {
-        let _ = (module_id, manifest);
+        let service_id = Self::module_service_id(module_id);
+        if self.service_registry.get(&service_id).is_some() {
+            return;
+        }
+        let descriptor = Self::module_service_descriptor(module_id, manifest);
+        self.service_registry.register(
+            descriptor,
+            ServiceStatus::Standby,
+            Some(module_service_notes::INSTALLED.to_string()),
+        );
     }
 
     pub(super) fn update_module_service_status(
@@ -80,11 +99,14 @@ impl ModuleService {
         status: ServiceStatus,
         note: impl Into<Option<String>>,
     ) {
-        let _ = (module_id, manifest, status, note.into());
+        self.ensure_module_service_entry(module_id, manifest);
+        self.service_registry
+            .set_status(&Self::module_service_id(module_id), status, note);
     }
 
     fn unregister_module_service(&self, module_id: &ModuleId) {
-        let _ = module_id;
+        self.service_registry
+            .unregister(&Self::module_service_id(module_id));
     }
 
     pub(super) fn is_unmanaged_module(&self, module_id: &ModuleId) -> bool {
@@ -220,6 +242,7 @@ impl ModuleService {
         self.clear_dev_services_if_any(id).await;
         self.clear_declared_services_if_any(id).await;
         self.unregister_module_service(id);
+        self.port_allocator.release(id).await;
         Ok(())
     }
 

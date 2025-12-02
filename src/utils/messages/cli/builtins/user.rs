@@ -69,13 +69,7 @@ pub mod tokens {
         format!("Identity user '{user}' not found.")
     }
 
-    pub const HEADERS: &[&str] = &[
-        "Token-ID",
-        "Fingerprint",
-        "Issued",
-        "Valid until",
-        "Key-ID",
-    ];
+    pub const HEADERS: &[&str] = &["Token-ID", "Fingerprint", "Issued", "Valid until", "Key-ID"];
 }
 
 pub mod roles {

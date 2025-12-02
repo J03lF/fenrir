@@ -11,7 +11,7 @@ mod types;
 pub use app::AppServices;
 pub use db_shell::DbShellService;
 pub use managed::{ManagedService, ServiceControlError, ServiceControlOutcome};
-pub use module::ModuleService;
+pub use module::{ModulePortAllocator, ModuleService};
 pub use registry::ServiceRegistry;
 pub use scheduler::SchedulerService;
 pub use security::SessionService;

@@ -40,8 +40,7 @@ pub mod synchronize {
 pub mod release {
     pub const DESCRIPTION: &str = "Revert local module changes";
     pub const SYNOPSIS: &str = "release module <name>";
-    pub const DETAILS: &[&str] =
-        &["release module <name> – restore the distribution build"];
+    pub const DETAILS: &[&str] = &["release module <name> – restore the distribution build"];
 }
 
 pub mod uninstall {
@@ -176,10 +175,7 @@ pub mod synchronize_flow {
     }
 
     pub fn dev_services_header(module: &str) -> String {
-        format!(
-            "✓ Module {} switched to dev service endpoints:",
-            module
-        )
+        format!("✓ Module {} switched to dev service endpoints:", module)
     }
 
     pub fn dev_service_entry(
@@ -378,6 +374,10 @@ pub mod runtime_errors {
 
     pub fn port_in_use(port: u16) -> String {
         format!("Port {port} is already in use")
+    }
+
+    pub fn no_available_ports(start: u16, end: u16) -> String {
+        format!("No free module port in range {start}-{end}")
     }
 
     pub fn invalid_state(message: &str) -> String {

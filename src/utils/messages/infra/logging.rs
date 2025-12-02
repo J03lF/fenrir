@@ -8,10 +8,7 @@ pub mod archive {
     }
 
     pub fn rotate_move_failed(from: impl fmt::Display, to: impl fmt::Display) -> String {
-        format!(
-            "failed to move log file into archive: {} -> {}",
-            from, to
-        )
+        format!("failed to move log file into archive: {} -> {}", from, to)
     }
 }
 

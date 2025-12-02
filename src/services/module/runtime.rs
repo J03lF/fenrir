@@ -118,7 +118,7 @@ impl ModuleService {
 
     pub async fn start(
         &self,
-        config: ModuleStartConfig,
+        mut config: ModuleStartConfig,
     ) -> Result<ModuleRuntimeInfo, ModuleRuntimeError> {
         let installed = self
             .storage
@@ -169,6 +169,14 @@ impl ModuleService {
                 });
             }
         }
+
+        let assigned_port = match config.port {
+            Some(port) => Some(port),
+            None => self.port_allocator.assigned_port(&config.module_id).await?,
+        };
+        config.port = assigned_port;
+        config.env_vars =
+            Self::inject_runtime_env(config.env_vars, &config.module_id, assigned_port);
 
         let manifest = installed.manifest.clone();
         let runtime_info = self.runtime.start(config).await?;
@@ -272,7 +280,25 @@ impl ModuleService {
                 restart_count: 1,
             });
         }
-        let info = self.runtime.restart(module_id).await?;
+
+        let restart_count = self
+            .runtime
+            .status(module_id)
+            .await
+            .map(|info| info.restart_count.saturating_add(1))
+            .unwrap_or(0);
+
+        self.stop(module_id).await?;
+
+        let mut info = self
+            .start(ModuleStartConfig {
+                module_id: module_id.clone(),
+                port: None,
+                env_vars: vec![],
+                auto_restart: false,
+            })
+            .await?;
+        info.restart_count = restart_count;
         self.update_module_service_status(
             module_id,
             &installed.manifest,
@@ -292,5 +318,42 @@ impl ModuleService {
         tail: Option<usize>,
     ) -> Result<Vec<String>, ModuleRuntimeError> {
         self.runtime.logs(module_id, tail).await
+    }
+
+    fn inject_runtime_env(
+        mut env: Vec<(String, String)>,
+        module_id: &ModuleId,
+        port: Option<u16>,
+    ) -> Vec<(String, String)> {
+        const RESERVED_KEYS: [&str; 5] = [
+            "FENRIR_MODULE_ID",
+            "FENRIR_SERVICE_ID",
+            "FENRIR_SERVICE_URI",
+            "FENRIR_SERVICE_PORT",
+            "FENRIR_SERVICE_ADDR",
+        ];
+        env.retain(|(key, _)| {
+            !RESERVED_KEYS
+                .iter()
+                .any(|reserved| *reserved == key.as_str())
+        });
+
+        let module_id_str = module_id.to_string();
+        let service_id = Self::module_service_id(module_id);
+
+        env.push(("FENRIR_MODULE_ID".to_string(), module_id_str));
+        env.push(("FENRIR_SERVICE_ID".to_string(), service_id.clone()));
+        env.push((
+            "FENRIR_SERVICE_URI".to_string(),
+            format!("service://{}", service_id),
+        ));
+        if let Some(port) = port {
+            env.push(("FENRIR_SERVICE_PORT".to_string(), port.to_string()));
+            env.push((
+                "FENRIR_SERVICE_ADDR".to_string(),
+                format!("127.0.0.1:{port}"),
+            ));
+        }
+        env
     }
 }

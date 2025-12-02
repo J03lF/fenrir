@@ -62,8 +62,7 @@ pub mod notes {
 }
 
 pub mod descriptions {
-    pub const TELEMETRY_HEALTH_REFRESH: &str =
-        "Refreshes telemetry uptime and scheduler note";
+    pub const TELEMETRY_HEALTH_REFRESH: &str = "Refreshes telemetry uptime and scheduler note";
     pub const SERVICE_HEALTH_SCAN: &str = "Scans the service registry for fault states";
     pub const DB_DEFAULT_PING: &str = "Monitors the default database connection";
 }

@@ -364,12 +364,15 @@ pub struct ModuleRegistrySection {
 pub struct ModuleRuntimeSection {
     #[serde(default = "default_module_runtime_engine")]
     pub engine: ModuleRuntimeEngine,
+    #[serde(default)]
+    pub ports: ModuleRuntimePortSection,
 }
 
 impl Default for ModuleRuntimeSection {
     fn default() -> Self {
         Self {
             engine: default_module_runtime_engine(),
+            ports: ModuleRuntimePortSection::default(),
         }
     }
 }
@@ -379,6 +382,74 @@ impl Default for ModuleRuntimeSection {
 pub enum ModuleRuntimeEngine {
     Process,
     Stub,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ModuleRuntimePortSection {
+    #[serde(default = "default_module_port_strategy")]
+    pub strategy: ModulePortStrategy,
+    #[serde(default = "default_module_port_range")]
+    pub range: ModulePortRange,
+}
+
+impl Default for ModuleRuntimePortSection {
+    fn default() -> Self {
+        Self {
+            strategy: default_module_port_strategy(),
+            range: default_module_port_range(),
+        }
+    }
+}
+
+impl ModuleRuntimePortSection {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        match self.strategy {
+            ModulePortStrategy::Dynamic => {
+                if self.range.min == 0 || self.range.max == 0 {
+                    return Err(ConfigError::Invalid(
+                        "modules.runtime.ports.range min/max must be > 0",
+                    ));
+                }
+                if self.range.min >= self.range.max {
+                    return Err(ConfigError::Invalid(
+                        "modules.runtime.ports.range.min must be less than range.max",
+                    ));
+                }
+                if self.range.max.saturating_sub(self.range.min) < 10 {
+                    return Err(ConfigError::Invalid(
+                        "modules.runtime.ports.range must span at least 10 ports",
+                    ));
+                }
+            }
+            ModulePortStrategy::Fixed => {}
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModulePortStrategy {
+    Dynamic,
+    Fixed,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy)]
+pub struct ModulePortRange {
+    pub min: u16,
+    pub max: u16,
+}
+
+impl ModulePortRange {
+    pub fn contains(&self, port: u16) -> bool {
+        port >= self.min && port <= self.max
+    }
+}
+
+impl Default for ModulePortRange {
+    fn default() -> Self {
+        default_module_port_range()
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -433,6 +504,17 @@ fn default_true() -> bool {
 
 fn default_module_runtime_engine() -> ModuleRuntimeEngine {
     ModuleRuntimeEngine::Process
+}
+
+fn default_module_port_strategy() -> ModulePortStrategy {
+    ModulePortStrategy::Dynamic
+}
+
+fn default_module_port_range() -> ModulePortRange {
+    ModulePortRange {
+        min: 41000,
+        max: 46000,
+    }
 }
 
 fn default_kdf_version() -> u32 {
@@ -763,8 +845,9 @@ impl ModuleStorageSection {
 impl ModuleRuntimeSection {
     pub fn validate(&self) -> Result<(), ConfigError> {
         match self.engine {
-            ModuleRuntimeEngine::Process | ModuleRuntimeEngine::Stub => Ok(()),
+            ModuleRuntimeEngine::Process | ModuleRuntimeEngine::Stub => {}
         }
+        self.ports.validate()
     }
 }
 

@@ -1,61 +1,18 @@
-2025-11-28T19:13:55.396409Z  INFO main ThreadId(01) fenrir::infra::logging::init: file logging initialized log_path=logs/app.log
-2025-11-28T19:13:55.396524Z  INFO main ThreadId(01) fenrir::infra::logging::init: db log file prepared log_path=logs/db.log
-2025-11-28T19:13:55.482009Z  INFO main ThreadId(01) fenrir::boot::startup: core services registered in registry
-2025-11-28T19:13:55.482734Z  INFO main ThreadId(01) fenrir::boot::startup: scheduler service started
-2025-11-28T19:13:55.482858Z  INFO tokio-runtime-worker ThreadId(13) fenrir::services::scheduler::service: scheduler heartbeat loop started
-2025-11-28T19:13:55.484431Z  INFO                 main ThreadId(01) fenrir::boot::startup: audit log persistence configured path=/opt/fenrir/development/tmp/runtime/audit/fenrir-audit-history.json capacity=2048 retention_hours=24 persist_seconds=30
-2025-11-28T19:13:55.491310Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: loaded 2 module states from disk
-2025-11-28T19:13:55.491362Z  WARN                 main ThreadId(01) fenrir::infra::modules::runtime::process: module was running but process no longer exists module_id=fenrir-api pid=85395
-2025-11-28T19:13:55.491370Z  WARN                 main ThreadId(01) fenrir::infra::modules::runtime::process: module was running but process no longer exists module_id=notification-hub pid=85396
-2025-11-28T19:13:55.568305Z  INFO                 main ThreadId(01) fenrir::infra::http::server: HTTP control-plane authentication via identity broker
-2025-11-28T19:13:55.568383Z  INFO                 main ThreadId(01) fenrir::boot::startup: boot complete app=fenrir version=0.1.4
-2025-11-28T19:13:55.572925Z  INFO                 main ThreadId(01) fenrir::boot::bootstrap: bootstrap module ready module=fenrir-api version="latest" status=AlreadyCurrent
-2025-11-28T19:13:55.573865Z  WARN                 main ThreadId(01) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
-2025-11-28T19:13:55.576072Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: module process started module_id=fenrir-api pid=35021 port=None
-2025-11-28T19:13:55.576499Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: module started successfully module_id=fenrir-api pid=Some(35021) port=None
-2025-11-28T19:13:55.577875Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: module process started module_id=notification-hub pid=35022 port=None
-2025-11-28T19:13:55.578038Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: module started successfully module_id=notification-hub pid=Some(35022) port=None
-2025-11-28T19:13:55.578112Z  INFO                 main ThreadId(01) fenrir::boot::transports: transport initialisation triggered
-2025-11-28T19:13:55.578114Z  INFO tokio-runtime-worker ThreadId(04) fenrir::boot::transports: ssh server task spawned
-2025-11-28T19:13:55.578324Z  INFO tokio-runtime-worker ThreadId(04) fenrir::infra::ssh::server: starting SSH server host=127.0.0.1 port=2222
-2025-11-28T19:13:55.578694Z  INFO tokio-runtime-worker ThreadId(05) fenrir::infra::http::server: HTTP server task spawned
-2025-11-28T19:14:03.627052Z  INFO tokio-runtime-worker ThreadId(13) thrussh::server::encrypted: pty-req: unknown pty code 42
-2025-11-28T19:14:06.139090Z  WARN ThreadId(18) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
-2025-11-28T19:14:52.038997Z  WARN ThreadId(51) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
-2025-11-28T19:14:59.057313Z  WARN ThreadId(83) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
-2025-11-28T19:15:12.056269Z  WARN ThreadId(116) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
-2025-11-28T19:15:12.059097Z  WARN ThreadId(132) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
-2025-11-28T19:15:12.626291Z  WARN ThreadId(148) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
-2025-11-28T19:15:13.351577Z  INFO tokio-runtime-worker ThreadId(05) fenrir::infra::modules::runtime::process: module stopped module_id=notification-hub pid=35022
-2025-11-28T19:15:13.856543Z  INFO tokio-runtime-worker ThreadId(12) fenrir::infra::modules::runtime::process: module stopped module_id=fenrir-api pid=35021
-2025-11-28T19:15:13.859618Z  INFO tokio-runtime-worker ThreadId(12) fenrir::services::module::dev: activating module dev service override module=fenrir-api services=2
-2025-11-28T19:15:28.605116Z  WARN ThreadId(165) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
-2025-11-28T19:15:28.833489Z  WARN tokio-runtime-worker ThreadId(05) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
-2025-11-28T19:15:28.838057Z  INFO tokio-runtime-worker ThreadId(05) fenrir::infra::modules::runtime::process: module process started module_id=fenrir-api pid=35726 port=None
-2025-11-28T19:15:28.838602Z  INFO tokio-runtime-worker ThreadId(05) fenrir::services::module::runtime: module started successfully module_id=fenrir-api pid=Some(35726) port=None
-2025-11-28T19:15:28.841941Z  INFO tokio-runtime-worker ThreadId(05) fenrir::infra::modules::runtime::process: module process started module_id=notification-hub pid=35727 port=None
-2025-11-28T19:15:28.842797Z  INFO tokio-runtime-worker ThreadId(05) fenrir::services::module::runtime: module started successfully module_id=notification-hub pid=Some(35727) port=None
-2025-11-28T19:16:10.629280Z  WARN tokio-runtime-worker ThreadId(10) fenrir::services::scheduler::service: db ping failed error=invalid input: db-shell service is disabled
-2025-11-28T19:18:10.631476Z  WARN tokio-runtime-worker ThreadId(10) fenrir::services::scheduler::service: db ping failed error=invalid input: db-shell service is disabled
-2025-11-28T19:20:10.633234Z  WARN tokio-runtime-worker ThreadId(10) fenrir::services::scheduler::service: db ping failed error=invalid input: db-shell service is disabled
-2025-11-28T19:22:10.634661Z  WARN tokio-runtime-worker ThreadId(10) fenrir::services::scheduler::service: db ping failed error=invalid input: db-shell service is disabled
-2025-11-28T19:24:10.683710Z  WARN tokio-runtime-worker ThreadId(10) fenrir::services::scheduler::service: db ping failed error=invalid input: db-shell service is disabled
-2025-11-28T19:26:10.692323Z  WARN tokio-runtime-worker ThreadId(10) fenrir::services::scheduler::service: db ping failed error=invalid input: db-shell service is disabled
-2025-11-28T19:28:10.699586Z  WARN tokio-runtime-worker ThreadId(10) fenrir::services::scheduler::service: db ping failed error=invalid input: db-shell service is disabled
-2025-11-28T19:30:10.710086Z  WARN tokio-runtime-worker ThreadId(10) fenrir::services::scheduler::service: db ping failed error=invalid input: db-shell service is disabled
-2025-11-28T19:32:10.720136Z  WARN tokio-runtime-worker ThreadId(10) fenrir::services::scheduler::service: db ping failed error=invalid input: db-shell service is disabled
-2025-11-28T19:34:10.731136Z  WARN tokio-runtime-worker ThreadId(10) fenrir::services::scheduler::service: db ping failed error=invalid input: db-shell service is disabled
-2025-11-28T19:36:10.737251Z  WARN tokio-runtime-worker ThreadId(10) fenrir::services::scheduler::service: db ping failed error=invalid input: db-shell service is disabled
-2025-11-28T19:38:10.739670Z  WARN tokio-runtime-worker ThreadId(10) fenrir::services::scheduler::service: db ping failed error=invalid input: db-shell service is disabled
-2025-11-28T19:40:10.742269Z  WARN tokio-runtime-worker ThreadId(10) fenrir::services::scheduler::service: db ping failed error=invalid input: db-shell service is disabled
-2025-11-28T19:42:10.746737Z  WARN tokio-runtime-worker ThreadId(10) fenrir::services::scheduler::service: db ping failed error=invalid input: db-shell service is disabled
-2025-11-28T19:44:10.750712Z  WARN tokio-runtime-worker ThreadId(10) fenrir::services::scheduler::service: db ping failed error=invalid input: db-shell service is disabled
-2025-11-28T19:44:47.185628Z  INFO tokio-runtime-worker ThreadId(10) fenrir::infra::telemetry::controller: telemetry configuration updated metrics_enabled=true health_enabled=true
-2025-11-28T19:44:47.185676Z  INFO tokio-runtime-worker ThreadId(10) fenrir::infra::http::server: HTTP TLS deaktiviert
-2025-11-28T19:44:47.185685Z  INFO tokio-runtime-worker ThreadId(10) fenrir::boot::transports: configuration (logging/telemetry/TLS) reloaded
-2025-11-28T19:44:47.189009Z  INFO tokio-runtime-worker ThreadId(10) fenrir::infra::telemetry::controller: telemetry configuration updated metrics_enabled=true health_enabled=true
-2025-11-28T19:44:47.189023Z  INFO tokio-runtime-worker ThreadId(10) fenrir::infra::http::server: HTTP TLS deaktiviert
-2025-11-28T19:44:47.189027Z  INFO tokio-runtime-worker ThreadId(10) fenrir::boot::transports: configuration (logging/telemetry/TLS) reloaded
-2025-11-28T19:46:10.728470Z  WARN tokio-runtime-worker ThreadId(10) fenrir::services::scheduler::service: db ping failed error=invalid input: db-shell service is disabled
-2025-11-28T19:48:10.724529Z  WARN tokio-runtime-worker ThreadId(10) fenrir::services::scheduler::service: db ping failed error=invalid input: db-shell service is disabled
-2025-11-28T19:50:10.756729Z  WARN tokio-runtime-worker ThreadId(10) fenrir::services::scheduler::service: db ping failed error=invalid input: db-shell service is disabled
+2025-11-28T19:51:48.619394Z  INFO main ThreadId(01) fenrir::infra::logging::init: file logging initialized log_path=logs/app.log
+2025-11-28T19:51:48.619583Z  INFO main ThreadId(01) fenrir::infra::logging::init: db log file prepared log_path=logs/db.log
+2025-11-28T19:51:48.714703Z  INFO main ThreadId(01) fenrir::boot::startup: core services registered in registry
+2025-11-28T19:51:48.715391Z  INFO main ThreadId(01) fenrir::boot::startup: scheduler service started
+2025-11-28T19:51:48.715568Z  INFO tokio-runtime-worker ThreadId(13) fenrir::services::scheduler::service: scheduler heartbeat loop started
+2025-11-28T19:51:48.716805Z  INFO                 main ThreadId(01) fenrir::boot::startup: audit log persistence configured path=/opt/fenrir/development/tmp/runtime/audit/fenrir-audit-history.json capacity=2048 retention_hours=24 persist_seconds=30
+2025-11-28T19:51:48.722288Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: loaded 2 module states from disk
+2025-11-28T19:51:48.799673Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: reattached running module process module_id=notification-hub pid=35727
+2025-11-28T19:51:48.800454Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: reattached running module process module_id=fenrir-api pid=35726
+2025-11-28T19:51:48.834603Z  INFO                 main ThreadId(01) fenrir::infra::http::server: HTTP control-plane authentication via identity broker
+2025-11-28T19:51:48.834656Z  INFO                 main ThreadId(01) fenrir::boot::startup: boot complete app=fenrir version=0.1.4
+2025-11-28T19:51:48.835956Z  WARN                 main ThreadId(01) fenrir::boot::bootstrap: bootstrap module install failed module=fenrir-api error=registry error: registry unavailable: Failed to fetch module: error sending request for url (http://localhost:8443/v1/modules/fenrir-api): error trying to connect: tcp connect error: Connection refused (os error 61)
+2025-11-28T19:51:48.836530Z  WARN                 main ThreadId(01) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-11-28T19:51:48.837677Z  INFO                 main ThreadId(01) fenrir::boot::transports: transport initialisation triggered
+2025-11-28T19:51:48.837687Z  INFO tokio-runtime-worker ThreadId(14) fenrir::boot::transports: ssh server task spawned
+2025-11-28T19:51:48.837753Z ERROR tokio-runtime-worker ThreadId(06) fenrir::boot::transports: http server start failed error=failed to bind HTTP server: 127.0.0.1:8080
+2025-11-28T19:51:48.838014Z  INFO tokio-runtime-worker ThreadId(14) fenrir::infra::ssh::server: starting SSH server host=127.0.0.1 port=2222
+2025-11-28T19:51:48.838065Z ERROR tokio-runtime-worker ThreadId(14) fenrir::boot::transports: ssh server exited with error error=Address already in use (os error 48)

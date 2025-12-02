@@ -61,4 +61,26 @@ TLS Konfiguration
 export FENRIR_ENV=dev
 export FENRIR_ENV=prod
 
-new service or module what more sense is: Dynamic port manager, that dynmaic change ports if the port is in usw
+6) Module Runtime Ports
+   - Configure `[modules.runtime.ports]` to control how Fenrir assigns module ports.
+   - `strategy = "dynamic"` lets Fenrir pick a free port from `[modules.runtime.ports.range]` and persist it.
+   - `strategy = "fixed"` keeps the module-provided port (e.g. from its `config.toml`).
+   - Example:
+```
+[modules.runtime.ports]
+strategy = "dynamic"
+
+[modules.runtime.ports.range]
+min = 41000
+max = 46000
+```
+
+Runtime Env Injection
+- Every managed module process receives:
+  - `FENRIR_MODULE_ID` (`ticket-domain`, ...),
+  - `FENRIR_SERVICE_ID` (`module:ticket-domain`),
+  - `FENRIR_SERVICE_URI` (`service://module:ticket-domain`).
+- When dynamic ports are enabled and a port is assigned:
+  - `FENRIR_SERVICE_PORT` (TCP port number as string).
+  - `FENRIR_SERVICE_ADDR` (`127.0.0.1:<port>`).
+Use these instead of hardcoded ports/URLs inside modules.

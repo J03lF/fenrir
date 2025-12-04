@@ -45,6 +45,70 @@ pub(super) fn render_task_block(
     out.flush()
 }
 
+struct LiveTaskBlock<W: Write> {
+    out: W,
+    progress_prefix: Option<String>,
+}
+
+impl<W: Write> LiveTaskBlock<W> {
+    fn new(mut out: W, module_label: &str) -> io::Result<Self> {
+        writeln!(
+            out,
+            "{}",
+            msg_modules::tasks_flow::block_header(module_label)
+        )?;
+        Ok(Self {
+            out,
+            progress_prefix: None,
+        })
+    }
+
+    fn step(&mut self, label: &str, detail: &str) -> io::Result<()> {
+        self.print_line("├──", label, detail)
+    }
+
+    fn final_step(&mut self, label: &str, detail: &str) -> io::Result<()> {
+        self.print_line("└──", label, detail)
+    }
+
+    fn begin_progress(&mut self, label: &str, detail: &str) -> io::Result<()> {
+        let prefix = format!("         {} {:<14} ", "├──", label);
+        write!(self.out, "{}{}", prefix, detail)?;
+        self.out.flush()?;
+        self.progress_prefix = Some(prefix);
+        Ok(())
+    }
+
+    fn update_progress(&mut self, detail: &str) -> io::Result<()> {
+        if let Some(prefix) = &self.progress_prefix {
+            write!(self.out, "\r{}{}\x1b[K", prefix, detail)?;
+            self.out.flush()?;
+        }
+        Ok(())
+    }
+
+    fn finish_progress(&mut self, detail: &str) -> io::Result<()> {
+        if let Some(prefix) = self.progress_prefix.take() {
+            writeln!(self.out, "\r{}{}", prefix, detail)?;
+            self.out.flush()?;
+        }
+        Ok(())
+    }
+
+    fn cancel_progress(&mut self) -> io::Result<()> {
+        if self.progress_prefix.take().is_some() {
+            writeln!(self.out)?;
+            self.out.flush()?;
+        }
+        Ok(())
+    }
+
+    fn print_line(&mut self, prefix: &str, label: &str, detail: &str) -> io::Result<()> {
+        writeln!(self.out, "         {} {:<14} {}", prefix, label, detail)?;
+        self.out.flush()
+    }
+}
+
 pub(super) async fn run_synchronize_task(
     deps: CliDependencies,
     service: Arc<ModuleService>,
@@ -433,7 +497,7 @@ impl InstallDistributionConfirmation {
         for entry in actionable.iter() {
             let module_label = entry.module_id.to_string();
             let mut needs_restart = matches!(entry.action, DistributionAction::Install);
-            let mut steps: Vec<(String, String)> = Vec::new();
+            let mut block = LiveTaskBlock::new(&mut out, &module_label)?;
 
             if matches!(entry.action, DistributionAction::Update) {
                 let module_id_for_status = entry.module_id.clone();
@@ -454,10 +518,10 @@ impl InstallDistributionConfirmation {
                             )?;
                             return Ok(CommandOutcome::Continue);
                         }
-                        steps.push((
-                            msg_modules::tasks_flow::steps::STOPPING.to_string(),
-                            msg_modules::tasks_flow::details::STOPPED_OK.to_string(),
-                        ));
+                        block.step(
+                            msg_modules::tasks_flow::steps::STOPPING,
+                            msg_modules::tasks_flow::details::STOPPED_OK,
+                        )?;
                         needs_restart = true;
                     }
                     Err(ModuleRuntimeError::NotRunning { .. }) => {}
@@ -493,7 +557,8 @@ impl InstallDistributionConfirmation {
             });
 
             let mut last_percent = 0u32;
-            let mut download_bar: Option<String> = None;
+            let mut download_detail: Option<String> = None;
+            let mut download_started = false;
             let mut install_task = install_task;
             let install_result = loop {
                 tokio::select! {
@@ -520,10 +585,20 @@ impl InstallDistributionConfirmation {
                                     "=".repeat(filled),
                                     ".".repeat(bar_width.saturating_sub(filled))
                                 );
-                                download_bar = Some(format!(
+                                let detail = format!(
                                     "{} {:>3}% ({:.1} MB / {:.1} MB)",
                                     bar, percent, mb_downloaded, mb_total
-                                ));
+                                );
+                                download_detail = Some(detail.clone());
+                                if !download_started {
+                                    block.begin_progress(
+                                        msg_modules::tasks_flow::steps::DOWNLOADING,
+                                        &detail,
+                                    )?;
+                                    download_started = true;
+                                } else {
+                                    block.update_progress(&detail)?;
+                                }
                                 last_percent = percent;
                             }
                         }
@@ -539,8 +614,17 @@ impl InstallDistributionConfirmation {
 
             match install_result {
                 Ok(result) => {
-                    if let Some(bar) = download_bar.take() {
-                        steps.push((msg_modules::tasks_flow::steps::DOWNLOADING.to_string(), bar));
+                    if download_started {
+                        let fallback;
+                        let detail = if let Some(text) = download_detail.as_deref() {
+                            text
+                        } else {
+                            fallback = msg_modules::tasks_flow::details::install_version("latest");
+                            fallback.as_str()
+                        };
+                        block.finish_progress(detail)?;
+                    } else if let Some(detail) = download_detail.as_deref() {
+                        block.step(msg_modules::tasks_flow::steps::DOWNLOADING, detail)?;
                     }
                     let version_str = result.manifest.version.to_string();
                     let detail = match result.status {
@@ -555,12 +639,10 @@ impl InstallDistributionConfirmation {
                             msg_modules::tasks_flow::details::current_version(&version_str)
                         }
                     };
-                    steps.push((
-                        msg_modules::tasks_flow::steps::INSTALLING.to_string(),
-                        detail,
-                    ));
+                    block.step(msg_modules::tasks_flow::steps::INSTALLING, &detail)?;
                 }
                 Err(err) => {
+                    block.cancel_progress()?;
                     render_service_error(
                         &mut out,
                         &msg_modules::tasks_flow::service_contexts::installation_failed(
@@ -587,15 +669,12 @@ impl InstallDistributionConfirmation {
                 match start_result {
                     Ok(info) => {
                         let pid_hint = msg_modules::tasks_flow::details::start_running(info.pid);
-                        steps.push((
-                            msg_modules::tasks_flow::steps::STARTING.to_string(),
-                            pid_hint,
-                        ));
+                        block.final_step(msg_modules::tasks_flow::steps::STARTING, &pid_hint)?;
                     }
-                    Err(ModuleRuntimeError::AlreadyRunning { .. }) => steps.push((
-                        msg_modules::tasks_flow::steps::STARTING.to_string(),
-                        msg_modules::tasks_flow::details::START_ALREADY_RUNNING.to_string(),
-                    )),
+                    Err(ModuleRuntimeError::AlreadyRunning { .. }) => block.final_step(
+                        msg_modules::tasks_flow::steps::STARTING,
+                        msg_modules::tasks_flow::details::START_ALREADY_RUNNING,
+                    )?,
                     Err(err) => {
                         render_runtime_error(
                             &mut out,
@@ -606,13 +685,12 @@ impl InstallDistributionConfirmation {
                     }
                 }
             } else {
-                steps.push((
-                    msg_modules::tasks_flow::steps::STARTING.to_string(),
-                    msg_modules::tasks_flow::details::START_NOT_REQUIRED.to_string(),
-                ));
+                block.final_step(
+                    msg_modules::tasks_flow::steps::STARTING,
+                    msg_modules::tasks_flow::details::START_NOT_REQUIRED,
+                )?;
             }
-
-            render_task_block(&mut out, &module_label, &steps)?;
+            writeln!(&mut out)?;
         }
 
         writeln!(out)?;

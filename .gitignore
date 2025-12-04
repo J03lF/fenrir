@@ -2,8 +2,8 @@
 /shelf/
 /target/
 secrets/
-config/certs
-config/modules
+config/certs/
+config/modules/
 /test/
 /benches/
 config/certs/

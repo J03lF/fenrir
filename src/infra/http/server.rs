@@ -107,24 +107,33 @@ impl HttpServer {
             app_version: cfg.app.version.clone(),
         };
         let identity = services.upgrade().and_then(|svc| svc.identity());
+        let control_tokens = cfg
+            .security
+            .http
+            .resolve_control_tokens()
+            .map_err(|err| anyhow!(err))?;
+        let entries = control_tokens
+            .into_iter()
+            .map(|token| (token.role, token.secret))
+            .collect::<Vec<_>>();
+        if identity.is_none() && entries.is_empty() {
+            return Err(anyhow!(
+                "no control-plane authentication configured (identity service missing, security.http.control_tokens empty)"
+            ));
+        }
         let auth = if let Some(identity) = identity {
-            info!("HTTP control-plane authentication via identity broker");
-            Arc::new(ControlPlaneAuthorizer::with_identity(identity))
-        } else {
-            let control_tokens = cfg
-                .security
-                .http
-                .resolve_control_tokens()
-                .map_err(|err| anyhow!(err))?;
-            let entries = control_tokens
-                .into_iter()
-                .map(|token| (token.role, token.secret))
-                .collect::<Vec<_>>();
             if entries.is_empty() {
-                return Err(anyhow!(
-                    "no control-plane authentication configured (identity service missing, security.http.control_tokens empty)"
-                ));
+                info!("HTTP control-plane authentication via identity broker");
+                Arc::new(ControlPlaneAuthorizer::with_identity(identity))
+            } else {
+                info!(
+                    "HTTP control-plane authentication via identity broker with static token fallback"
+                );
+                Arc::new(ControlPlaneAuthorizer::with_identity_and_tokens(
+                    identity, entries,
+                ))
             }
+        } else {
             info!("HTTP control-plane authentication via static token fallback");
             Arc::new(ControlPlaneAuthorizer::with_tokens(entries))
         };

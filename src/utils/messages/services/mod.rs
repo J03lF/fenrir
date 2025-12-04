@@ -1,4 +1,5 @@
 pub mod app;
+pub mod db_connector;
 pub mod db_shell;
 pub mod managed;
 pub mod module;

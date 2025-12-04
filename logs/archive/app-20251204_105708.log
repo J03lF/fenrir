@@ -1,0 +1,61 @@
+2025-12-04T10:53:31.634021Z  INFO main ThreadId(01) fenrir::infra::logging::init: file logging initialized log_path=logs/app.log
+2025-12-04T10:53:31.634086Z  INFO main ThreadId(01) fenrir::infra::logging::init: db log file prepared log_path=logs/db.log
+2025-12-04T10:53:31.698407Z  INFO main ThreadId(01) fenrir::boot::startup: core services registered in registry
+2025-12-04T10:53:31.698619Z  INFO main ThreadId(01) fenrir::boot::startup: scheduler service started
+2025-12-04T10:53:31.698652Z  INFO tokio-runtime-worker ThreadId(15) fenrir::services::scheduler::service: scheduler heartbeat loop started
+2025-12-04T10:53:31.706501Z  INFO                 main ThreadId(01) fenrir::boot::startup: audit log persistence configured path=/opt/fenrir/development/tmp/runtime/audit/fenrir-audit-history.json capacity=2048 retention_hours=24 persist_seconds=30
+2025-12-04T10:53:31.709394Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: loaded 0 module states from disk
+2025-12-04T10:53:31.762568Z  INFO                 main ThreadId(01) fenrir::infra::http::server: HTTP control-plane authentication via identity broker with static token fallback
+2025-12-04T10:53:31.762646Z  INFO                 main ThreadId(01) fenrir::boot::startup: boot complete app=fenrir version=0.1.4
+2025-12-04T10:53:31.762924Z  INFO                 main ThreadId(01) fenrir::infra::db::connector: db connector ipc socket ready path=/opt/fenrir/development/tmp/ipc/db-connector.sock
+2025-12-04T10:53:31.762943Z  INFO tokio-runtime-worker ThreadId(11) fenrir::infra::db::connector: db connector task started task="db-connector-ipc"
+2025-12-04T10:53:31.763221Z  WARN                 main ThreadId(01) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.fenrir-backups name=".fenrir-backups"
+2025-12-04T10:53:31.763333Z  WARN                 main ThreadId(01) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-12-04T10:53:31.773901Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: module process started module_id=fenrir-api pid=54492 port=Some(41002)
+2025-12-04T10:53:31.774225Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: module started successfully module_id=fenrir-api pid=Some(54492) port=Some(41002)
+2025-12-04T10:53:31.994110Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: module process started module_id=notification-hub pid=54493 port=Some(41001)
+2025-12-04T10:53:31.994376Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: module started successfully module_id=notification-hub pid=Some(54493) port=Some(41001)
+2025-12-04T10:53:32.202146Z  INFO tokio-runtime-worker ThreadId(08) fenrir::boot::transports: ssh server task spawned
+2025-12-04T10:53:32.202146Z  INFO                 main ThreadId(01) fenrir::boot::transports: transport initialisation triggered
+2025-12-04T10:53:32.202685Z  INFO tokio-runtime-worker ThreadId(08) fenrir::infra::ssh::server: starting SSH server host=127.0.0.1 port=2222
+2025-12-04T10:53:32.202955Z  INFO tokio-runtime-worker ThreadId(10) fenrir::infra::http::server: HTTP server task spawned
+2025-12-04T10:53:34.690137Z  INFO tokio-runtime-worker ThreadId(15) thrussh::server::encrypted: pty-req: unknown pty code 42
+2025-12-04T10:53:37.736896Z  WARN tokio-runtime-worker ThreadId(11) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.fenrir-backups name=".fenrir-backups"
+2025-12-04T10:53:37.737585Z  WARN tokio-runtime-worker ThreadId(11) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-12-04T10:53:38.019966Z  WARN tokio-runtime-worker ThreadId(10) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.fenrir-backups name=".fenrir-backups"
+2025-12-04T10:53:38.020466Z  WARN tokio-runtime-worker ThreadId(08) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-12-04T10:53:38.979487Z  WARN tokio-runtime-worker ThreadId(11) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.fenrir-backups name=".fenrir-backups"
+2025-12-04T10:53:38.980224Z  WARN tokio-runtime-worker ThreadId(11) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-12-04T10:53:39.036677Z  WARN tokio-runtime-worker ThreadId(19) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.fenrir-backups name=".fenrir-backups"
+2025-12-04T10:53:39.037330Z  WARN tokio-runtime-worker ThreadId(19) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-12-04T10:53:54.114343Z  WARN tokio-runtime-worker ThreadId(17) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.fenrir-backups name=".fenrir-backups"
+2025-12-04T10:53:54.115057Z  WARN tokio-runtime-worker ThreadId(17) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-12-04T10:54:09.112722Z  WARN tokio-runtime-worker ThreadId(17) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.fenrir-backups name=".fenrir-backups"
+2025-12-04T10:54:09.113837Z  WARN tokio-runtime-worker ThreadId(17) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-12-04T10:54:24.114699Z  WARN tokio-runtime-worker ThreadId(17) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.fenrir-backups name=".fenrir-backups"
+2025-12-04T10:54:24.116951Z  WARN tokio-runtime-worker ThreadId(17) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-12-04T10:54:39.122101Z  WARN tokio-runtime-worker ThreadId(17) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.fenrir-backups name=".fenrir-backups"
+2025-12-04T10:54:39.123394Z  WARN tokio-runtime-worker ThreadId(17) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-12-04T10:54:54.115279Z  WARN tokio-runtime-worker ThreadId(17) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.fenrir-backups name=".fenrir-backups"
+2025-12-04T10:54:54.116314Z  WARN tokio-runtime-worker ThreadId(17) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-12-04T10:55:09.119904Z  WARN tokio-runtime-worker ThreadId(19) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.fenrir-backups name=".fenrir-backups"
+2025-12-04T10:55:09.120593Z  WARN tokio-runtime-worker ThreadId(19) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-12-04T10:55:13.043330Z  WARN tokio-runtime-worker ThreadId(19) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.fenrir-backups name=".fenrir-backups"
+2025-12-04T10:55:13.043698Z  WARN tokio-runtime-worker ThreadId(19) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-12-04T10:55:24.112897Z  WARN tokio-runtime-worker ThreadId(15) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.fenrir-backups name=".fenrir-backups"
+2025-12-04T10:55:24.113871Z  WARN tokio-runtime-worker ThreadId(15) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-12-04T10:55:39.113740Z  WARN tokio-runtime-worker ThreadId(17) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.fenrir-backups name=".fenrir-backups"
+2025-12-04T10:55:39.114314Z  WARN tokio-runtime-worker ThreadId(17) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-12-04T10:55:54.113801Z  WARN tokio-runtime-worker ThreadId(17) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.fenrir-backups name=".fenrir-backups"
+2025-12-04T10:55:54.114326Z  WARN tokio-runtime-worker ThreadId(17) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-12-04T10:56:09.113619Z  WARN tokio-runtime-worker ThreadId(17) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.fenrir-backups name=".fenrir-backups"
+2025-12-04T10:56:09.114107Z  WARN tokio-runtime-worker ThreadId(19) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-12-04T10:56:24.115451Z  WARN tokio-runtime-worker ThreadId(15) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.fenrir-backups name=".fenrir-backups"
+2025-12-04T10:56:24.115956Z  WARN tokio-runtime-worker ThreadId(15) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-12-04T10:56:39.116153Z  WARN tokio-runtime-worker ThreadId(10) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.fenrir-backups name=".fenrir-backups"
+2025-12-04T10:56:39.116707Z  WARN tokio-runtime-worker ThreadId(10) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-12-04T10:56:54.117825Z  WARN tokio-runtime-worker ThreadId(15) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.fenrir-backups name=".fenrir-backups"
+2025-12-04T10:56:54.119804Z  WARN tokio-runtime-worker ThreadId(15) fenrir::infra::modules::storage: Skipping hidden module entry path=/Users/jfurocket/Documents/personal/modules/.cache name=".cache"
+2025-12-04T10:56:57.290409Z  INFO tokio-runtime-worker ThreadId(19) thrussh::server::encrypted: pty-req: unknown pty code 42
+2025-12-04T10:57:01.927928Z  INFO tokio-runtime-worker ThreadId(11) fenrir::infra::modules::runtime::process: module stopped module_id=notification-hub pid=54493
+2025-12-04T10:57:02.453334Z  INFO tokio-runtime-worker ThreadId(19) fenrir::infra::modules::runtime::process: module stopped module_id=fenrir-api pid=54492

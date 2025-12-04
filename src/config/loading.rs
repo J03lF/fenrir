@@ -1,4 +1,6 @@
 use std::env;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use super::error::ConfigError;
@@ -10,9 +12,12 @@ use super::validation::{
 pub(super) const ENV_CONFIG_FILE: &str = "FENRIR_CONFIG_FILE";
 pub(super) const ENV_CONFIG_ENV: &str = "FENRIR_CONFIG_ENV";
 pub(super) const ENV_ENV: &str = "FENRIR_ENV";
+pub(super) const ENV_FILE: &str = "secrets/.env";
+pub(super) const ENV_FILE_OVERRIDE: &str = "FENRIR_ENV_FILE";
 pub(super) const LOCAL_OVERRIDE_FILE: &str = "config/local.toml";
 
 pub fn load() -> Result<AppConfig, ConfigError> {
+    load_env_file_overrides()?;
     let mut builder =
         config::Config::builder().add_source(config::File::from(Path::new("config/default.toml")));
 
@@ -51,6 +56,7 @@ pub fn validate(cfg: &AppConfig) -> Result<(), ConfigError> {
     cfg.modules.registry.validate()?;
     cfg.modules.storage.validate()?;
     cfg.modules.runtime.validate()?;
+    cfg.modules.validate_services()?;
     cfg.audit.validate()?;
 
     if !matches!(
@@ -179,6 +185,89 @@ pub fn validate(cfg: &AppConfig) -> Result<(), ConfigError> {
         }
     }
     Ok(())
+}
+
+fn load_env_file_overrides() -> Result<(), ConfigError> {
+    let override_path = env::var(ENV_FILE_OVERRIDE)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from);
+    let candidate = override_path
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(ENV_FILE));
+
+    if !candidate.exists() {
+        if override_path.is_some() {
+            return Err(ConfigError::MissingConfigFile {
+                path: candidate.display().to_string(),
+            });
+        }
+        return Ok(());
+    }
+
+    load_env_file(&candidate)
+}
+
+fn load_env_file(path: &Path) -> Result<(), ConfigError> {
+    let file = File::open(path).map_err(|err| {
+        ConfigError::InvalidMessage(format!("failed to open env file {}: {err}", path.display()))
+    })?;
+    let reader = BufReader::new(file);
+    for (idx, line) in reader.lines().enumerate() {
+        let line = line.map_err(|err| {
+            ConfigError::InvalidMessage(format!(
+                "failed to read env file {} line {}: {err}",
+                path.display(),
+                idx + 1
+            ))
+        })?;
+        if let Some((key, value)) = parse_env_assignment(line.trim(), idx + 1, path)? {
+            if env::var_os(&key).is_some() {
+                continue;
+            }
+            env::set_var(key, value);
+        }
+    }
+    Ok(())
+}
+
+fn parse_env_assignment(
+    raw: &str,
+    line: usize,
+    path: &Path,
+) -> Result<Option<(String, String)>, ConfigError> {
+    if raw.is_empty() || raw.starts_with('#') {
+        return Ok(None);
+    }
+
+    let trimmed = if let Some(stripped) = raw.strip_prefix("export ") {
+        stripped.trim()
+    } else {
+        raw
+    };
+    let Some((key_part, value_part)) = trimmed.split_once('=') else {
+        return Err(ConfigError::InvalidMessage(format!(
+            "env file {} line {} is missing '='",
+            path.display(),
+            line
+        )));
+    };
+    let key = key_part.trim();
+    if key.is_empty() {
+        return Err(ConfigError::InvalidMessage(format!(
+            "env file {} line {} has empty variable name",
+            path.display(),
+            line
+        )));
+    }
+
+    let mut value = value_part.trim().to_string();
+    if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
+        value = value[1..value.len() - 1].to_string();
+    } else if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
+        value = value[1..value.len() - 1].to_string();
+    }
+    Ok(Some((key.to_string(), value)))
 }
 
 pub(super) fn detect_config_profile() -> Result<Option<String>, ConfigError> {

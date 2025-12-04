@@ -121,8 +121,7 @@ pub fn apply_command(
 
 pub struct RuntimeExecutor {
     handle: Handle,
-    #[allow(dead_code)]
-    runtime: Option<Runtime>,
+    _runtime: Option<Runtime>,
 }
 
 impl RuntimeExecutor {
@@ -130,14 +129,14 @@ impl RuntimeExecutor {
         if let Ok(handle) = Handle::try_current() {
             Ok(Self {
                 handle,
-                runtime: None,
+                _runtime: None,
             })
         } else {
             let runtime = Runtime::new().map_err(|err| io::Error::other(err.to_string()))?;
             let handle = runtime.handle().clone();
             Ok(Self {
                 handle,
-                runtime: Some(runtime),
+                _runtime: Some(runtime),
             })
         }
     }

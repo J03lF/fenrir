@@ -20,10 +20,12 @@ use crate::infra::modules::{
 use crate::infra::{db, logging, telemetry};
 use crate::security::identity::build_identity_provider;
 use crate::security::manager::{AuditSink, SecurityManager};
+use crate::security::service::ServiceScope;
 use crate::services::scheduler::install_default_jobs;
 use crate::services::{
-    AppServices, DbShellService, ModulePortAllocator, ModuleService, SchedulerService,
-    ServiceDescriptor, ServiceKind, ServiceRegistry, ServiceStatus, ServiceTag, SessionService,
+    AppServices, DbShellService, ModuleClientSettings, ModuleHealthHttpClient, ModulePortAllocator,
+    ModuleService, ModuleServiceOverrides, SchedulerService, ServiceDescriptor, ServiceKind,
+    ServiceRegistry, ServiceStatus, ServiceTag, SessionService,
 };
 use crate::utils::messages::boot::{
     errors as boot_errors, logs as boot_logs, runtime as runtime_messages,
@@ -219,6 +221,15 @@ pub fn boot() -> Result<BootContext, BootError> {
         Arc::new(audit)
     };
 
+    let services = Arc::new(AppServices::new(
+        Arc::clone(&db_shell_service),
+        Arc::clone(&scheduler_service),
+        Arc::clone(&registry),
+        Arc::clone(&audit_log),
+    ));
+    services.set_logging_handle(logging_handle.clone());
+    let audit_sink: Arc<dyn AuditSink> = Arc::clone(&services) as Arc<dyn AuditSink>;
+
     let remote_registry: Arc<dyn crate::domain::module::ModuleRegistryPort> = Arc::new(wrap_boot(
         HttpModuleRegistry::new(&cfg.modules.registry),
         BootErrorCode::ModuleRegistry,
@@ -297,33 +308,7 @@ pub fn boot() -> Result<BootContext, BootError> {
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
-    let module_service = Arc::new(ModuleService::new(
-        Arc::clone(&module_registry),
-        Arc::clone(&module_storage),
-        Arc::clone(&module_verifier),
-        Arc::clone(&module_runtime),
-        Arc::clone(&registry),
-        Arc::clone(&port_allocator),
-        dev_sources,
-    ));
-
-    let services = Arc::new(AppServices::new(
-        Arc::clone(&db_shell_service),
-        Arc::clone(&scheduler_service),
-        Arc::clone(&registry),
-        Arc::clone(&audit_log),
-    ));
-    services.set_logging_handle(logging_handle.clone());
-    services
-        .attach_module_service(Arc::clone(&module_service))
-        .map_err(|err| {
-            BootError::new(
-                BootErrorCode::ModuleAttach,
-                boot_errors::MODULE_SERVICE_ATTACH_FAILED,
-                anyhow!(err),
-            )
-        })?;
-    let audit_sink: Arc<dyn AuditSink> = Arc::clone(&services) as Arc<dyn AuditSink>;
+    // defer module_service creation until after security manager is ready
     let identity_service = wrap_boot(
         build_identity_provider(&cfg, runtime_dir.as_path(), Arc::clone(&audit_sink)),
         BootErrorCode::IdentityInit,
@@ -373,6 +358,71 @@ pub fn boot() -> Result<BootContext, BootError> {
                 anyhow!(err),
             )
         })?;
+
+    let default_service_scopes = wrap_boot(
+        cfg.modules
+            .runtime
+            .default_service_scopes
+            .iter()
+            .map(|scope| ServiceScope::new(scope).map_err(|err| anyhow!(err)))
+            .collect::<Result<Vec<_>, _>>(),
+        BootErrorCode::ModuleAttach,
+        boot_errors::MODULE_SERVICE_SCOPE_INVALID,
+    )?;
+    let service_overrides = wrap_boot(
+        ModuleServiceOverrides::from_config(&cfg.modules.services),
+        BootErrorCode::ModuleAttach,
+        boot_errors::MODULE_SERVICE_ATTACH_FAILED,
+    )?;
+    let client_settings = wrap_boot(
+        ModuleClientSettings::from_config(&cfg.modules.runtime.clients),
+        BootErrorCode::ModuleAttach,
+        boot_errors::MODULE_SERVICE_ATTACH_FAILED,
+    )?;
+    let health_client = wrap_boot(
+        ModuleHealthHttpClient::new(&client_settings),
+        BootErrorCode::ModuleAttach,
+        boot_errors::MODULE_SERVICE_ATTACH_FAILED,
+    )?;
+    let control_plane_url = if cfg.server.enable_http {
+        let scheme = if cfg.server.http.tls.enabled {
+            "https"
+        } else {
+            "http"
+        };
+        Some(format!(
+            "{scheme}://{}:{}",
+            cfg.server.http.host, cfg.server.http.port
+        ))
+    } else {
+        None
+    };
+    let module_service = ModuleService::new(
+        Arc::clone(&module_registry),
+        Arc::clone(&module_storage),
+        Arc::clone(&module_verifier),
+        Arc::clone(&module_runtime),
+        Arc::clone(&registry),
+        Arc::clone(&port_allocator),
+        Arc::clone(&security_manager),
+        dev_sources,
+        service_overrides,
+        client_settings,
+        health_client,
+        default_service_scopes,
+        control_plane_url,
+        Some(runtime_state_dir.join("services.json")),
+    );
+    services
+        .attach_module_service(Arc::clone(&module_service))
+        .map_err(|err| {
+            BootError::new(
+                BootErrorCode::ModuleAttach,
+                boot_errors::MODULE_SERVICE_ATTACH_FAILED,
+                anyhow!(err),
+            )
+        })?;
+    module_service.spawn_health_monitor();
     registry.set_status(
         "module-runtime",
         ServiceStatus::Active,

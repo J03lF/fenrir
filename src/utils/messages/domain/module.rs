@@ -126,4 +126,8 @@ pub mod runtime_errors {
     pub fn invalid_state(details: impl fmt::Display) -> String {
         format!("invalid state: {details}")
     }
+
+    pub fn quarantined(module_id: &str, until: &str) -> String {
+        format!("module `{module_id}` is quarantined until {until}")
+    }
 }

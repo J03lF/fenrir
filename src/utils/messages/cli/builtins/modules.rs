@@ -8,9 +8,15 @@ pub mod command {
         "install distribution            – installs every module of a distribution",
         "synchronize module <name>       – replaces a module with local changes",
         "release module <name>           – returns a module to the distribution build",
+        "release dev-overrides           – releases all modules currently in sync mode",
         "uninstall module <name>         – removes an installed module",
         "check modules                   – checks for available updates",
         "logs module <name> [--tail N]   – shows logs for a running module",
+        "modules services [name]         – list module runtime/override services",
+        "modules start <name>            – start module runtime",
+        "modules stop <name>             – stop module runtime",
+        "modules restart <name>          – restart module runtime",
+        "stop-all modules                – stop every running module runtime",
     ];
 }
 
@@ -43,6 +49,19 @@ pub mod release {
     pub const DETAILS: &[&str] = &["release module <name> – restore the distribution build"];
 }
 
+pub mod release_dev_overrides {
+    pub const DESCRIPTION: &str = "Release every module that is in sync mode";
+    pub const SYNOPSIS: &str = "release dev-overrides";
+    pub const DETAILS: &[&str] =
+        &["release dev-overrides – restore all modules that currently use sync overrides"];
+    pub const USAGE: &str = "Use: release dev-overrides";
+    pub const ERROR_CONTEXT: &str = "Failed to release dev overrides";
+    pub const EMPTY_STATE: &str = "No modules are using sync overrides.";
+    pub fn releasing(count: usize) -> String {
+        format!("Releasing {count} dev override(s)...")
+    }
+}
+
 pub mod uninstall {
     pub const DESCRIPTION: &str = "Remove installed modules";
     pub const SYNOPSIS: &str = "uninstall module <name>";
@@ -61,6 +80,15 @@ pub mod logs {
     pub const DETAILS: &[&str] = &["logs module <name> [--tail N] – show runtime logs"];
 }
 
+pub mod stop_all {
+    pub const DESCRIPTION: &str = "Stop all running modules";
+    pub const SYNOPSIS: &str = "stop-all modules";
+    pub const DETAILS: &[&str] = &["stop-all modules – stop every running module runtime"];
+    pub const USAGE: &str = "Use: stop-all modules";
+    pub const SUCCESS: &str = "All modules stopped.";
+    pub const ERROR_CONTEXT: &str = "Failed to stop modules";
+}
+
 pub mod info {
     pub const DESCRIPTION: &str = "Show manifest information";
     pub const SYNOPSIS: &str = "show module <name[@version]>";
@@ -74,9 +102,16 @@ pub mod subcommands {
     pub const INSTALL_DESC: &str = "Install all modules for a Fenrir distribution";
     pub const SYNCHRONIZE_DESC: &str = "Apply local changes for a module";
     pub const RELEASE_DESC: &str = "Revert a module to the distribution build";
+    pub const RELEASE_DEV_OVERRIDES_DESC: &str =
+        "Release every module that is currently in sync mode";
     pub const UNINSTALL_DESC: &str = "Uninstall a module";
     pub const CHECK_DESC: &str = "Check for available module updates";
     pub const LOGS_DESC: &str = "Show module logs";
+    pub const SERVICES_DESC: &str = "List module services";
+    pub const START_DESC: &str = "Start a module runtime";
+    pub const STOP_DESC: &str = "Stop a module runtime";
+    pub const RESTART_DESC: &str = "Restart a module runtime";
+    pub const STOP_ALL_DESC: &str = "Stop all module runtimes";
 }
 
 pub mod routing {
@@ -87,13 +122,6 @@ pub mod routing {
     pub fn available_subcommands(list: &str) -> String {
         format!("Available subcommands: {list}")
     }
-
-    pub fn lifecycle_disabled(action: &str) -> String {
-        format!("Module lifecycle is automated – '{action} module' is no longer available.")
-    }
-
-    pub const LIFECYCLE_SUMMARY: &str =
-        "Fenrir starts/stops modules automatically during boot and distribution imports.";
 
     pub fn unimplemented(name: &str) -> String {
         format!("Subcommand '{name}' is not implemented yet.")
@@ -111,6 +139,7 @@ pub mod list_modules {
     ];
     pub const STATUS_RUNNING: &str = "Running";
     pub const STATUS_STOPPED: &str = "Stopped";
+    pub const STATUS_SYNC_SUFFIX: &str = "(sync)";
     pub const EMPTY_VALUE: &str = "-";
 }
 
@@ -189,6 +218,44 @@ pub mod synchronize_flow {
             None => format!("  - {} @ {} ({})", id, endpoint, name),
         }
     }
+
+    pub fn env_file_hint(service: &str, path: &str) -> String {
+        format!(
+            "   • Environment exports for {service} written to {path}. Source this file before running your module."
+        )
+    }
+
+    pub fn env_file_error(err: &str) -> String {
+        format!("   • Warning: failed to write dev env file ({err})")
+    }
+
+    pub fn dev_agent_started(
+        command: &str,
+        workdir: &str,
+        log: &str,
+        auto_restart: bool,
+    ) -> String {
+        let restart = if auto_restart {
+            "auto-restart enabled"
+        } else {
+            "auto-restart disabled"
+        };
+        format!("   • Dev agent running `{command}` in {workdir} ({restart}). Logs → {log}.")
+    }
+
+    pub fn dev_agent_manual(command: &str, workdir: &str, env_hint: Option<&str>) -> String {
+        match env_hint {
+            Some(path) => format!(
+                "   • Dev agent prepared env for `{command}` in {workdir}. Source {path} (or configure your IDE) before running `cargo run`."
+            ),
+            None => format!(
+                "   • Dev agent prepared env for `{command}` in {workdir}. Use the generated env exports before running."
+            ),
+        }
+    }
+
+    pub const DEV_AGENT_NOT_CONFIGURED: &str =
+        "   • No [dev.run] section found – start your module manually (see env exports).";
 }
 
 pub mod release_flow {
@@ -234,6 +301,63 @@ pub mod logs_flow {
     }
     pub const SEPARATOR: &str = "========================================";
     pub const ERROR_CONTEXT: &str = "Log query failed";
+}
+
+pub mod services_view {
+    pub const USAGE: &str = "Use: modules services [module]";
+    pub const LOAD_ERROR_CONTEXT: &str = "Failed to inspect module services";
+    pub const RUNTIME_STATUS_ERROR_CONTEXT: &str = "Failed to inspect module runtime state";
+    pub const EMPTY_STATE: &str = "No module services registered.";
+    pub fn empty_for_module(module: &str) -> String {
+        format!("No services registered for module {module}.")
+    }
+    pub const HEADERS: &[&str] = &[
+        "Module", "Service", "Type", "Status", "Since", "Route", "Endpoint", "Note",
+    ];
+    pub const EMPTY_VALUE: &str = "-";
+    pub const TYPE_RUNTIME: &str = "runtime";
+    pub const TYPE_DECLARED: &str = "declared";
+    pub const TYPE_DEV: &str = "dev override";
+    pub const TYPE_OTHER: &str = "service";
+    pub const RUNTIME_SERVICE_LABEL: &str = "main";
+    pub fn runtime_status_warning(err: &str) -> String {
+        format!("⚠ runtime status unavailable: {err}. Port information may be incomplete.")
+    }
+}
+
+pub mod lifecycle {
+    pub const START_USAGE: &str = "Use: modules start <name>";
+    pub const STOP_USAGE: &str = "Use: modules stop <name>";
+    pub const RESTART_USAGE: &str = "Use: modules restart <name>";
+    pub const START_ERROR_CONTEXT: &str = "Failed to start module";
+    pub const STOP_ERROR_CONTEXT: &str = "Failed to stop module";
+    pub const RESTART_ERROR_CONTEXT: &str = "Failed to restart module";
+
+    pub fn start_success(module: &str, pid: Option<u32>, port: Option<u16>) -> String {
+        match (pid, port) {
+            (Some(pid), Some(port)) => {
+                format!("✓ Module {module} started (pid {pid}, port {port}).")
+            }
+            (Some(pid), None) => format!("✓ Module {module} started (pid {pid})."),
+            (None, Some(port)) => format!("✓ Module {module} started (port {port})."),
+            _ => format!("✓ Module {module} started."),
+        }
+    }
+
+    pub fn stop_success(module: &str) -> String {
+        format!("✓ Module {module} stopped.")
+    }
+
+    pub fn restart_success(module: &str, pid: Option<u32>, port: Option<u16>) -> String {
+        match (pid, port) {
+            (Some(pid), Some(port)) => {
+                format!("✓ Module {module} restarted (pid {pid}, port {port}).")
+            }
+            (Some(pid), None) => format!("✓ Module {module} restarted (pid {pid})."),
+            (None, Some(port)) => format!("✓ Module {module} restarted (port {port})."),
+            _ => format!("✓ Module {module} restarted."),
+        }
+    }
 }
 
 pub mod parser {
@@ -316,11 +440,13 @@ pub mod manifest_view {
 
 pub mod distribution_plan_view {
     pub const TITLE: &str = "\n:: DISTRIBUTION PLAN ::";
-    pub const HEADERS: &[&str] = &["Action", "Module", "Current", "Target"];
+    pub const HEADERS: &[&str] = &["Action", "Module", "Current", "Target", "Note"];
     pub const INSTALL_LABEL: &str = "[+] Install";
     pub const UPDATE_LABEL: &str = "[~] Update";
     pub const CURRENT_LABEL: &str = "[=] Current";
+    pub const SKIP_LABEL: &str = "[x] Skip";
     pub const NO_CURRENT_VERSION: &str = "(none)";
+    pub const SKIP_SYNC_NOTE: &str = "synchronized (skipped)";
 }
 
 pub mod service_errors {
@@ -386,6 +512,10 @@ pub mod runtime_errors {
 
     pub fn io_error(message: &str) -> String {
         format!("I/O error: {message}")
+    }
+
+    pub fn quarantined(module: &str, until: &str) -> String {
+        format!("Module '{module}' is quarantined until {until}")
     }
 }
 

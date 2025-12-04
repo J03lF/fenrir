@@ -4,15 +4,24 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use axum::extract::{Path as AxumPath, Query, State};
-use axum::http::{header::AUTHORIZATION, HeaderMap, StatusCode};
+use axum::body::Body;
+use axum::extract::{OriginalUri, Path as AxumPath, Query, State};
+use axum::http::{
+    header::{HeaderName as AxumHeaderName, AUTHORIZATION, HOST},
+    HeaderMap, HeaderValue, Method, StatusCode, Uri,
+};
 use axum::response::{
     sse::{Event, KeepAlive, Sse},
     Html, IntoResponse, Response,
 };
-use axum::routing::{delete, get, post};
+use axum::routing::{any, delete, get, post};
 use axum::Json;
 use axum::Router;
+use http_body_util::BodyExt;
+use reqwest::{
+    header::{HeaderName as ReqwestHeaderName, HeaderValue as ReqwestHeaderValue},
+    Method as ReqwestMethod,
+};
 use serde::{Deserialize, Serialize};
 use serde_json;
 use time::Duration as TimeDuration;
@@ -22,28 +31,53 @@ use tokio_stream::{
     StreamExt,
 };
 use tracing::warn;
+use urlencoding::decode;
 
 use crate::audit::{AuditActor, AuditEvent, AuditMetadata, AuditOutcome};
 use crate::domain::module::{
     InstalledModule, ModuleError, ModuleId, ModuleInstallResult, ModuleInstallSource,
-    ModuleInstallStatus, ModuleManifest, ModuleRegistryError, ModuleSearchQuery,
-    ModuleServiceError, ModuleStorageError, ModuleVersion,
+    ModuleInstallStatus, ModuleManifest, ModuleRegistryError, ModuleRuntimeError,
+    ModuleSearchQuery, ModuleServiceError, ModuleStorageError, ModuleVersion,
 };
 use crate::infra::{logging, telemetry};
 use crate::security::auth::{AuthError, ControlPlaneAuthorizer, Role};
 use crate::security::identity::{IdentityProvider, IssueTokenRequest};
+use crate::security::manager::SecurityError;
+use crate::security::service::ServiceScope;
+use crate::security::service_tokens::{DelegatedActor, DelegatedTokenClaims, ServiceTokenError};
 use crate::services::scheduler::ScheduledJobSnapshot;
 use crate::services::{
-    AppServices, ServiceActionKind, ServiceControlError, ServiceRegistry, ServiceSnapshot,
+    module::{ModuleIngressError, ModuleIngressTarget},
+    AppServices, ServiceActionKind, ServiceControlError, ServiceIngressAccess,
+    ServiceIngressMetadata, ServiceIngressProtocol, ServiceRateLimit, ServiceRegistry,
+    ServiceSecurityMetadata, ServiceSnapshot,
 };
 use crate::utils::messages::infra::http::{self as http_messages, ProblemText};
 use crate::utils::{
     format_offset_datetime, format_optional_offset_datetime, system_time_to_rfc3339,
 };
+use fenrir_module_kit::{ModuleTokenExchangeRequest, ModuleTokenExchangeResponse};
 
+use super::gateway::{HTTP_GATEWAY_CLIENT, SERVICE_RATE_LIMITER};
 use super::state::{HttpInfo, HttpState};
 
 const SERVICE_RESOURCE_STALE_AFTER_SECS: i64 = 60;
+const ALLOWED_MODULE_TOKEN_SCOPES: &[&str] = &["db:write"];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GatewayRequestKind {
+    Http,
+    Grpc,
+}
+
+impl GatewayRequestKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            GatewayRequestKind::Http => "http",
+            GatewayRequestKind::Grpc => "grpc",
+        }
+    }
+}
 
 #[derive(Serialize)]
 struct HealthResponse {
@@ -67,6 +101,10 @@ struct ServiceStateEvent {
     since_seconds: Option<u64>,
     critical: bool,
     tags: Vec<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    security: Option<ServiceSecurityView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ingress: Option<ServiceIngressView>,
 }
 
 #[derive(Clone, Serialize)]
@@ -80,6 +118,38 @@ struct ServiceSummary {
     note: Option<String>,
     critical: bool,
     tags: Vec<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    security: Option<ServiceSecurityView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ingress: Option<ServiceIngressView>,
+}
+
+#[derive(Clone, Serialize)]
+struct ServiceSecurityView {
+    internal_only: bool,
+    allowed_roles: Vec<&'static str>,
+    required_scopes: Vec<String>,
+    tenant_mode: &'static str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tenant_values: Vec<String>,
+}
+
+#[derive(Clone, Serialize)]
+struct ServiceIngressView {
+    access: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    route_prefix: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    health_endpoint: Option<String>,
+    protocols: Vec<&'static str>,
+    rate_limit: ServiceIngressRateLimitView,
+}
+
+#[derive(Clone, Serialize)]
+struct ServiceIngressRateLimitView {
+    mode: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    limit_per_second: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -293,6 +363,11 @@ struct BulkServiceActionResponse {
 }
 
 #[derive(Serialize)]
+struct ReleaseDevOverridesResponse {
+    released: Vec<String>,
+}
+
+#[derive(Serialize)]
 struct BulkServiceActionItem {
     id: String,
     status: &'static str,
@@ -437,7 +512,13 @@ fn snapshot_to_summary(svc: ServiceSnapshot) -> ServiceSummary {
         note: svc.note.clone(),
         critical: svc.descriptor.critical,
         tags: svc.descriptor.tags.iter().map(|tag| tag.as_str()).collect(),
+        security: svc.descriptor.security.as_ref().map(security_view),
+        ingress: svc.descriptor.ingress.as_ref().map(ingress_view),
     }
+}
+
+fn is_module_placeholder(id: &str) -> bool {
+    id.starts_with("module:") && !id.contains("::")
 }
 
 fn snapshot_to_state_event(snapshot: ServiceSnapshot) -> ServiceStateEvent {
@@ -459,6 +540,53 @@ fn snapshot_to_state_event(snapshot: ServiceSnapshot) -> ServiceStateEvent {
             .iter()
             .map(|tag| tag.as_str())
             .collect(),
+        security: snapshot.descriptor.security.as_ref().map(security_view),
+        ingress: snapshot.descriptor.ingress.as_ref().map(ingress_view),
+    }
+}
+
+fn security_view(metadata: &ServiceSecurityMetadata) -> ServiceSecurityView {
+    ServiceSecurityView {
+        internal_only: metadata.internal_only,
+        allowed_roles: metadata
+            .allowed_roles()
+            .iter()
+            .map(|role| role.as_str())
+            .collect(),
+        required_scopes: metadata
+            .required_scopes()
+            .iter()
+            .map(|scope| scope.as_str().to_string())
+            .collect(),
+        tenant_mode: metadata.tenant.mode_label(),
+        tenant_values: metadata.tenant.values(),
+    }
+}
+
+fn ingress_view(metadata: &ServiceIngressMetadata) -> ServiceIngressView {
+    ServiceIngressView {
+        access: metadata.access.as_str(),
+        route_prefix: metadata.route_prefix.clone(),
+        health_endpoint: metadata.health_endpoint.clone(),
+        protocols: metadata
+            .protocols
+            .iter()
+            .map(|protocol| protocol.as_str())
+            .collect(),
+        rate_limit: match metadata.rate_limit {
+            ServiceRateLimit::Default => ServiceIngressRateLimitView {
+                mode: "default",
+                limit_per_second: None,
+            },
+            ServiceRateLimit::Unlimited => ServiceIngressRateLimitView {
+                mode: "unlimited",
+                limit_per_second: None,
+            },
+            ServiceRateLimit::CustomPerSecond(limit) => ServiceIngressRateLimitView {
+                mode: "custom",
+                limit_per_second: Some(limit),
+            },
+        },
     }
 }
 
@@ -576,12 +704,335 @@ fn module_error_problem(err: ModuleServiceError) -> ServiceActionProblem {
     }
 }
 
+fn module_runtime_problem(err: ModuleRuntimeError) -> ServiceActionProblem {
+    let (status, code) = match err {
+        ModuleRuntimeError::NotInstalled { .. } => (StatusCode::NOT_FOUND, "module_not_installed"),
+        ModuleRuntimeError::AlreadyRunning { .. } => {
+            (StatusCode::CONFLICT, "module_already_running")
+        }
+        ModuleRuntimeError::NotRunning { .. } => (StatusCode::CONFLICT, "module_not_running"),
+        ModuleRuntimeError::StartFailed { .. } => {
+            (StatusCode::INTERNAL_SERVER_ERROR, "module_start_failed")
+        }
+        ModuleRuntimeError::StopFailed { .. } => {
+            (StatusCode::INTERNAL_SERVER_ERROR, "module_stop_failed")
+        }
+        ModuleRuntimeError::PortInUse { .. } => (StatusCode::CONFLICT, "module_port_in_use"),
+        ModuleRuntimeError::NoAvailablePorts { .. } => {
+            (StatusCode::SERVICE_UNAVAILABLE, "module_no_ports")
+        }
+        ModuleRuntimeError::InvalidState(_) => (StatusCode::CONFLICT, "module_invalid_state"),
+        ModuleRuntimeError::Io(_) => (StatusCode::INTERNAL_SERVER_ERROR, "module_runtime_io"),
+        ModuleRuntimeError::Quarantined { .. } => (StatusCode::CONFLICT, "module_quarantined"),
+    };
+    ServiceActionProblem::new(status, code, err.to_string())
+}
+
 fn module_validation_problem(code: &'static str, err: ModuleError) -> ServiceActionProblem {
     match err {
         ModuleError::Validation(msg) => {
             ServiceActionProblem::new(StatusCode::BAD_REQUEST, code, msg)
         }
     }
+}
+
+fn module_id_from_claims(claims: &DelegatedTokenClaims) -> Result<ModuleId, ServiceActionProblem> {
+    match &claims.actor {
+        DelegatedActor::Service { service_id, .. } => {
+            let Some(raw_id) = service_id.strip_prefix("module:") else {
+                return Err(http_problem(
+                    StatusCode::FORBIDDEN,
+                    http_messages::problems::module_token_invalid_service(service_id),
+                ));
+            };
+            ModuleId::new(raw_id).map_err(|_| {
+                http_problem(
+                    StatusCode::BAD_REQUEST,
+                    http_messages::problems::module_token_invalid_service(service_id),
+                )
+            })
+        }
+        _ => Err(http_problem(
+            StatusCode::FORBIDDEN,
+            http_messages::problems::module_token_service_only(),
+        )),
+    }
+}
+
+fn parse_requested_scopes(scopes: &[String]) -> Result<Vec<ServiceScope>, ServiceActionProblem> {
+    if scopes.is_empty() {
+        return Err(http_problem(
+            StatusCode::BAD_REQUEST,
+            http_messages::problems::module_token_scope_missing(),
+        ));
+    }
+    let mut parsed = Vec::with_capacity(scopes.len());
+    for scope in scopes {
+        let scope_trimmed = scope.trim();
+        if !ALLOWED_MODULE_TOKEN_SCOPES.contains(&scope_trimmed) {
+            return Err(http_problem(
+                StatusCode::BAD_REQUEST,
+                http_messages::problems::module_token_scope_invalid(scope_trimmed),
+            ));
+        }
+        let parsed_scope = ServiceScope::new(scope_trimmed).map_err(|_| {
+            http_problem(
+                StatusCode::BAD_REQUEST,
+                http_messages::problems::module_token_scope_invalid(scope_trimmed),
+            )
+        })?;
+        if !parsed.iter().any(|existing| existing == &parsed_scope) {
+            parsed.push(parsed_scope);
+        }
+    }
+    Ok(parsed)
+}
+
+fn token_expires_in_seconds(claims: &DelegatedTokenClaims) -> u64 {
+    let now = OffsetDateTime::now_utc();
+    if claims.expires_at <= now {
+        return 0;
+    }
+    (claims.expires_at - now).whole_seconds().max(0) as u64
+}
+
+fn decode_service_id(value: &str) -> Result<String, ServiceActionProblem> {
+    decode(value)
+        .map(|decoded| decoded.into_owned())
+        .map_err(|_| {
+            http_problem(
+                StatusCode::BAD_REQUEST,
+                http_messages::problems::gateway_invalid_service(value),
+            )
+        })
+}
+
+fn extract_gateway_token(headers: &HeaderMap) -> Result<&str, ServiceActionProblem> {
+    match extract_optional_gateway_token(headers)? {
+        Some(token) => Ok(token),
+        None => Err(http_problem(
+            StatusCode::UNAUTHORIZED,
+            http_messages::problems::gateway_token_missing(),
+        )),
+    }
+}
+
+fn extract_optional_gateway_token<'a>(
+    headers: &'a HeaderMap,
+) -> Result<Option<&'a str>, ServiceActionProblem> {
+    let Some(value) = headers.get(AUTHORIZATION) else {
+        return Ok(None);
+    };
+    let text = value
+        .to_str()
+        .map_err(|_| {
+            http_problem(
+                StatusCode::UNAUTHORIZED,
+                http_messages::problems::gateway_token_invalid(),
+            )
+        })?
+        .trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let Some(token) = text
+        .strip_prefix("Bearer ")
+        .or_else(|| text.strip_prefix("bearer "))
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    else {
+        return Err(http_problem(
+            StatusCode::UNAUTHORIZED,
+            http_messages::problems::gateway_token_invalid(),
+        ));
+    };
+    Ok(Some(token))
+}
+
+fn map_service_token_error(err: SecurityError) -> ServiceActionProblem {
+    match err {
+        SecurityError::ServiceToken(ServiceTokenError::NotFound)
+        | SecurityError::ServiceToken(ServiceTokenError::Expired)
+        | SecurityError::ServiceToken(ServiceTokenError::IdleTimeout) => http_problem(
+            StatusCode::UNAUTHORIZED,
+            http_messages::problems::gateway_token_expired(),
+        ),
+        other => http_problem(
+            StatusCode::BAD_GATEWAY,
+            http_messages::problems::gateway_security_failure(other),
+        ),
+    }
+}
+
+fn map_ingress_error(err: ModuleIngressError, service_id: &str) -> ServiceActionProblem {
+    match err {
+        ModuleIngressError::UnsupportedService(_) => http_problem(
+            StatusCode::NOT_FOUND,
+            http_messages::problems::gateway_unknown_service(service_id),
+        ),
+        ModuleIngressError::InvalidModuleId(_) => http_problem(
+            StatusCode::BAD_REQUEST,
+            http_messages::problems::gateway_invalid_service(service_id),
+        ),
+        ModuleIngressError::ModuleNotRunning(_) | ModuleIngressError::ModulePortUnknown(_) => {
+            http_problem(
+                StatusCode::SERVICE_UNAVAILABLE,
+                http_messages::problems::gateway_service_unavailable(service_id),
+            )
+        }
+        ModuleIngressError::DevServiceInactive { .. }
+        | ModuleIngressError::DeclaredServiceMissing { .. } => http_problem(
+            StatusCode::NOT_FOUND,
+            http_messages::problems::gateway_unknown_service(service_id),
+        ),
+        ModuleIngressError::Runtime(inner) => http_problem(
+            StatusCode::BAD_GATEWAY,
+            http_messages::problems::gateway_service_failure(service_id, inner),
+        ),
+    }
+}
+
+fn service_route_path(
+    ingress: Option<&ServiceIngressMetadata>,
+    path: &str,
+    query: Option<&str>,
+) -> String {
+    let tail = path.trim_start_matches('/');
+    let mut buffer = String::new();
+    if let Some(meta) = ingress {
+        if let Some(prefix) = meta.route_prefix.as_ref() {
+            if prefix == "/" {
+                buffer.push('/');
+                if !tail.is_empty() {
+                    buffer.push_str(tail);
+                }
+            } else {
+                let normalized = prefix
+                    .trim_end_matches('/')
+                    .trim_start_matches('/')
+                    .to_string();
+                if normalized.is_empty() {
+                    buffer.push('/');
+                } else {
+                    buffer.push('/');
+                    buffer.push_str(&normalized);
+                }
+                if !tail.is_empty() {
+                    if !buffer.ends_with('/') {
+                        buffer.push('/');
+                    }
+                    buffer.push_str(tail);
+                }
+            }
+        } else {
+            buffer.push('/');
+            if !tail.is_empty() {
+                buffer.push_str(tail);
+            }
+        }
+    } else {
+        buffer.push('/');
+        if !tail.is_empty() {
+            buffer.push_str(tail);
+        }
+    }
+    if buffer.is_empty() {
+        buffer.push('/');
+    }
+    if let Some(query) = query {
+        if !query.is_empty() {
+            buffer.push('?');
+            buffer.push_str(query);
+        }
+    }
+    buffer
+}
+
+fn build_target_url(target: &ModuleIngressTarget, path: &str) -> String {
+    format!("http://{}{}", target_origin(target), path)
+}
+
+fn target_origin(target: &ModuleIngressTarget) -> String {
+    match target {
+        ModuleIngressTarget::RuntimePort { port, .. } => format!("127.0.0.1:{port}"),
+        ModuleIngressTarget::DevService { endpoint, .. }
+        | ModuleIngressTarget::DeclaredService { endpoint, .. } => endpoint.to_string(),
+    }
+}
+
+fn target_log_label(target: &ModuleIngressTarget) -> String {
+    match target {
+        ModuleIngressTarget::RuntimePort { module_id, port } => {
+            format!("module:{}@{}", module_id, port)
+        }
+        ModuleIngressTarget::DevService {
+            module_id,
+            service_id,
+            endpoint,
+        }
+        | ModuleIngressTarget::DeclaredService {
+            module_id,
+            service_id,
+            endpoint,
+        } => format!("{} ({module_id} -> {endpoint})", service_id),
+    }
+}
+
+fn map_reqwest_method(method: &Method) -> Result<ReqwestMethod, ServiceActionProblem> {
+    ReqwestMethod::from_bytes(method.as_str().as_bytes()).map_err(|_| {
+        http_problem(
+            StatusCode::METHOD_NOT_ALLOWED,
+            http_messages::problems::gateway_method_not_allowed(method.as_str()),
+        )
+    })
+}
+
+async fn collect_request_body(body: Body) -> Result<Vec<u8>, ServiceActionProblem> {
+    body.collect()
+        .await
+        .map(|collected| collected.to_bytes().to_vec())
+        .map_err(|err| {
+            http_problem(
+                StatusCode::BAD_REQUEST,
+                http_messages::problems::gateway_body_read_failed(err),
+            )
+        })
+}
+
+async fn convert_upstream_response(
+    response: reqwest::Response,
+) -> Result<Response, ServiceActionProblem> {
+    let status =
+        StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let headers = response.headers().clone();
+    let body = response
+        .bytes()
+        .await
+        .map(|bytes| bytes.to_vec())
+        .map_err(|err| {
+            http_problem(
+                StatusCode::BAD_GATEWAY,
+                http_messages::problems::gateway_upstream_read_failed(err),
+            )
+        })?;
+    let mut builder = Response::builder().status(status);
+    {
+        let headers_mut = builder.headers_mut().expect("response headers available");
+        for (name, value) in headers.iter() {
+            if let (Ok(header_name), Ok(header_value)) = (
+                AxumHeaderName::from_bytes(name.as_str().as_bytes()),
+                HeaderValue::from_bytes(value.as_bytes()),
+            ) {
+                headers_mut.insert(header_name, header_value);
+            }
+        }
+    }
+    builder.body(Body::from(body)).map_err(|err| {
+        http_problem(
+            StatusCode::BAD_GATEWAY,
+            http_messages::problems::gateway_upstream_conversion_failed(err),
+        )
+    })
 }
 
 async fn list_installed_modules(State(state): State<HttpState>, headers: HeaderMap) -> Response {
@@ -740,6 +1191,456 @@ async fn uninstall_module_version(
     }
 }
 
+async fn issue_module_service_token(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Json(payload): Json<ModuleTokenExchangeRequest>,
+) -> Response {
+    let Some(module_service) = state.services.module_service() else {
+        return module_service_unavailable().into_response();
+    };
+    let Some(security) = state.services.security_manager() else {
+        return http_problem(
+            StatusCode::SERVICE_UNAVAILABLE,
+            http_messages::problems::gateway_security_unavailable(),
+        )
+        .into_response();
+    };
+    let token = match extract_gateway_token(&headers) {
+        Ok(token) => token,
+        Err(problem) => return problem.into_response(),
+    };
+    let claims = match security.validate_service_token(token) {
+        Ok(claims) => claims,
+        Err(err) => return map_service_token_error(err).into_response(),
+    };
+    let module_id = match module_id_from_claims(&claims) {
+        Ok(id) => id,
+        Err(problem) => return problem.into_response(),
+    };
+    let scopes = match parse_requested_scopes(&payload.scopes) {
+        Ok(scopes) => scopes,
+        Err(problem) => return problem.into_response(),
+    };
+    let issued = match module_service.issue_scoped_service_token(&module_id, scopes) {
+        Ok(token) => token,
+        Err(err) => {
+            return http_problem(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                http_messages::problems::module_token_issue_failed(&err),
+            )
+            .into_response()
+        }
+    };
+    let response = ModuleTokenExchangeResponse {
+        token: issued.token,
+        scopes: issued
+            .claims
+            .scopes
+            .iter()
+            .map(|scope| scope.as_str().to_string())
+            .collect(),
+        expires_in_seconds: token_expires_in_seconds(&issued.claims),
+    };
+    (StatusCode::OK, Json(response)).into_response()
+}
+
+async fn start_module_runtime(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    if let Err(problem) = authorize(&state.auth, &state.services, &headers, Role::Operator) {
+        return problem.into_response();
+    }
+    let Some(service) = state.services.module_service() else {
+        return module_service_unavailable().into_response();
+    };
+    let module_id = match ModuleId::new(id.trim()) {
+        Ok(id) => id,
+        Err(err) => return module_validation_problem("invalid_module_id", err).into_response(),
+    };
+    match service.start_module(&module_id).await {
+        Ok(info) => (StatusCode::OK, Json(info)).into_response(),
+        Err(err) => module_runtime_problem(err).into_response(),
+    }
+}
+
+async fn stop_module_runtime(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    if let Err(problem) = authorize(&state.auth, &state.services, &headers, Role::Operator) {
+        return problem.into_response();
+    }
+    let Some(service) = state.services.module_service() else {
+        return module_service_unavailable().into_response();
+    };
+    let module_id = match ModuleId::new(id.trim()) {
+        Ok(id) => id,
+        Err(err) => return module_validation_problem("invalid_module_id", err).into_response(),
+    };
+    match service.stop(&module_id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(err) => module_runtime_problem(err).into_response(),
+    }
+}
+
+async fn stop_all_module_runtimes(State(state): State<HttpState>, headers: HeaderMap) -> Response {
+    if let Err(problem) = authorize(&state.auth, &state.services, &headers, Role::Operator) {
+        return problem.into_response();
+    }
+    let Some(service) = state.services.module_service() else {
+        return module_service_unavailable().into_response();
+    };
+    match service.stop_all_modules().await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(err) => module_runtime_problem(err).into_response(),
+    }
+}
+
+async fn restart_module_runtime(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    if let Err(problem) = authorize(&state.auth, &state.services, &headers, Role::Operator) {
+        return problem.into_response();
+    }
+    let Some(service) = state.services.module_service() else {
+        return module_service_unavailable().into_response();
+    };
+    let module_id = match ModuleId::new(id.trim()) {
+        Ok(id) => id,
+        Err(err) => return module_validation_problem("invalid_module_id", err).into_response(),
+    };
+    match service.restart(&module_id).await {
+        Ok(info) => (StatusCode::OK, Json(info)).into_response(),
+        Err(err) => module_runtime_problem(err).into_response(),
+    }
+}
+
+async fn release_dev_overrides(State(state): State<HttpState>, headers: HeaderMap) -> Response {
+    if let Err(problem) = authorize(&state.auth, &state.services, &headers, Role::Operator) {
+        return problem.into_response();
+    }
+    let Some(service) = state.services.module_service() else {
+        return module_service_unavailable().into_response();
+    };
+    let outcomes = match service
+        .release_all_dev_overrides_without_restart(&state.info.app_version)
+        .await
+    {
+        Ok(outcomes) => outcomes,
+        Err(err) => {
+            return http_problem(
+                StatusCode::BAD_REQUEST,
+                http_messages::problems::service_operation_failed(err),
+            )
+            .into_response();
+        }
+    };
+    let released = outcomes
+        .into_iter()
+        .filter(|(_, outcome)| outcome.dev_override_cleared)
+        .map(|(module_id, _)| module_id.to_string())
+        .collect();
+    (
+        StatusCode::OK,
+        Json(ReleaseDevOverridesResponse { released }),
+    )
+        .into_response()
+}
+
+async fn proxy_module_service(
+    State(state): State<HttpState>,
+    AxumPath((service_param, tail)): AxumPath<(String, String)>,
+    method: Method,
+    headers: HeaderMap,
+    OriginalUri(original_uri): OriginalUri,
+    body: Body,
+) -> Response {
+    match gateway_proxy(
+        state,
+        service_param,
+        tail,
+        method,
+        headers,
+        original_uri,
+        body,
+        GatewayRequestKind::Http,
+    )
+    .await
+    {
+        Ok(resp) => resp,
+        Err(problem) => problem.into_response(),
+    }
+}
+
+async fn proxy_module_service_grpc(
+    State(state): State<HttpState>,
+    AxumPath((service_param, tail)): AxumPath<(String, String)>,
+    method: Method,
+    headers: HeaderMap,
+    OriginalUri(original_uri): OriginalUri,
+    body: Body,
+) -> Response {
+    match gateway_proxy(
+        state,
+        service_param,
+        tail,
+        method,
+        headers,
+        original_uri,
+        body,
+        GatewayRequestKind::Grpc,
+    )
+    .await
+    {
+        Ok(resp) => resp,
+        Err(problem) => problem.into_response(),
+    }
+}
+
+async fn gateway_proxy(
+    state: HttpState,
+    service_param: String,
+    tail: String,
+    method: Method,
+    headers: HeaderMap,
+    original_uri: Uri,
+    body: Body,
+    kind: GatewayRequestKind,
+) -> Result<Response, ServiceActionProblem> {
+    let Some(module_service) = state.services.module_service() else {
+        return Err(module_service_unavailable());
+    };
+    let Some(security) = state.services.security_manager() else {
+        return Err(http_problem(
+            StatusCode::SERVICE_UNAVAILABLE,
+            http_messages::problems::gateway_security_unavailable(),
+        ));
+    };
+    let request_path = original_uri.path().to_string();
+
+    let (result, audit) = async {
+        let service_id = match decode_service_id(&service_param) {
+            Ok(id) => id,
+            Err(problem) => return (Err(problem), None),
+        };
+        let snapshot = match state.registry.get(&service_id) {
+            Some(snapshot) => snapshot,
+            None => {
+                return (
+                    Err(http_problem(
+                        StatusCode::NOT_FOUND,
+                        http_messages::problems::gateway_unknown_service(&service_id),
+                    )),
+                    None,
+                )
+            }
+        };
+        let ingress_owned = snapshot.descriptor.ingress.clone();
+        let ingress = ingress_owned.as_ref();
+        let access = ingress
+            .map(|meta| meta.access)
+            .unwrap_or(ServiceIngressAccess::Internal);
+        let audit_ctx = if matches!(access, ServiceIngressAccess::Public) {
+            Some(GatewayAuditContext::new(
+                Arc::clone(&state.services),
+                service_id.clone(),
+                method.clone(),
+                request_path.clone(),
+                access,
+                kind,
+            ))
+        } else {
+            None
+        };
+
+        if kind == GatewayRequestKind::Grpc {
+            let supports_grpc = ingress
+                .map(|meta| {
+                    meta.protocols
+                        .iter()
+                        .any(|protocol| matches!(protocol, ServiceIngressProtocol::Grpc))
+                })
+                .unwrap_or(false);
+            if !supports_grpc {
+                return (
+                    Err(http_problem(
+                        StatusCode::BAD_REQUEST,
+                        http_messages::problems::gateway_protocol_unsupported(
+                            &service_id,
+                            kind.as_str(),
+                        ),
+                    )),
+                    audit_ctx,
+                );
+            }
+        }
+
+        let security_metadata = snapshot.descriptor.security.as_ref();
+        if matches!(access, ServiceIngressAccess::Internal) && security_metadata.is_none() {
+            return (
+                Err(http_problem(
+                    StatusCode::FORBIDDEN,
+                    http_messages::problems::gateway_security_missing(&service_id),
+                )),
+                audit_ctx,
+            );
+        }
+
+        let mut claims: Option<DelegatedTokenClaims> = None;
+        match access {
+            ServiceIngressAccess::Internal => {
+                let token = match extract_gateway_token(&headers) {
+                    Ok(token) => token,
+                    Err(problem) => return (Err(problem), audit_ctx),
+                };
+                let validated = match security.validate_service_token(token) {
+                    Ok(claims) => claims,
+                    Err(err) => return (Err(map_service_token_error(err)), audit_ctx),
+                };
+                if let Some(metadata) = security_metadata {
+                    if !metadata.allows_claims(&validated) {
+                        return (
+                            Err(http_problem(
+                                StatusCode::FORBIDDEN,
+                                http_messages::problems::gateway_access_denied(&service_id),
+                            )),
+                            audit_ctx,
+                        );
+                    }
+                }
+                claims = Some(validated);
+            }
+            ServiceIngressAccess::Public => match extract_optional_gateway_token(&headers) {
+                Ok(Some(token)) => {
+                    let validated = match security.validate_service_token(token) {
+                        Ok(claims) => claims,
+                        Err(err) => return (Err(map_service_token_error(err)), audit_ctx),
+                    };
+                    if let Some(metadata) = security_metadata {
+                        if !metadata.allows_claims(&validated) {
+                            return (
+                                Err(http_problem(
+                                    StatusCode::FORBIDDEN,
+                                    http_messages::problems::gateway_access_denied(&service_id),
+                                )),
+                                audit_ctx,
+                            );
+                        }
+                    }
+                    claims = Some(validated);
+                }
+                Ok(None) => {}
+                Err(problem) => return (Err(problem), audit_ctx),
+            },
+        }
+
+        let rate_limit_override = ingress.and_then(|meta| match meta.rate_limit {
+            ServiceRateLimit::Default => None,
+            ServiceRateLimit::Unlimited => Some(0),
+            ServiceRateLimit::CustomPerSecond(limit) => Some(limit),
+        });
+        if !SERVICE_RATE_LIMITER
+            .try_acquire_with_limit(&service_id, rate_limit_override)
+            .await
+        {
+            return (
+                Err(http_problem(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    http_messages::problems::gateway_rate_limited(&service_id),
+                )),
+                audit_ctx,
+            );
+        }
+        let target = match module_service.resolve_ingress_target(&service_id).await {
+            Ok(target) => target,
+            Err(err) => return (Err(map_ingress_error(err, &service_id)), audit_ctx),
+        };
+        let path = service_route_path(ingress, &tail, original_uri.query());
+        let target_url = build_target_url(&target, &path);
+        let reqwest_method = match map_reqwest_method(&method) {
+            Ok(method) => method,
+            Err(problem) => return (Err(problem), audit_ctx),
+        };
+        let body_bytes = match collect_request_body(body).await {
+            Ok(bytes) => bytes,
+            Err(problem) => return (Err(problem), audit_ctx),
+        };
+
+        let mut builder = HTTP_GATEWAY_CLIENT
+            .request(reqwest_method, target_url)
+            .header("x-fenrir-gateway-service", &service_id)
+            .header("x-fenrir-gateway-protocol", kind.as_str());
+
+        if let Some(claims) = &claims {
+            builder = builder
+                .header("x-fenrir-actor", claims.actor.identifier())
+                .header("x-fenrir-tenant", claims.tenant_id.as_str());
+            if !claims.scopes.is_empty() {
+                let scopes = claims
+                    .scopes
+                    .iter()
+                    .map(|scope| scope.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                builder = builder.header("x-fenrir-scopes", scopes);
+            }
+        } else {
+            builder = builder
+                .header("x-fenrir-actor", "public")
+                .header("x-fenrir-tenant", "public");
+        }
+
+        for (name, value) in headers.iter() {
+            if name == HOST {
+                continue;
+            }
+            if let (Ok(header_name), Ok(header_value)) = (
+                ReqwestHeaderName::from_bytes(name.as_str().as_bytes()),
+                ReqwestHeaderValue::from_bytes(value.as_bytes()),
+            ) {
+                builder = builder.header(header_name, header_value);
+            }
+        }
+
+        let response = match builder.body(body_bytes).send().await {
+            Ok(resp) => resp,
+            Err(err) => {
+                tracing::warn!(
+                    service = %service_id,
+                    target = %target_log_label(&target),
+                    error = %err,
+                    "module gateway upstream request failed"
+                );
+                return (
+                    Err(http_problem(
+                        StatusCode::BAD_GATEWAY,
+                        http_messages::problems::gateway_upstream_unreachable(&service_id),
+                    )),
+                    audit_ctx,
+                );
+            }
+        };
+
+        (convert_upstream_response(response).await, audit_ctx)
+    }
+    .await;
+
+    if let Some(ctx) = audit {
+        match &result {
+            Ok(resp) => ctx.log(AuditOutcome::Success, resp.status()),
+            Err(problem) => ctx.log(AuditOutcome::Failure, problem.status),
+        }
+    }
+
+    result
+}
+
 pub(super) fn build_router(state: HttpState) -> Router {
     Router::new()
         .route("/", get(index))
@@ -768,6 +1669,23 @@ pub(super) fn build_router(state: HttpState) -> Router {
         .route("/modules/install", post(install_module_version))
         .route("/modules/update", post(update_module_versions))
         .route("/modules/:id", delete(uninstall_module_version))
+        .route("/modules/runtime/:id/start", post(start_module_runtime))
+        .route("/modules/runtime/:id/stop", post(stop_module_runtime))
+        .route("/modules/runtime/:id/restart", post(restart_module_runtime))
+        .route("/modules/runtime/stop-all", post(stop_all_module_runtimes))
+        .route(
+            "/modules/runtime/release-dev-overrides",
+            post(release_dev_overrides),
+        )
+        .route("/modules/runtime/tokens", post(issue_module_service_token))
+        .route(
+            "/gateway/services/:service_id/*path",
+            any(proxy_module_service),
+        )
+        .route(
+            "/gateway/grpc/:service_id/*path",
+            any(proxy_module_service_grpc),
+        )
         .with_state(state)
 }
 
@@ -886,6 +1804,7 @@ async fn list_services(State(state): State<HttpState>, headers: HeaderMap) -> Re
         .registry
         .snapshot()
         .into_iter()
+        .filter(|snapshot| !is_module_placeholder(&snapshot.descriptor.id))
         .map(snapshot_to_summary)
         .collect();
     services.sort_by(|a, b| a.id.cmp(&b.id));
@@ -1591,6 +2510,54 @@ fn push_audit_event(
             }
         }
         Err(err) => warn!(error = %err, "failed to build audit event"),
+    }
+}
+
+#[derive(Clone)]
+struct GatewayAuditContext {
+    services: Arc<AppServices>,
+    service_id: String,
+    method: Method,
+    path: String,
+    access: ServiceIngressAccess,
+    protocol: GatewayRequestKind,
+}
+
+impl GatewayAuditContext {
+    fn new(
+        services: Arc<AppServices>,
+        service_id: String,
+        method: Method,
+        path: String,
+        access: ServiceIngressAccess,
+        protocol: GatewayRequestKind,
+    ) -> Self {
+        Self {
+            services,
+            service_id,
+            method,
+            path,
+            access,
+            protocol,
+        }
+    }
+
+    fn log(&self, outcome: AuditOutcome, status: StatusCode) {
+        let metadata = AuditMetadata::default()
+            .insert("transport", "http")
+            .insert("gateway_protocol", self.protocol.as_str())
+            .insert("ingress_access", self.access.as_str())
+            .insert("method", self.method.as_str())
+            .insert("path", &self.path)
+            .insert("status", status.as_str());
+        push_audit_event(
+            &self.services,
+            AuditActor::System,
+            "gateway.proxy",
+            &self.service_id,
+            outcome,
+            metadata,
+        );
     }
 }
 

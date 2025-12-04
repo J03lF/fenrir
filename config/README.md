@@ -48,6 +48,10 @@ export FENRIR_HTTP_TOKEN_VIEWER=testv
 export FENRIR_REGISTRY_TOKEN="test12345678910111213141516"
 export FENRIR_IDENTITY_TOKEN=test1234567891202
 
+# Statt alles per Hand zu exportieren kannst du dieselben Variablen auch in `secrets/.env` legen.
+# Fenrir lädt diese Datei automatisch (bzw. eine alternative via `FENRIR_ENV_FILE=/path/to/.env`),
+# solange der jeweilige Key noch nicht im Environment gesetzt ist.
+
 
 export FENRIR_IDENTITY_TLS_CA="/opt/fenrir/development/fenrir/config/certs/test-ca.crt"
 export FENRIR_IDENTITY_TLS_CERT="/opt/fenrir/development/fenrir/config/certs/identity-client.crt"
@@ -73,7 +77,36 @@ strategy = "dynamic"
 [modules.runtime.ports.range]
 min = 41000
 max = 46000
+
+[modules.runtime.clients]
+timeout_ms = 10000
+retries = 2
+backoff_ms = 200
+health_probe_interval_seconds = 30
+
+[modules.runtime.clients.tls]
+# ca_cert_path = "config/certs/control-plane-ca.pem"
+# client_cert_path = "config/certs/control-plane-client.crt"
+# client_key_path = "config/certs/control-plane-client.key"
+accept_invalid_certs = false
+
+[modules.services."module:fenrir-api".env]
+# PUBLIC_URL = "https://tickets.local"
+
+[modules.services."module:fenrir-api".secrets]
+# API_KEY = "env:FENRIR_API_KEY"
+
+[modules.services."module:fenrir-api".policy]
+# internal_only = false
+# allowed_roles = ["service-read", "service-write"]
+# required_scopes = ["tickets:read"]
+
+[modules.services."module:fenrir-api".policy.tenant]
+# mode = "fixed"
+# value = "default"
 ```
+
+`[modules.runtime.clients]` steuert Timeouts, Retry-/Backoff-Strategien sowie den Health-Probe-Intervall des ModuleService. Der `.tls`-Block erlaubt optionales mTLS gegenüber der Control-Plane. Mit `[modules.services."<service-id>"]` lassen sich pro Service zusätzliche Env-Variablen (`.env`) und Secrets (`.secrets`, nur `env:...`) injizieren sowie die Security-Policy (`.policy`, inkl. `tenant.mode = any|fixed|allow_list`) überschreiben.
 
 Runtime Env Injection
 - Every managed module process receives:
@@ -84,3 +117,27 @@ Runtime Env Injection
   - `FENRIR_SERVICE_PORT` (TCP port number as string).
   - `FENRIR_SERVICE_ADDR` (`127.0.0.1:<port>`).
 Use these instead of hardcoded ports/URLs inside modules.
+- Modules also learn about the DB connector endpoint:
+  - `FENRIR_DB_CONNECTOR_PROTOCOL` (`ipc` or `tcp`),
+  - `FENRIR_DB_CONNECTOR_ENDPOINT` (socket path or host:port),
+  - `FENRIR_DB_CONNECTOR_URI` (convenience URI).
+- `FENRIR_CONTROL_PLANE_URL` points to the HTTP control-plane (`http[s]://host:port`) for lifecycle- and token APIs.
+- Control-plane client settings are propagated via `FENRIR_CONTROL_PLANE_TIMEOUT_MS`, `FENRIR_CONTROL_PLANE_RETRY_ATTEMPTS`, `FENRIR_CONTROL_PLANE_RETRY_BACKOFF_MS` as well as optional mTLS pointers `FENRIR_CONTROL_PLANE_TLS_CA_CERT`, `FENRIR_CONTROL_PLANE_TLS_CLIENT_CERT`, `FENRIR_CONTROL_PLANE_TLS_CLIENT_KEY`, `FENRIR_CONTROL_PLANE_TLS_ACCEPT_INVALID`. The module-kit uses these to configure reqwest clients with consistent timeouts/backoffs.
+- All OTEL-related host variables (`OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`, `OTEL_EXPORTER_OTLP_*`, `TRACEPARENT`, `TRACESTATE`) are mirrored into module environments so telemetry flows without bespoke config.
+
+Delegated Service Tokens
+- `[security.service_tokens]` controls how long delegated service credentials stay valid (`lifetime_seconds`) and when idle tokens are retired (`idle_timeout_seconds`).
+- Fenrir injects these ephemeral tokens into managed modules via `FENRIR_SERVICE_TOKEN`; modules must present them when calling other services through the internal gateway.
+- Keep `cleanup_interval_seconds` low (default 60s) to reclaim stale tokens quickly in development.
+
+Internal Gateway
+- Module HTTP endpoints are mounted on the control-plane server at `/gateway/services/<service-id>/*` (URL-encode `service-id`, e.g. `module%3Afenrir-api`).
+- Calls must include `Authorization: Bearer <FENRIR_SERVICE_TOKEN>`; the gateway enforces `internal_only`, allowed roles, and scopes from the service descriptor and rate-limits each service (120 req/s) before proxying to the module.
+
+DB Connector & Scoped Tokens
+- `modules.runtime.default_service_scopes` lists the scopes automatically granted to module service tokens (default `["db:read"]`).
+- Modules talk to the DB connector exclusively over the provided IPC/TCP endpoint; every request must include a service token with `db:read` or `db:write`.
+- The connector proxies SQL statements via Fenrir's DB adapters, so modules never read raw DB credentials.
+- Requests now support prepared statements: set `"command": "prepared"`, provide `"params": [{"name": "p1", "value": 42}, ...]` and optionally `"tenant": {"param": "tenant_id", "mode": "inject|require_match"}` to bind the caller tenant.
+- Use the bundled `fenrir-module-kit` crate for a ready-made connector client; it reads all `FENRIR_*` env vars, automatically exchanges `db:write` tokens via `POST /modules/runtime/tokens`, and exposes high-level helpers for simple/prepared statements.
+- The control plane exposes lifecycle hooks at `/modules/runtime/:id/{start,stop,restart}` (role `operator`) and quarantines modules after repeated start failures. Quarantine windows and status notes are visible via the Service Registry.

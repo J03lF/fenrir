@@ -1,19 +1,29 @@
-use std::sync::Arc;
+use std::{env, path::PathBuf, sync::Arc};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tracing::{info, warn};
 
+use crate::infra::db::connector::start_connector_server;
 use crate::infra::http::HTTP_SERVICE_ID;
 use crate::infra::{logging, ssh, telemetry};
-use crate::services::ServiceStatus;
+use crate::security::service::ServiceScope;
+use crate::services::{
+    DbConnectorService, ServiceDescriptor, ServiceKind, ServiceSecurityMetadata, ServiceStatus,
+    ServiceTag, ServiceTenantGuard,
+};
 use crate::utils::messages::boot::{
-    config_reload as config_reload_messages, transports as transport_messages,
+    config_reload as config_reload_messages,
+    services::{
+        descriptions as service_descriptions, names as service_names, notes as service_notes,
+    },
+    transports as transport_messages,
 };
 
 use super::bootstrap::bootstrap_modules;
 use super::context::BootContext;
 
 pub async fn start_transports(ctx: &BootContext) -> Result<()> {
+    initialize_db_connector(ctx).await?;
     let module_service = ctx.services.module_service();
     if !ctx.config.modules.bootstrap.is_empty() {
         match module_service.clone() {
@@ -73,6 +83,47 @@ pub async fn start_transports(ctx: &BootContext) -> Result<()> {
     }
     spawn_config_reloader(ctx)?;
     info!("{}", transport_messages::TRANSPORT_INITIALISATION_TRIGGERED);
+    Ok(())
+}
+
+async fn initialize_db_connector(ctx: &BootContext) -> Result<()> {
+    let runtime_dir = env::var("FENRIR_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| env::temp_dir());
+    let Some(module_service) = ctx.services.module_service() else {
+        return Ok(());
+    };
+    let Some(security_manager) = ctx.services.security_manager() else {
+        return Ok(());
+    };
+    let connector_service = Arc::new(DbConnectorService::new(
+        Arc::clone(&ctx.services.db_shell),
+        security_manager,
+    ));
+    let endpoint = start_connector_server(&runtime_dir, Arc::clone(&connector_service))
+        .await
+        .context("db connector startup failed")?;
+    module_service.configure_db_connector(Some(endpoint));
+    ctx.services.registry().register(
+        ServiceDescriptor::new(
+            "db-connector",
+            service_names::DB_CONNECTOR,
+            service_descriptions::DB_CONNECTOR,
+            ServiceKind::Infrastructure,
+        )
+        .with_tags(&[ServiceTag::Platform])
+        .with_security(ServiceSecurityMetadata {
+            internal_only: true,
+            allowed_roles: ServiceSecurityMetadata::default_allowed_roles(),
+            required_scopes: vec![
+                ServiceScope::new("db:read").expect("db:read scope"),
+                ServiceScope::new("db:write").expect("db:write scope"),
+            ],
+            tenant: ServiceTenantGuard::any(),
+        }),
+        ServiceStatus::Active,
+        Some(service_notes::READY.to_string()),
+    );
     Ok(())
 }
 

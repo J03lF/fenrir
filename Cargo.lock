@@ -761,6 +761,7 @@ dependencies = [
  "clap",
  "config",
  "ed25519-dalek",
+ "fenrir-module-kit",
  "flate2",
  "futures",
  "hex",
@@ -802,6 +803,19 @@ dependencies = [
  "urlencoding",
  "uuid",
  "whoami",
+]
+
+[[package]]
+name = "fenrir-module-kit"
+version = "0.1.0"
+source = "git+https://github.com/J03lF/module-kit.git#c2e0863b56c25c2b3c03ec8069d6fc6519c5c282"
+dependencies = [
+ "base64 0.21.7",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "url",
 ]
 
 [[package]]

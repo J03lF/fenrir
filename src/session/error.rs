@@ -9,13 +9,6 @@ pub enum SessionError {
     Storage(String),
 }
 
-impl SessionError {
-    #[allow(dead_code)]
-    pub fn storage<E: fmt::Display>(err: E) -> Self {
-        SessionError::Storage(err.to_string())
-    }
-}
-
 impl fmt::Display for SessionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

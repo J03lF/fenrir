@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use tracing::{info, warn};
 
@@ -9,8 +10,9 @@ use crate::cli::commands::registry::{
     CliDependencies, CommandOutcome, CommandRegistry, ConfirmationRequest, ShellEnvironment,
 };
 use crate::cli::commands::table::Table;
-use crate::domain::module::{ModuleId, ModuleVersion};
-use crate::services::module::{ModuleService, ModuleSyncOutcome};
+use crate::domain::module::{ModuleId, ModuleInstallSource, ModuleRuntimeInfo, ModuleVersion};
+use crate::services::module::{DistributionAction, ModuleService, ModuleSyncOutcome};
+use crate::services::{ServiceSnapshot, ServiceStatus};
 use crate::utils;
 use crate::utils::messages::cli::builtins::modules as msg_modules;
 
@@ -18,7 +20,7 @@ use super::ctx::{dev_services_metadata, module_error_metadata, ModulesCommandCtx
 use super::entries::{available_subcommands, resolve_module_subcommand};
 use super::output::{
     module_error_code, render_distribution_plan, render_manifest, render_runtime_error,
-    render_service_error,
+    render_service_error, runtime_error_code,
 };
 use super::tasks::{run_release_task, run_synchronize_task, InstallDistributionConfirmation};
 
@@ -156,15 +158,16 @@ fn dispatch_module(
         "install-distribution" => handle_install_distribution(ctx, out, args),
         "synchronize" => handle_synchronize(ctx, out, args),
         "release" => handle_release(ctx, out, args),
+        "release-dev-overrides" => handle_release_dev_overrides(ctx, out, args),
         "uninstall" => handle_uninstall(ctx, out, args),
         "check-updates" => handle_check_updates(ctx, out, args),
         "logs" => handle_logs(ctx, out, args),
+        "services" => handle_services(ctx, out, args),
+        "start" => handle_start(ctx, out, args),
+        "stop" => handle_stop(ctx, out, args),
+        "restart" => handle_restart(ctx, out, args),
+        "stop-all" => handle_stop_all(ctx, out, args),
         other => {
-            if matches!(other, "start" | "stop" | "restart") {
-                writeln!(out, "{}", msg_modules::routing::lifecycle_disabled(other))?;
-                writeln!(out, "{}", msg_modules::routing::LIFECYCLE_SUMMARY)?;
-                return Ok(CommandOutcome::Continue);
-            }
             warn!(
                 target = "cli::modules",
                 subcommand = other,
@@ -200,6 +203,19 @@ fn handle_list(
         return Ok(CommandOutcome::Continue);
     }
 
+    let dev_override_modules: HashSet<String> =
+        match ctx.module_call(|service| async move { Ok(service.dev_override_modules().await) }) {
+            Ok(ids) => ids.into_iter().map(|id| id.to_string()).collect(),
+            Err(err) => {
+                warn!(
+                    target = "cli::modules",
+                    error = %err,
+                    "failed to read dev override state"
+                );
+                HashSet::new()
+            }
+        };
+
     let runtime_infos: HashMap<_, _> =
         match ctx.runtime_call(|service| async move { service.list_running().await }) {
             Ok(infos) => infos
@@ -218,7 +234,13 @@ fn handle_list(
 
     for module in modules {
         let module_id = module.manifest.id.clone();
-        let source_label = module.source.label().to_string();
+        let dev_override_active = dev_override_modules.contains(&module_id);
+        let mut source_label = module.source.label().to_string();
+        let mut status_label;
+        let mut pid_label = msg_modules::list_modules::EMPTY_VALUE.to_string();
+        let mut port_label = msg_modules::list_modules::EMPTY_VALUE.to_string();
+        let mut uptime_label = msg_modules::list_modules::EMPTY_VALUE.to_string();
+
         if let Some(runtime_info) = runtime_infos.get(&module_id) {
             let duration = runtime_info
                 .started_at
@@ -226,32 +248,41 @@ fn handle_list(
                 .map(utils::format_brief_duration)
                 .unwrap_or_else(|| msg_modules::list_modules::EMPTY_VALUE.to_string());
 
-            table.add_row(vec![
-                module_id,
-                module.manifest.version.to_string(),
-                source_label.clone(),
-                msg_modules::list_modules::STATUS_RUNNING.to_string(),
-                runtime_info
-                    .pid
-                    .map(|p| p.to_string())
-                    .unwrap_or_else(|| msg_modules::list_modules::EMPTY_VALUE.to_string()),
-                runtime_info
-                    .port
-                    .map(|p| p.to_string())
-                    .unwrap_or_else(|| msg_modules::list_modules::EMPTY_VALUE.to_string()),
-                duration,
-            ]);
+            status_label = msg_modules::list_modules::STATUS_RUNNING.to_string();
+            pid_label = runtime_info
+                .pid
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| msg_modules::list_modules::EMPTY_VALUE.to_string());
+            port_label = runtime_info
+                .port
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| msg_modules::list_modules::EMPTY_VALUE.to_string());
+            uptime_label = duration;
         } else {
-            table.add_row(vec![
-                module_id,
-                module.manifest.version.to_string(),
-                source_label,
-                msg_modules::list_modules::STATUS_STOPPED.to_string(),
-                msg_modules::list_modules::EMPTY_VALUE.to_string(),
-                msg_modules::list_modules::EMPTY_VALUE.to_string(),
-                msg_modules::list_modules::EMPTY_VALUE.to_string(),
-            ]);
+            status_label = msg_modules::list_modules::STATUS_STOPPED.to_string();
         }
+
+        if dev_override_active && !module.source.is_synchronized() {
+            source_label = ModuleInstallSource::LocalOverride.label().to_string();
+        }
+
+        if module.source.is_synchronized() || dev_override_active {
+            status_label = format!(
+                "{} {}",
+                status_label,
+                msg_modules::list_modules::STATUS_SYNC_SUFFIX
+            );
+        }
+
+        table.add_row(vec![
+            module_id,
+            module.manifest.version.to_string(),
+            source_label,
+            status_label,
+            pid_label,
+            port_label,
+            uptime_label,
+        ]);
     }
 
     table.render(out, "  ")?;
@@ -381,11 +412,45 @@ fn handle_install_distribution(
         return Ok(CommandOutcome::Continue);
     }
 
-    render_distribution_plan(out, &plan)?;
+    let installed_modules =
+        match ctx.module_call(|service| async move { service.list_installed().await }) {
+            Ok(modules) => modules,
+            Err(err) => {
+                render_service_error(out, msg_modules::list_modules::LOAD_ERROR_CONTEXT, &err)?;
+                return Ok(CommandOutcome::Continue);
+            }
+        };
+
+    let mut synchronized: HashSet<String> = installed_modules
+        .into_iter()
+        .filter(|module| module.source.is_synchronized())
+        .filter_map(|module| module.manifest.module_id().ok())
+        .map(|id| id.to_string())
+        .collect();
+
+    let dev_override_modules: HashSet<String> =
+        match ctx.module_call(|service| async move { Ok(service.dev_override_modules().await) }) {
+            Ok(ids) => ids.into_iter().map(|id| id.to_string()).collect(),
+            Err(err) => {
+                warn!(
+                    target = "cli::modules",
+                    error = %err,
+                    "failed to read dev override state"
+                );
+                HashSet::new()
+            }
+        };
+    synchronized.extend(dev_override_modules);
+
+    render_distribution_plan(out, &plan, &synchronized)?;
 
     let actionable: Vec<_> = plan
         .iter()
-        .filter(|entry| entry.action.requires_execution())
+        .filter(|entry| {
+            entry.action.requires_execution()
+                && !(synchronized.contains(entry.module_id.as_str())
+                    && matches!(entry.action, DistributionAction::Update))
+        })
         .cloned()
         .collect();
 
@@ -556,6 +621,24 @@ fn handle_synchronize(
                 AuditOutcome::Success,
                 dev_services_metadata(&dev_services),
             );
+            if let Some(run) = &dev_services.run {
+                if run.auto_start {
+                    let mut metadata = AuditMetadata::default()
+                        .insert("command", run.command.clone())
+                        .insert("workdir", run.workdir.display().to_string())
+                        .insert("auto_restart", run.auto_restart.to_string());
+                    if let Some(log_path) = &run.log_path {
+                        metadata = metadata.insert("log_path", log_path.display().to_string());
+                    }
+                    ctx.record_audit(
+                        "module::sync::dev-agent-start",
+                        &module_id,
+                        Some(&dev_services.version),
+                        AuditOutcome::Success,
+                        metadata,
+                    );
+                }
+            }
         }
         Err(err) => {
             render_service_error(out, msg_modules::synchronize_flow::ERROR_CONTEXT, &err)?;
@@ -608,7 +691,8 @@ fn handle_release(
     });
 
     match result {
-        Ok(install_result) => {
+        Ok(outcome) => {
+            let install_result = outcome.install_result;
             writeln!(
                 out,
                 "{}",
@@ -626,6 +710,15 @@ fn handle_release(
                 AuditOutcome::Success,
                 AuditMetadata::default().insert("source", install_result.source.label()),
             );
+            if outcome.dev_override_cleared {
+                ctx.record_audit(
+                    "module::sync::dev-agent-stop",
+                    &module_id,
+                    Some(&recorded_version),
+                    AuditOutcome::Success,
+                    AuditMetadata::default().insert("reason", "release"),
+                );
+            }
         }
         Err(err) => {
             render_service_error(out, msg_modules::release_flow::ERROR_CONTEXT, &err)?;
@@ -638,6 +731,73 @@ fn handle_release(
                     .insert("error_code", module_error_code(&err))
                     .insert("error", err.to_string()),
             );
+        }
+    }
+
+    Ok(CommandOutcome::Continue)
+}
+
+fn handle_release_dev_overrides(
+    ctx: &ModulesCommandCtx,
+    out: &mut dyn Write,
+    args: &[&str],
+) -> io::Result<CommandOutcome> {
+    if !args.is_empty() {
+        writeln!(out, "{}", msg_modules::release_dev_overrides::USAGE)?;
+        return Ok(CommandOutcome::Continue);
+    }
+
+    let fenrir_version = ctx.deps().config.app.version.clone();
+    let fenrir_version_for_call = fenrir_version.clone();
+    let result = ctx.module_call(|service| async move {
+        service
+            .release_all_dev_overrides(&fenrir_version_for_call)
+            .await
+    });
+
+    match result {
+        Ok(outcomes) => {
+            if outcomes.is_empty() {
+                writeln!(out, "{}", msg_modules::release_dev_overrides::EMPTY_STATE)?;
+                return Ok(CommandOutcome::Continue);
+            }
+            writeln!(
+                out,
+                "{}",
+                msg_modules::release_dev_overrides::releasing(outcomes.len())
+            )?;
+            for (module_id, outcome) in outcomes {
+                let install_result = outcome.install_result;
+                writeln!(
+                    out,
+                    "{}",
+                    msg_modules::release_flow::success(
+                        &install_result.manifest.id.to_string(),
+                        &fenrir_version,
+                        &install_result.manifest.version.to_string()
+                    )
+                )?;
+                let recorded_version = ModuleVersion(install_result.manifest.version.clone());
+                ctx.record_audit(
+                    "module::release",
+                    &module_id,
+                    Some(&recorded_version),
+                    AuditOutcome::Success,
+                    AuditMetadata::default().insert("source", install_result.source.label()),
+                );
+                if outcome.dev_override_cleared {
+                    ctx.record_audit(
+                        "module::sync::dev-agent-stop",
+                        &module_id,
+                        Some(&recorded_version),
+                        AuditOutcome::Success,
+                        AuditMetadata::default().insert("reason", "release-all"),
+                    );
+                }
+            }
+        }
+        Err(err) => {
+            render_service_error(out, msg_modules::release_dev_overrides::ERROR_CONTEXT, &err)?;
         }
     }
 
@@ -776,6 +936,259 @@ fn handle_logs(
     Ok(CommandOutcome::Continue)
 }
 
+fn handle_stop_all(
+    ctx: &ModulesCommandCtx,
+    out: &mut dyn Write,
+    args: &[&str],
+) -> io::Result<CommandOutcome> {
+    if !args.is_empty() {
+        writeln!(out, "{}", msg_modules::stop_all::USAGE)?;
+        return Ok(CommandOutcome::Continue);
+    }
+
+    let virtual_id = ModuleId::new("all").expect("static module id");
+    let result = ctx.runtime_call(|service| async move { service.stop_all_modules().await });
+    match result {
+        Ok(_) => {
+            writeln!(out, "{}", msg_modules::stop_all::SUCCESS)?;
+            ctx.record_audit(
+                "module::stop-all",
+                &virtual_id,
+                None,
+                AuditOutcome::Success,
+                AuditMetadata::default(),
+            );
+        }
+        Err(err) => {
+            render_runtime_error(out, msg_modules::stop_all::ERROR_CONTEXT, &err)?;
+            ctx.record_audit(
+                "module::stop-all",
+                &virtual_id,
+                None,
+                AuditOutcome::Failure,
+                AuditMetadata::default()
+                    .insert("error_code", runtime_error_code(&err))
+                    .insert("error", err.to_string()),
+            );
+        }
+    }
+
+    Ok(CommandOutcome::Continue)
+}
+
+fn handle_services(
+    ctx: &ModulesCommandCtx,
+    out: &mut dyn Write,
+    args: &[&str],
+) -> io::Result<CommandOutcome> {
+    if args.len() > 1 {
+        writeln!(out, "{}", msg_modules::services_view::USAGE)?;
+        return Ok(CommandOutcome::Continue);
+    }
+
+    let filter = match args.first() {
+        Some(value) => match parse_module_id(out, value)? {
+            Some(id) => Some(id.to_string()),
+            None => return Ok(CommandOutcome::Continue),
+        },
+        None => None,
+    };
+
+    let registry = ctx.deps().services.registry();
+    let mut rows: Vec<_> = registry
+        .snapshot()
+        .into_iter()
+        .filter_map(ModuleServiceRow::from_snapshot)
+        .collect();
+
+    if let Some(target) = filter.as_ref() {
+        rows.retain(|row| &row.module_id == target);
+    }
+
+    if rows.is_empty() {
+        if let Some(target) = filter {
+            writeln!(
+                out,
+                "{}",
+                msg_modules::services_view::empty_for_module(&target)
+            )?;
+        } else {
+            writeln!(out, "{}", msg_modules::services_view::EMPTY_STATE)?;
+        }
+        return Ok(CommandOutcome::Continue);
+    }
+
+    rows.sort_by(|a, b| {
+        let left = (&a.module_id, a.service_sort_key());
+        let right = (&b.module_id, b.service_sort_key());
+        left.cmp(&right)
+    });
+
+    let runtime_infos =
+        match ctx.runtime_call(|service| async move { service.list_running().await }) {
+            Ok(list) => list
+                .into_iter()
+                .map(|info| (info.module_id.to_string(), info))
+                .collect::<HashMap<_, _>>(),
+            Err(err) => {
+                render_runtime_error(
+                    out,
+                    msg_modules::services_view::RUNTIME_STATUS_ERROR_CONTEXT,
+                    &err,
+                )?;
+                HashMap::new()
+            }
+        };
+
+    render_module_service_table(out, &rows, &runtime_infos)?;
+    Ok(CommandOutcome::Continue)
+}
+
+fn handle_start(
+    ctx: &ModulesCommandCtx,
+    out: &mut dyn Write,
+    args: &[&str],
+) -> io::Result<CommandOutcome> {
+    if args.len() != 1 {
+        writeln!(out, "{}", msg_modules::lifecycle::START_USAGE)?;
+        return Ok(CommandOutcome::Continue);
+    }
+
+    let Some(module_id) = parse_module_id(out, args[0])? else {
+        return Ok(CommandOutcome::Continue);
+    };
+
+    let module_id_for_call = module_id.clone();
+    let result =
+        ctx.runtime_call(|service| async move { service.start_module(&module_id_for_call).await });
+
+    match result {
+        Ok(info) => {
+            let module_label = module_id.to_string();
+            writeln!(
+                out,
+                "{}",
+                msg_modules::lifecycle::start_success(&module_label, info.pid, info.port,)
+            )?;
+            ctx.record_audit(
+                "module::start",
+                &module_id,
+                Some(&info.version),
+                AuditOutcome::Success,
+                runtime_success_metadata(&info),
+            );
+        }
+        Err(err) => {
+            render_runtime_error(out, msg_modules::lifecycle::START_ERROR_CONTEXT, &err)?;
+            ctx.record_audit(
+                "module::start",
+                &module_id,
+                None,
+                AuditOutcome::Failure,
+                module_error_metadata(runtime_error_code(&err), err.to_string()),
+            );
+        }
+    }
+
+    Ok(CommandOutcome::Continue)
+}
+
+fn handle_stop(
+    ctx: &ModulesCommandCtx,
+    out: &mut dyn Write,
+    args: &[&str],
+) -> io::Result<CommandOutcome> {
+    if args.len() != 1 {
+        writeln!(out, "{}", msg_modules::lifecycle::STOP_USAGE)?;
+        return Ok(CommandOutcome::Continue);
+    }
+
+    let Some(module_id) = parse_module_id(out, args[0])? else {
+        return Ok(CommandOutcome::Continue);
+    };
+
+    let module_id_for_call = module_id.clone();
+    let result = ctx.runtime_call(|service| async move { service.stop(&module_id_for_call).await });
+
+    match result {
+        Ok(()) => {
+            writeln!(
+                out,
+                "{}",
+                msg_modules::lifecycle::stop_success(&module_id.to_string())
+            )?;
+            ctx.record_audit(
+                "module::stop",
+                &module_id,
+                None,
+                AuditOutcome::Success,
+                AuditMetadata::default().insert("status", "stopped"),
+            );
+        }
+        Err(err) => {
+            render_runtime_error(out, msg_modules::lifecycle::STOP_ERROR_CONTEXT, &err)?;
+            ctx.record_audit(
+                "module::stop",
+                &module_id,
+                None,
+                AuditOutcome::Failure,
+                module_error_metadata(runtime_error_code(&err), err.to_string()),
+            );
+        }
+    }
+
+    Ok(CommandOutcome::Continue)
+}
+
+fn handle_restart(
+    ctx: &ModulesCommandCtx,
+    out: &mut dyn Write,
+    args: &[&str],
+) -> io::Result<CommandOutcome> {
+    if args.len() != 1 {
+        writeln!(out, "{}", msg_modules::lifecycle::RESTART_USAGE)?;
+        return Ok(CommandOutcome::Continue);
+    }
+
+    let Some(module_id) = parse_module_id(out, args[0])? else {
+        return Ok(CommandOutcome::Continue);
+    };
+
+    let module_id_for_call = module_id.clone();
+    let result =
+        ctx.runtime_call(|service| async move { service.restart(&module_id_for_call).await });
+
+    match result {
+        Ok(info) => {
+            let module_label = module_id.to_string();
+            writeln!(
+                out,
+                "{}",
+                msg_modules::lifecycle::restart_success(&module_label, info.pid, info.port,)
+            )?;
+            ctx.record_audit(
+                "module::restart",
+                &module_id,
+                Some(&info.version),
+                AuditOutcome::Success,
+                runtime_success_metadata(&info),
+            );
+        }
+        Err(err) => {
+            render_runtime_error(out, msg_modules::lifecycle::RESTART_ERROR_CONTEXT, &err)?;
+            ctx.record_audit(
+                "module::restart",
+                &module_id,
+                None,
+                AuditOutcome::Failure,
+                module_error_metadata(runtime_error_code(&err), err.to_string()),
+            );
+        }
+    }
+
+    Ok(CommandOutcome::Continue)
+}
+
 fn parse_module_id(out: &mut dyn Write, raw: &str) -> io::Result<Option<ModuleId>> {
     match ModuleId::new(raw) {
         Ok(id) => Ok(Some(id)),
@@ -834,6 +1247,178 @@ fn parse_module_target(
     };
 
     Ok((module_id, version))
+}
+
+fn render_module_service_table(
+    out: &mut dyn Write,
+    rows: &[ModuleServiceRow],
+    runtime_infos: &HashMap<String, ModuleRuntimeInfo>,
+) -> io::Result<()> {
+    let mut table = Table::new(
+        msg_modules::services_view::HEADERS
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect(),
+    );
+
+    for row in rows {
+        let endpoint = if matches!(row.kind, ModuleServiceEntryKind::Runtime) {
+            runtime_infos
+                .get(&row.module_id)
+                .and_then(|info| info.port.map(|port| format!("127.0.0.1:{port}")))
+        } else {
+            row.endpoint_hint().map(|hint| hint.to_string())
+        }
+        .unwrap_or_else(|| msg_modules::services_view::EMPTY_VALUE.to_string());
+
+        let since = row
+            .since
+            .elapsed()
+            .ok()
+            .map(utils::format_brief_duration)
+            .unwrap_or_else(|| msg_modules::services_view::EMPTY_VALUE.to_string());
+
+        let note = row
+            .note
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .unwrap_or(msg_modules::services_view::EMPTY_VALUE);
+
+        table.add_row(vec![
+            row.module_id.clone(),
+            row.service_label(),
+            row.type_label().to_string(),
+            row.status.label().to_string(),
+            since,
+            row.route(),
+            endpoint,
+            note.to_string(),
+        ]);
+    }
+
+    table.render(out, "  ")
+}
+
+fn runtime_success_metadata(info: &ModuleRuntimeInfo) -> AuditMetadata {
+    let mut metadata = AuditMetadata::default()
+        .insert("status", format!("{:?}", info.status))
+        .insert("restart_count", info.restart_count.to_string());
+    if let Some(pid) = info.pid {
+        metadata = metadata.insert("pid", pid.to_string());
+    }
+    if let Some(port) = info.port {
+        metadata = metadata.insert("port", port.to_string());
+    }
+    metadata
+}
+
+#[derive(Clone)]
+struct ModuleServiceRow {
+    module_id: String,
+    service_suffix: Option<String>,
+    descriptor_id: String,
+    status: ServiceStatus,
+    since: SystemTime,
+    note: Option<String>,
+    endpoint_hint: Option<String>,
+    kind: ModuleServiceEntryKind,
+}
+
+impl ModuleServiceRow {
+    fn from_snapshot(snapshot: ServiceSnapshot) -> Option<Self> {
+        let ServiceSnapshot {
+            descriptor,
+            status,
+            since,
+            note,
+        } = snapshot;
+        let (module_id, suffix) = parse_module_service_id(&descriptor.id)?;
+        if suffix.is_none() {
+            return None;
+        }
+        let endpoint_hint = extract_endpoint_hint(note.as_deref());
+        let kind = if is_dev_endpoint(note.as_deref()) {
+            ModuleServiceEntryKind::DevOverride
+        } else if is_declared_endpoint(note.as_deref()) {
+            ModuleServiceEntryKind::Declared
+        } else {
+            ModuleServiceEntryKind::Runtime
+        };
+        Some(Self {
+            module_id,
+            service_suffix: suffix,
+            descriptor_id: descriptor.id,
+            status,
+            since,
+            note,
+            endpoint_hint,
+            kind,
+        })
+    }
+
+    fn service_label(&self) -> String {
+        match &self.service_suffix {
+            Some(value) if !value.is_empty() => value.to_string(),
+            _ => msg_modules::services_view::RUNTIME_SERVICE_LABEL.to_string(),
+        }
+    }
+
+    fn type_label(&self) -> &'static str {
+        match self.kind {
+            ModuleServiceEntryKind::Runtime => msg_modules::services_view::TYPE_RUNTIME,
+            ModuleServiceEntryKind::DevOverride => msg_modules::services_view::TYPE_DEV,
+            ModuleServiceEntryKind::Declared => msg_modules::services_view::TYPE_DECLARED,
+        }
+    }
+
+    fn route(&self) -> String {
+        format!("service://{}", self.descriptor_id)
+    }
+
+    fn service_sort_key(&self) -> &str {
+        self.service_suffix
+            .as_deref()
+            .unwrap_or(msg_modules::services_view::RUNTIME_SERVICE_LABEL)
+    }
+
+    fn endpoint_hint(&self) -> Option<&str> {
+        self.endpoint_hint.as_deref()
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ModuleServiceEntryKind {
+    Runtime,
+    DevOverride,
+    Declared,
+}
+
+fn parse_module_service_id(id: &str) -> Option<(String, Option<String>)> {
+    let stripped = id.strip_prefix("module:")?;
+    if let Some((module, suffix)) = stripped.split_once("::") {
+        Some((module.to_string(), Some(suffix.to_string())))
+    } else {
+        Some((stripped.to_string(), None))
+    }
+}
+
+fn extract_endpoint_hint(note: Option<&str>) -> Option<String> {
+    note.and_then(|value| {
+        value
+            .strip_prefix("dev endpoint ")
+            .or_else(|| value.strip_prefix("endpoint "))
+            .map(|rest| rest.to_string())
+    })
+}
+
+fn is_dev_endpoint(note: Option<&str>) -> bool {
+    note.map(|value| value.starts_with("dev endpoint "))
+        .unwrap_or(false)
+}
+
+fn is_declared_endpoint(note: Option<&str>) -> bool {
+    note.map(|value| value.starts_with("endpoint "))
+        .unwrap_or(false)
 }
 
 const MODULE_ALIASES: &[&str] = &["module", "modules"];
@@ -909,7 +1494,6 @@ const LOGS_SPEC: ModuleCommandSpec = ModuleCommandSpec::new(
     "logs module <name> [--tail N]",
     ModuleResourceKind::Module,
 );
-
 fn run_scoped_module_command(
     deps: &CliDependencies,
     args: &[&str],

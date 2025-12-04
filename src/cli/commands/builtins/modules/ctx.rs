@@ -272,9 +272,17 @@ pub(super) fn dev_services_metadata(dev_services: &ModuleDevServices) -> AuditMe
         .map(|svc| svc.service_id.clone())
         .collect::<Vec<_>>()
         .join(",");
-    AuditMetadata::default()
+    let mut metadata = AuditMetadata::default()
         .insert("mode", "dev_services")
-        .insert("service_ids", service_ids)
+        .insert("service_ids", service_ids);
+    if let Some(run) = &dev_services.run {
+        metadata = metadata
+            .insert("dev_agent_command", run.command.clone())
+            .insert("dev_agent_workdir", run.workdir.display().to_string());
+    } else {
+        metadata = metadata.insert("dev_agent_command", "not_configured");
+    }
+    metadata
 }
 
 pub(super) fn module_error_metadata(

@@ -42,7 +42,7 @@ impl ServiceRegistry {
         note: impl Into<Option<String>>,
     ) {
         let descriptor_owned = descriptor.into();
-        let id = descriptor_owned.id.clone();
+        let id = descriptor_owned.id().to_string();
         let record = ServiceRecord {
             descriptor: descriptor_owned,
             status,

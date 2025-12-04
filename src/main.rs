@@ -1,4 +1,5 @@
 use clap::Parser;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Parser, Debug)]
@@ -16,11 +17,23 @@ struct Args {
     /// Execute a single command and exit
     #[arg(long)]
     command: Option<String>,
+
+    /// Internal: run the dev agent supervisor
+    #[arg(long, hide = true, value_name = "PATH")]
+    dev_agent_config: Option<PathBuf>,
 }
 
 #[tokio::main]
 async fn main() {
     let args = Args::parse_from(normalize_args());
+
+    if let Some(config_path) = args.dev_agent_config {
+        if let Err(err) = fenrir::dev_agent::run(config_path).await {
+            eprintln!("dev agent failed: {err}");
+            std::process::exit(1);
+        }
+        return;
+    }
 
     if args.check_config {
         handle_check_config();
@@ -121,6 +134,7 @@ fn config_error_code(err: &fenrir::config::ConfigError) -> &'static str {
     match err {
         fenrir::config::ConfigError::MissingEnv { .. } => "CFG-MISSING-SECRET",
         fenrir::config::ConfigError::Invalid(_) => "CFG-INVALID",
+        fenrir::config::ConfigError::InvalidMessage(_) => "CFG-INVALID",
         fenrir::config::ConfigError::MissingConfigFile { .. } => "CFG-MISSING-FILE",
         fenrir::config::ConfigError::InvalidProfile { .. } => "CFG-INVALID-PROFILE",
         fenrir::config::ConfigError::Anyhow(_) => "CFG-DESERIALIZE",

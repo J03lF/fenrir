@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::utils::messages::domain::module as module_messages;
+use crate::utils::system_time_to_rfc3339;
 
 use super::errors::{ModuleServiceError, ModuleStorageError};
 use super::id::ModuleId;
@@ -79,23 +80,45 @@ pub trait ModuleRuntimePort: Send + Sync {
 /// Errors that can occur during module runtime operations
 #[derive(Debug)]
 pub enum ModuleRuntimeError {
-    NotInstalled { module_id: String },
+    NotInstalled {
+        module_id: String,
+    },
 
-    AlreadyRunning { module_id: String },
+    AlreadyRunning {
+        module_id: String,
+    },
 
-    NotRunning { module_id: String },
+    NotRunning {
+        module_id: String,
+    },
 
-    StartFailed { module_id: String, reason: String },
+    StartFailed {
+        module_id: String,
+        reason: String,
+    },
 
-    StopFailed { module_id: String, reason: String },
+    StopFailed {
+        module_id: String,
+        reason: String,
+    },
 
-    PortInUse { port: u16 },
+    PortInUse {
+        port: u16,
+    },
 
-    NoAvailablePorts { range_start: u16, range_end: u16 },
+    NoAvailablePorts {
+        range_start: u16,
+        range_end: u16,
+    },
 
     Io(String),
 
     InvalidState(String),
+
+    Quarantined {
+        module_id: String,
+        resume_at: SystemTime,
+    },
 }
 
 impl From<ModuleRuntimeError> for ModuleServiceError {
@@ -137,6 +160,16 @@ impl std::fmt::Display for ModuleRuntimeError {
             }
             ModuleRuntimeError::InvalidState(message) => {
                 f.write_str(&module_messages::runtime_errors::invalid_state(message))
+            }
+            ModuleRuntimeError::Quarantined {
+                module_id,
+                resume_at,
+            } => {
+                let until = system_time_to_rfc3339(*resume_at)
+                    .unwrap_or_else(|| format!("{:?}", resume_at));
+                f.write_str(&module_messages::runtime_errors::quarantined(
+                    module_id, &until,
+                ))
             }
         }
     }

@@ -2,6 +2,7 @@ pub mod audit;
 pub mod boot;
 pub mod cli;
 pub mod config;
+pub mod dev_agent;
 pub mod domain;
 pub mod infra;
 pub mod prelude;

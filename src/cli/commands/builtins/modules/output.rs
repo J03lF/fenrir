@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io::{self, Write};
 
 use crate::cli::commands::table::Table;
@@ -7,6 +8,7 @@ use crate::domain::module::{
 };
 use crate::services::module::{DistributionAction, DistributionPlanEntry};
 use crate::utils::messages::cli::builtins::modules as msg_modules;
+use crate::utils::system_time_to_rfc3339;
 
 pub(super) fn render_manifest(out: &mut dyn Write, manifest: &ModuleManifest) -> io::Result<()> {
     writeln!(
@@ -69,6 +71,7 @@ pub(super) fn render_manifest(out: &mut dyn Write, manifest: &ModuleManifest) ->
 pub(super) fn render_distribution_plan(
     out: &mut dyn Write,
     plan: &[DistributionPlanEntry],
+    synchronized: &HashSet<String>,
 ) -> io::Result<()> {
     writeln!(out, "{}", msg_modules::distribution_plan_view::TITLE)?;
     let mut table = Table::new(
@@ -79,11 +82,17 @@ pub(super) fn render_distribution_plan(
     );
 
     for entry in plan {
-        let action = match entry.action {
-            DistributionAction::Install => msg_modules::distribution_plan_view::INSTALL_LABEL,
-            DistributionAction::Update => msg_modules::distribution_plan_view::UPDATE_LABEL,
-            DistributionAction::AlreadyCurrent => {
-                msg_modules::distribution_plan_view::CURRENT_LABEL
+        let is_sync = synchronized.contains(entry.module_id.as_str())
+            && matches!(entry.action, DistributionAction::Update);
+        let action = if is_sync {
+            msg_modules::distribution_plan_view::SKIP_LABEL
+        } else {
+            match entry.action {
+                DistributionAction::Install => msg_modules::distribution_plan_view::INSTALL_LABEL,
+                DistributionAction::Update => msg_modules::distribution_plan_view::UPDATE_LABEL,
+                DistributionAction::AlreadyCurrent => {
+                    msg_modules::distribution_plan_view::CURRENT_LABEL
+                }
             }
         };
         let current = entry
@@ -91,11 +100,17 @@ pub(super) fn render_distribution_plan(
             .as_ref()
             .map(|v| v.to_string())
             .unwrap_or_else(|| msg_modules::distribution_plan_view::NO_CURRENT_VERSION.to_string());
+        let note = if is_sync {
+            msg_modules::distribution_plan_view::SKIP_SYNC_NOTE.to_string()
+        } else {
+            String::new()
+        };
         table.add_row(vec![
             action.to_string(),
             entry.module_id.to_string(),
             current,
             entry.target_version.to_string(),
+            note,
         ]);
     }
 
@@ -187,6 +202,7 @@ pub(super) fn runtime_error_code(err: &ModuleRuntimeError) -> &'static str {
         ModuleRuntimeError::NoAvailablePorts { .. } => "no_available_ports",
         ModuleRuntimeError::InvalidState(_) => "invalid_state",
         ModuleRuntimeError::Io(_) => "io_error",
+        ModuleRuntimeError::Quarantined { .. } => "quarantined",
     }
 }
 
@@ -214,38 +230,13 @@ fn runtime_error_message(err: &ModuleRuntimeError) -> String {
         } => msg_modules::runtime_errors::no_available_ports(*range_start, *range_end),
         ModuleRuntimeError::InvalidState(msg) => msg_modules::runtime_errors::invalid_state(msg),
         ModuleRuntimeError::Io(msg) => msg_modules::runtime_errors::io_error(msg),
+        ModuleRuntimeError::Quarantined {
+            module_id,
+            resume_at,
+        } => {
+            let until =
+                system_time_to_rfc3339(*resume_at).unwrap_or_else(|| format!("{:?}", resume_at));
+            msg_modules::runtime_errors::quarantined(module_id, &until)
+        }
     }
-}
-
-#[allow(dead_code)]
-pub(super) fn render_progress(
-    out: &mut dyn Write,
-    index: usize,
-    total: usize,
-    stage_fraction: f64,
-    message: &str,
-) -> io::Result<()> {
-    let total_f = total.max(1) as f64;
-    let progress = (((index as f64) + stage_fraction).clamp(0.0, total_f)) / total_f;
-    let width = 24;
-    let filled = (progress * width as f64).round() as usize;
-    let filled = filled.min(width);
-    let bar = format!(
-        "[{}{}]",
-        "█".repeat(filled),
-        " ".repeat(width.saturating_sub(filled))
-    );
-    write!(
-        out,
-        "\r{} {:>3}% {}",
-        bar,
-        (progress * 100.0) as u32,
-        message
-    )?;
-    out.flush()
-}
-
-#[allow(dead_code)]
-pub(super) fn finish_progress_line(out: &mut dyn Write) -> io::Result<()> {
-    writeln!(out)
 }

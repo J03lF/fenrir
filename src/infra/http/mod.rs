@@ -1,3 +1,4 @@
+mod gateway;
 mod routes;
 mod server;
 mod state;

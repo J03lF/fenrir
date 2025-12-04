@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::convert::{TryFrom, TryInto};
 use std::path::PathBuf;
 
 use async_trait::async_trait;
@@ -177,9 +178,15 @@ impl ModuleVerifierPort for Ed25519ModuleVerifier {
             ));
         }
 
-        let mut signature_bytes = [0u8; ed25519_dalek::SIGNATURE_LENGTH];
-        signature_bytes.copy_from_slice(&bundle.signature);
-        let signature = Signature::from_bytes(&signature_bytes)
+        let signature_bytes: [u8; ed25519_dalek::SIGNATURE_LENGTH] =
+            bundle.signature.as_slice().try_into().map_err(|_| {
+                ModuleVerificationError::Signature(
+                    messages::infra::modules::verifier::signature_length_invalid(
+                        bundle.signature.len(),
+                    ),
+                )
+            })?;
+        let signature = Signature::try_from(signature_bytes)
             .map_err(|err| ModuleVerificationError::Signature(err.to_string()))?;
         verifying_key
             .verify(digest.as_slice(), &signature)

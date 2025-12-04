@@ -29,16 +29,12 @@ const USER_AGENT_VALUE: &str = "fenrir-runtime/registry-client";
 
 #[derive(Debug, Deserialize)]
 struct CompatibilityTreeResponse {
-    #[allow(dead_code)]
-    fenrir_version: String,
     tree: Value,
 }
 
 #[derive(Debug, Deserialize)]
 struct CompatibilityNodeDto {
     id: String,
-    #[allow(dead_code)]
-    label: String,
     #[serde(default)]
     children: Vec<CompatibilityNodeDto>,
 }
@@ -1116,14 +1112,10 @@ impl LocalManifestFile {
 struct LocalManifestVersion {
     version: String,
     released: Option<String>,
-    #[allow(dead_code)]
-    release_notes: Option<String>,
     fenrir_min: Option<String>,
     fenrir_max: Option<String>,
     artifact_url: Option<String>,
     checksum: Option<String>,
-    #[allow(dead_code)]
-    checksum_algorithm: Option<String>,
     signature: Option<String>,
     signer: Option<String>,
 }
@@ -1195,10 +1187,6 @@ struct ModuleInfo {
     name: String,
     description: Option<String>,
     author: Option<String>,
-    #[allow(dead_code)]
-    github_url: Option<String>,
-    #[allow(dead_code)]
-    created_at: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1208,11 +1196,7 @@ struct VersionInfo {
     fenrir_max_version: Option<String>,
     download_url: String,
     checksum: String,
-    #[allow(dead_code)]
-    checksum_algorithm: String,
     signature: Option<String>,
-    #[allow(dead_code)]
-    release_notes: Option<String>,
     released_at: i64,
 }
 

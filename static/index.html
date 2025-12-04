@@ -4,263 +4,595 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Fenrir Control Plane</title>
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
-    <link rel="stylesheet" href="/static/css/dashboard.css" />
-</head>
-<body>
-  <main class="shell">
-    <div>
-      <header class="topbar">
-        <div class="brand">
-          <div class="logo">FN</div>
-          <div class="title">
-            <span>operations</span>
-            <span>Fenrir Control Plane</span>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Sora:wght@300;400;500;600;700&display=swap" />
+    <link rel="stylesheet" href="/static/css/reset.css" />
+    <link rel="stylesheet" href="/static/css/app.css" />
+  </head>
+  <body>
+    <!-- ============================================
+         INTRO ANIMATION (Demo - kann entfernt werden)
+         Set data-intro-enabled="false" to disable
+         Set data-intro-mode="always" to show on every page load
+         Set data-intro-mode="once" to show only first time (default)
+         ============================================ -->
+    <div class="intro-overlay" data-intro data-intro-enabled="true" data-intro-mode="always">
+      <div class="intro-content">
+        <div class="intro-logo">
+          <img src="/static/img/fenrir-transparent.png" alt="Fenrir" />
+        </div>
+        <div class="intro-text">
+          <span class="intro-title">Fenrir</span>
+          <span class="intro-subtitle">Admin Panel</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="app-shell" data-app-shell>
+      <aside class="sidebar">
+      <div class="sidebar-brand">
+        <div class="brand-icon wolf-logo">
+          <img src="/static/img/fenrir-transparent.png" alt="Fenrir Logo" />
+        </div>
+        <div class="brand-text">
+          <span class="brand-name">Fenrir</span>
+          <span class="brand-sub">Control Plane</span>
+        </div>
+      </div>
+
+        <nav class="sidebar-nav" role="tablist" aria-label="Bereichsauswahl">
+          <button type="button" role="tab" class="nav-item" data-page-trigger="overview" data-active="true" aria-selected="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="3" y="3" width="7" height="7" rx="1"/>
+              <rect x="14" y="3" width="7" height="7" rx="1"/>
+              <rect x="3" y="14" width="7" height="7" rx="1"/>
+              <rect x="14" y="14" width="7" height="7" rx="1"/>
+            </svg>
+            <span>Overview</span>
+          </button>
+          <button type="button" role="tab" class="nav-item" data-page-trigger="telemetry" aria-selected="false">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="22,12 18,12 15,21 9,3 6,12 2,12"/>
+            </svg>
+            <span>Telemetry</span>
+          </button>
+          <button type="button" role="tab" class="nav-item" data-page-trigger="services" aria-selected="false">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="3"/>
+              <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+            </svg>
+            <span>Services</span>
+          </button>
+          <button type="button" role="tab" class="nav-item" data-page-trigger="audit" aria-selected="false">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+              <polyline points="14,2 14,8 20,8"/>
+              <line x1="16" y1="13" x2="8" y2="13"/>
+              <line x1="16" y1="17" x2="8" y2="17"/>
+              <line x1="10" y1="9" x2="8" y2="9"/>
+            </svg>
+            <span>Audit</span>
+          </button>
+        </nav>
+
+        <div class="sidebar-footer">
+          <div class="connection-status">
+            <div class="status-dot"></div>
+            <span data-refresh-note>noch nicht aktualisiert</span>
           </div>
         </div>
-        <div class="actions">
-          <button type="button" data-test-btn disabled>Token Test</button>
-        </div>
-      </header>
+      </aside>
 
-      <nav class="tabbar" role="tablist" aria-label="Bereichsauswahl">
-        <button type="button" role="tab" data-page-trigger="overview" data-active="true" aria-selected="true">Übersicht</button>
-        <button type="button" role="tab" data-page-trigger="services" aria-selected="false">Services</button>
-        <button type="button" role="tab" data-page-trigger="telemetry" aria-selected="false">Telemetry</button>
-        <button type="button" role="tab" data-page-trigger="audit" aria-selected="false">Audit</button>
-      </nav>
-       </div>
-      <section class="page" data-page="overview" data-visible="true">
-        <section class="hero">
-          <h2>Überblick &amp; Steuerung für Fenrir</h2>
-          <p>
-            Echtzeitstatus, geschützte Service-Aktionen und ein aufgeräumtes Interface ermöglichen einen ruhigen Betrieb.
-            Jeder Eingriff läuft über RBAC und Audit-Logs.
-          </p>
-        </section>
-        <div class="alert" data-alert></div>
-        <div class="meta" data-meta>
-          <span>lade Applikationsdaten …</span>
-        </div>
-        <section class="summary-grid">
-          <article class="card metric-card" data-card="app">
-            <h3>Applikation</h3>
-            <div class="metric-value" data-app-name>–</div>
-            <div class="metric-hint" data-app-version>Version wird geladen …</div>
-          </article>
-          <article class="card metric-card" data-card="uptime">
-            <h3>Uptime</h3>
-            <div class="metric-value" data-uptime>–</div>
-            <div class="metric-hint">Quelle: Telemetrie</div>
-          </article>
-          <article class="card metric-card" data-card="health">
-            <h3>Status</h3>
-            <div class="metric-value" data-health>—</div>
-            <div class="metric-hint" data-health-note>Prüfe Readiness-Status …</div>
-          </article>
-        </section>
-        <section class="management-grid">
-          <article class="card token-card">
-            <h3>API Token</h3>
-            <div class="token-input">
+      <main class="main-content">
+        <header class="top-bar">
+          <div class="top-bar-info" data-meta>
+            <div class="info-chip">
+              <span class="chip-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="12" cy="12" r="10"/>
+                  <circle cx="12" cy="12" r="3"/>
+                </svg>
+              </span>
+              <div class="chip-content">
+                <span class="chip-label">Endpoint</span>
+                <span class="chip-value">–</span>
+              </div>
+            </div>
+            <div class="info-chip http-chip">
+              <span class="chip-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+                  <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+                </svg>
+              </span>
+              <div class="chip-content">
+                <span class="chip-label">HTTP</span>
+                <span class="chip-value">lade …</span>
+              </div>
+            </div>
+          </div>
+          <div class="token-section">
+            <div class="token-field">
               <input
+                id="token-field"
                 type="password"
                 autocomplete="off"
-                placeholder="Bearer Token hier einfügen"
+                placeholder="Bearer Token eingeben …"
                 aria-label="Control Plane Token"
                 data-token-input
               />
+              <button type="button" class="token-test-btn" data-test-btn disabled>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+                  <polyline points="22,4 12,14.01 9,11.01"/>
+                </svg>
+                <span>Prüfen</span>
+              </button>
             </div>
-            <div class="token-status" data-token-status>
-              Token nicht gesetzt – Anfragen erfolgen ohne Auth.
-            </div>
-          </article>
-        </section>
-      </section>
+            <p class="token-hint" data-token-status>Token nicht gesetzt – Anfragen erfolgen ohne Auth.</p>
+          </div>
+        </header>
 
-      <section class="page" data-page="telemetry" data-visible="false">
-        <div class="telemetry-stats">
-          <article class="card metric-card">
-            <h3>CPU Auslastung</h3>
-            <div class="telemetry-stat-value" data-metric-cpu>–</div>
-            <div class="telemetry-stat-note" data-metric-cpu-note>Keine Daten verfügbar.</div>
-          </article>
-          <article class="card metric-card">
-            <h3>Speichernutzung</h3>
-            <div class="telemetry-stat-value" data-metric-mem>–</div>
-            <div class="telemetry-stat-note" data-metric-mem-note>Keine Daten verfügbar.</div>
-          </article>
-          <article class="card metric-card">
-            <h3>Disk I/O</h3>
-            <div class="telemetry-stat-value" data-metric-io>–</div>
-            <div class="telemetry-stat-note" data-metric-io-note>Keine Daten verfügbar.</div>
-          </article>
+        <section class="alert-banner" data-alert role="alert"></section>
+
+        <div class="page-container">
+          <!-- OVERVIEW PAGE -->
+          <section class="page" data-page="overview" data-visible="true">
+            <div class="page-title">
+              <h1>System Overview</h1>
+              <p>Echtzeitübersicht aller Systemkomponenten</p>
+            </div>
+
+            <div class="stats-row">
+              <article class="stat-card">
+                <div class="stat-icon app-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polygon points="12,2 22,8.5 22,15.5 12,22 2,15.5 2,8.5"/>
+                  </svg>
+                </div>
+                <div class="stat-content">
+                  <span class="stat-label">Applikation</span>
+                  <strong class="stat-value" data-app-name>–</strong>
+                  <span class="stat-note" data-app-version>Version wird geladen …</span>
+                </div>
+              </article>
+
+              <article class="stat-card">
+                <div class="stat-icon uptime-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="10"/>
+                    <polyline points="12,6 12,12 16,14"/>
+                  </svg>
+                </div>
+                <div class="stat-content">
+                  <span class="stat-label">Uptime</span>
+                  <strong class="stat-value" data-uptime>–</strong>
+                  <span class="stat-note">Telemetrie-Quelle</span>
+                </div>
+              </article>
+
+              <article class="stat-card">
+                <div class="stat-icon health-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+                  </svg>
+                </div>
+                <div class="stat-content">
+                  <span class="stat-label">Status</span>
+                  <strong class="stat-value" data-health>—</strong>
+                  <span class="stat-note" data-health-note>Prüfe Readiness …</span>
+                </div>
+              </article>
+            </div>
+
+            <div class="grid-2">
+              <article class="card snapshot-card">
+                <header class="card-header">
+                  <div class="card-title-group">
+                    <span class="card-eyebrow">Registry</span>
+                    <h2>Service Snapshot</h2>
+                  </div>
+                </header>
+                <div class="snapshot-metrics">
+                  <div class="metric-box">
+                    <span class="metric-num" data-service-count="services.total">0</span>
+                    <span class="metric-label">Gesamt</span>
+                  </div>
+                  <div class="metric-box active">
+                    <span class="metric-num" data-service-count="services.status.active">0</span>
+                    <span class="metric-label">Aktiv</span>
+                  </div>
+                  <div class="metric-box degraded">
+                    <span class="metric-num" data-service-count="services.status.degraded">0</span>
+                    <span class="metric-label">Degraded</span>
+                  </div>
+                  <div class="metric-box failed">
+                    <span class="metric-num" data-service-count="services.status.failed">0</span>
+                    <span class="metric-label">Failed</span>
+                  </div>
+                  <div class="metric-box stopped">
+                    <span class="metric-num" data-service-count="services.status.stopped">0</span>
+                    <span class="metric-label">Stopped</span>
+                  </div>
+                  <div class="metric-box critical">
+                    <span class="metric-num" data-service-count="services.critical">0</span>
+                    <span class="metric-label">Kritisch</span>
+                  </div>
+                </div>
+                <p class="empty-note" data-service-summary-empty data-visible="true">Noch keine Services registriert.</p>
+              </article>
+
+              <article class="card incidents-card">
+                <header class="card-header">
+                  <div class="card-title-group">
+                    <span class="card-eyebrow">Health</span>
+                    <h2>Aktive Hinweise</h2>
+                  </div>
+                </header>
+                <ul class="incident-list" data-service-incidents></ul>
+                <p class="empty-note" data-service-incidents-empty data-visible="true">
+                  Alle Services melden „active".
+                </p>
+              </article>
+            </div>
+
+            <div class="grid-2">
+              <article class="card modules-card">
+                <header class="card-header">
+                  <div class="card-title-group">
+                    <span class="card-eyebrow">Module</span>
+                    <h2>Installationen</h2>
+                  </div>
+                  <span class="card-meta" data-modules-meta>lade Module …</span>
+                </header>
+                <ul class="module-list" data-modules-list></ul>
+                <p class="empty-note" data-modules-empty data-visible="true">
+                  Keine Module installiert.
+                </p>
+              </article>
+
+              <article class="card audit-preview-card">
+                <header class="card-header">
+                  <div class="card-title-group">
+                    <span class="card-eyebrow">Audit</span>
+                    <h2>Letzte Events</h2>
+                  </div>
+                </header>
+                <ul class="audit-preview-list" data-audit-preview></ul>
+                <p class="empty-note" data-audit-preview-empty data-visible="true">Audit-Stream leer.</p>
+              </article>
+            </div>
+          </section>
+
+          <!-- TELEMETRY PAGE -->
+          <section class="page" data-page="telemetry" data-visible="false">
+            <div class="page-title">
+              <h1>System Telemetry</h1>
+              <p>Echtzeit Performance-Metriken und Ressourcenüberwachung</p>
+              <span class="page-meta" data-telemetry-note>Telemetrie wird geladen …</span>
+            </div>
+
+            <!-- Stats Cards -->
+            <div class="stats-row">
+              <article class="stat-card">
+                <div class="stat-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <rect x="4" y="4" width="16" height="16" rx="2"/>
+                    <rect x="9" y="9" width="6" height="6"/>
+                  </svg>
+                </div>
+                <div class="stat-content">
+                  <span class="stat-label">CPU Auslastung</span>
+                  <span class="stat-value" data-metric-cpu>–</span>
+                </div>
+              </article>
+              <article class="stat-card">
+                <div class="stat-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <rect x="3" y="6" width="18" height="12" rx="2"/>
+                    <path d="M7 6V4a1 1 0 0 1 1-1h8a1 1 0 0 1 1 1v2"/>
+                  </svg>
+                </div>
+                <div class="stat-content">
+                  <span class="stat-label">Arbeitsspeicher</span>
+                  <span class="stat-value" data-metric-mem>–</span>
+                </div>
+              </article>
+              <article class="stat-card">
+                <div class="stat-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <path d="M12 3v18M3 12h18"/>
+                  </svg>
+                </div>
+                <div class="stat-content">
+                  <span class="stat-label">I/O Lesen</span>
+                  <span class="stat-value" data-metric-io-read>–</span>
+                </div>
+              </article>
+              <article class="stat-card">
+                <div class="stat-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <path d="M12 3v18M3 12h18"/>
+                  </svg>
+                </div>
+                <div class="stat-content">
+                  <span class="stat-label">I/O Schreiben</span>
+                  <span class="stat-value" data-metric-io-write>–</span>
+                </div>
+              </article>
+            </div>
+
+            <!-- Time Range Selector -->
+            <div class="section-header">
+              <h2>Performance Verlauf</h2>
+              <div class="time-range-selector" role="tablist">
+                <button type="button" data-history-range="1h" data-active="true">1H</button>
+                <button type="button" data-history-range="3h">3H</button>
+                <button type="button" data-history-range="24h">24H</button>
+              </div>
+            </div>
+
+            <!-- Charts Grid -->
+            <div class="grid-2">
+              <article class="card chart-card" data-chart-panel="cpu">
+                <header class="card-header">
+                  <div class="card-title-group">
+                    <span class="card-eyebrow">Prozessor</span>
+                    <h2>CPU Usage</h2>
+                  </div>
+                  <div class="chart-stats">
+                    <span class="chart-stat">Min <b data-chart-min="cpu">–</b></span>
+                    <span class="chart-stat">Max <b data-chart-max="cpu">–</b></span>
+                    <span class="chart-stat">Avg <b data-chart-avg="cpu">–</b></span>
+                  </div>
+                </header>
+                <div class="chart-canvas-wrap">
+                  <canvas data-mini-chart="cpu"></canvas>
+                </div>
+              </article>
+
+              <article class="card chart-card" data-chart-panel="memory">
+                <header class="card-header">
+                  <div class="card-title-group">
+                    <span class="card-eyebrow">Speicher</span>
+                    <h2>Memory Usage</h2>
+                  </div>
+                  <div class="chart-stats">
+                    <span class="chart-stat">Min <b data-chart-min="memory">–</b></span>
+                    <span class="chart-stat">Max <b data-chart-max="memory">–</b></span>
+                    <span class="chart-stat">Avg <b data-chart-avg="memory">–</b></span>
+                  </div>
+                </header>
+                <div class="chart-canvas-wrap">
+                  <canvas data-mini-chart="memory"></canvas>
+                </div>
+              </article>
+
+              <article class="card chart-card" data-chart-panel="io-read">
+                <header class="card-header">
+                  <div class="card-title-group">
+                    <span class="card-eyebrow">Festplatte</span>
+                    <h2>Disk Read</h2>
+                  </div>
+                  <div class="chart-stats">
+                    <span class="chart-stat">Min <b data-chart-min="io-read">–</b></span>
+                    <span class="chart-stat">Max <b data-chart-max="io-read">–</b></span>
+                    <span class="chart-stat">Avg <b data-chart-avg="io-read">–</b></span>
+                  </div>
+                </header>
+                <div class="chart-canvas-wrap">
+                  <canvas data-mini-chart="io-read"></canvas>
+                </div>
+              </article>
+
+              <article class="card chart-card" data-chart-panel="io-write">
+                <header class="card-header">
+                  <div class="card-title-group">
+                    <span class="card-eyebrow">Festplatte</span>
+                    <h2>Disk Write</h2>
+                  </div>
+                  <div class="chart-stats">
+                    <span class="chart-stat">Min <b data-chart-min="io-write">–</b></span>
+                    <span class="chart-stat">Max <b data-chart-max="io-write">–</b></span>
+                    <span class="chart-stat">Avg <b data-chart-avg="io-write">–</b></span>
+                  </div>
+                </header>
+                <div class="chart-canvas-wrap">
+                  <canvas data-mini-chart="io-write"></canvas>
+                </div>
+              </article>
+            </div>
+
+
+            <!-- Hidden elements for compatibility -->
+            <div style="display:none">
+              <canvas data-metric-chart></canvas>
+              <div data-series-toggle></div>
+              <div data-metric-legend></div>
+              <div data-metric-list></div>
+              <div data-chart-tooltip></div>
+              <div data-tooltip-time></div>
+              <div data-tooltip-body></div>
+              <div data-chart-empty></div>
+              <div data-metric-io></div>
+              <div data-service-metrics></div>
+              <div data-service-metrics-meta></div>
+              <select data-service-sort></select>
+            </div>
+          </section>
+
+          <!-- SERVICES PAGE -->
+          <section class="page" data-page="services" data-visible="false">
+            <div class="page-title">
+              <h1>Services</h1>
+              <p>Aktionen, Filter und Registry-Übersicht</p>
+            </div>
+
+            <article class="card actions-card">
+              <header class="card-header">
+                <div class="card-title-group">
+                  <span class="card-eyebrow">Aktionen</span>
+                  <h3>Bulk Operations</h3>
+                </div>
+              </header>
+              <div class="actions-row">
+                <button type="button" class="action-btn start" data-bulk-start>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polygon points="5,3 19,12 5,21"/>
+                  </svg>
+                  Start All
+                </button>
+                <button type="button" class="action-btn stop" data-bulk-stop>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="6" y="6" width="12" height="12"/>
+                  </svg>
+                  Stop All
+                </button>
+                <button type="button" class="action-btn restart" data-bulk-restart>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M23 4v6h-6M1 20v-6h6"/>
+                    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+                  </svg>
+                  Restart All
+                </button>
+              </div>
+              <p class="actions-hint">Nur nicht-core Services werden beeinflusst.</p>
+            </article>
+
+            <article class="card services-table-card">
+              <header class="card-header services-header">
+                <div class="card-title-group">
+                  <span class="card-eyebrow">Registry</span>
+                  <h3>Registrierte Services</h3>
+                  <span class="card-meta" data-service-meta>lade Registry …</span>
+                </div>
+                <div class="filter-section">
+                  <div class="search-box">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <circle cx="11" cy="11" r="8"/>
+                      <path d="M21 21l-4.35-4.35"/>
+                    </svg>
+                    <input
+                      type="search"
+                      autocomplete="off"
+                      placeholder="Suchen …"
+                      aria-label="Services filtern"
+                      data-service-filter
+                    />
+                    <button type="button" class="clear-btn" aria-label="Filter zurücksetzen" data-service-filter-clear data-visible="false">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="18" y1="6" x2="6" y2="18"/>
+                        <line x1="6" y1="6" x2="18" y2="18"/>
+                      </svg>
+                    </button>
+                  </div>
+                  <div class="filter-chips" role="tablist" aria-label="Statusfilter">
+                    <button type="button" data-service-filter-status="all" data-active="true">Alle</button>
+                    <button type="button" data-service-filter-status="active">Active</button>
+                    <button type="button" data-service-filter-status="degraded">Degraded</button>
+                    <button type="button" data-service-filter-status="failed">Failed</button>
+                    <button type="button" data-service-filter-status="stopped">Stopped</button>
+                  </div>
+                </div>
+              </header>
+              <div class="table-scroll">
+                <table class="data-table services-table">
+                  <thead>
+                    <tr>
+                      <th>ID</th>
+                      <th>Name</th>
+                      <th>Status</th>
+                      <th>Tags</th>
+                      <th>Hinweis</th>
+                      <th>Aktionen</th>
+                    </tr>
+                  </thead>
+                  <tbody data-services>
+                    <tr>
+                      <td colspan="6">Service-Registry wird abgefragt …</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </article>
+          </section>
+
+          <!-- AUDIT PAGE -->
+          <section class="page" data-page="audit" data-visible="false">
+            <div class="page-title">
+              <h1>Audit Log</h1>
+              <p>Gefilterte Events mit Live-Stream</p>
+            </div>
+
+            <article class="card audit-table-card">
+              <header class="card-header audit-header">
+                <div class="card-title-group">
+                  <span class="card-eyebrow">Timeline</span>
+                  <h3>Audit Verlauf</h3>
+                  <span class="card-meta" data-audit-meta>–</span>
+                </div>
+                <div class="audit-controls">
+                  <div class="range-toggle" role="tablist" aria-label="Audit-Zeitraum">
+                    <button type="button" data-audit-range="1h" data-active="true">1h</button>
+                    <button type="button" data-audit-range="3h">3h</button>
+                    <button type="button" data-audit-range="24h">24h</button>
+                  </div>
+                  <button type="button" class="refresh-btn" data-audit-refresh>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M23 4v6h-6M1 20v-6h6"/>
+                      <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+                    </svg>
+                    Refresh
+                  </button>
+                </div>
+              </header>
+              <div class="table-scroll">
+                <table class="data-table audit-table">
+                  <thead>
+                    <tr>
+                      <th>Zeit</th>
+                      <th>Aktion</th>
+                      <th>Target</th>
+                      <th>Ergebnis</th>
+                    </tr>
+                  </thead>
+                  <tbody data-audit-events>
+                    <tr>
+                      <td colspan="4">Keine Audit-Ereignisse geladen.</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </article>
+          </section>
         </div>
-        <div class="telemetry-grid">
-          <article class="card chart-card">
-          <div class="chart-header">
-            <div class="chart-header-left">
-              <h3>Performance Verlauf</h3>
-              <small data-telemetry-note>Telemetrie wird geladen …</small>
-            </div>
-            <div class="chart-range" role="tablist" aria-label="Zeitraum">
-              <button type="button" data-history-range="1h" data-active="true">1h</button>
-              <button type="button" data-history-range="3h">3h</button>
-              <button type="button" data-history-range="24h">24h</button>
+
+        <!-- Audit Detail Modal -->
+        <div class="modal-overlay" data-audit-modal data-visible="false">
+          <div class="modal-container">
+            <header class="modal-header">
+              <h3>Event Details</h3>
+              <button type="button" class="modal-close" data-audit-modal-close aria-label="Schließen">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <line x1="18" y1="6" x2="6" y2="18"/>
+                  <line x1="6" y1="6" x2="18" y2="18"/>
+                </svg>
+              </button>
+            </header>
+            <div class="modal-body" data-audit-modal-content>
+              <!-- Filled by JS -->
             </div>
           </div>
-          <div class="chart-series-toggle" data-series-toggle aria-label="Metrikauswahl"></div>
-          <canvas class="metric-chart" data-metric-chart width="960" height="320"></canvas>
-          <div class="chart-legend" data-metric-legend>
-            <span class="legend-empty">Es liegen noch keine Messwerte vor.</span>
-          </div>
-            <div class="chart-tooltip" data-chart-tooltip>
-              <div class="tooltip-header" data-tooltip-time>–</div>
-              <div class="tooltip-body" data-tooltip-body></div>
-            </div>
-            <div class="chart-empty" data-chart-empty data-visible="true">
-              Noch keine Telemetriedaten verfügbar.
-            </div>
-          </article>
-          <article class="card metric-table-card">
-            <h3>Aktuelle Kennzahlen</h3>
-            <div class="metric-table-scroll">
-              <table class="metric-table">
-                <thead>
-                  <tr>
-                    <th>Metrik</th>
-                    <th>Wert</th>
-                  </tr>
-                </thead>
-                <tbody data-metric-list>
-                  <tr>
-                    <td colspan="2">Noch keine Daten geladen.</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </article>
-          <article class="card metric-table-card service-resource-card">
-            <div class="metric-table-title">
-              <h3>Service Ressourcen</h3>
-              <label class="metric-sort-control">
-                Sortierung:
-                <select data-service-sort>
-                  <option value="cpu-desc">CPU ↓</option>
-                  <option value="cpu-asc">CPU ↑</option>
-                  <option value="memory-desc">RAM ↓</option>
-                  <option value="memory-asc">RAM ↑</option>
-                  <option value="updated-desc">Aktualisiert ↓</option>
-                  <option value="updated-asc">Aktualisiert ↑</option>
-                  <option value="id-asc">Service A→Z</option>
-                  <option value="id-desc">Service Z→A</option>
-                </select>
-              </label>
-            </div>
-            <div class="metric-table-scroll">
-              <table class="metric-table service-metrics-table">
-                <thead>
-                  <tr>
-                    <th>Service</th>
-                    <th class="numeric">CPU %</th>
-                    <th class="numeric">RAM</th>
-                    <th class="numeric">Peak</th>
-                    <th>Aktualisiert</th>
-                  </tr>
-                </thead>
-                <tbody data-service-metrics>
-                  <tr>
-                    <td colspan="5">Keine Ressourcen-Metriken gemeldet.</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-            <small class="metric-table-meta" data-service-metrics-meta>–</small>
-          </article>
         </div>
-      </section>
 
-      <section class="page" data-page="services" data-visible="false">
-        <section class="management-grid service-actions-grid">
-          <article class="card control-card">
-            <h3>Service Aktionen</h3>
-            <div class="button-row">
-              <button type="button" data-bulk-start>Start All</button>
-              <button type="button" data-bulk-stop>Stop All</button>
-              <button type="button" data-bulk-restart>Restart All</button>
-            </div>
-            <div class="metric-hint">Nur nicht-core Services werden beeinflusst.</div>
-          </article>
-        </section>
+        <footer class="main-footer">
+          <p>Erweiterte Aktionen laufen über CLI oder autorisierte Clients. Alle Eingriffe werden auditierbar festgehalten.</p>
+        </footer>
+      </main>
+    </div>
 
-        <section class="services">
-          <div class="service-header">
-            <h2>Registrierte Services</h2>
-            <small data-service-meta>lade Registry …</small>
-          </div>
-          <div class="service-board">
-            <table class="service-table">
-              <thead>
-                <tr>
-                  <th>ID</th>
-                  <th>Name</th>
-                  <th>Status</th>
-                  <th>Tags</th>
-                  <th>Hinweis</th>
-                  <th>Aktionen</th>
-                </tr>
-              </thead>
-              <tbody data-services>
-                <tr>
-                  <td colspan="6">Service-Registry wird abgefragt …</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
-    </section>
-
-    <section class="page" data-page="audit" data-visible="false">
-      <section class="audit">
-        <div class="audit-board">
-          <div class="audit-meta">
-            <div>
-              <h2>Audit Log</h2>
-              <small data-audit-meta>–</small>
-            </div>
-            <div class="chart-range audit-range" role="tablist" aria-label="Audit-Zeitraum">
-              <button type="button" data-audit-range="1h" data-active="true">1h</button>
-              <button type="button" data-audit-range="3h">3h</button>
-              <button type="button" data-audit-range="24h">24h</button>
-            </div>
-            <button type="button" data-audit-refresh>Refresh</button>
-          </div>
-          <table class="audit-table">
-            <thead>
-              <tr>
-                <th>Zeitpunkt</th>
-                <th>Aktion</th>
-                <th>Ziel</th>
-                <th>Ergebnis</th>
-                <th>Akteur</th>
-                <th>Details</th>
-              </tr>
-            </thead>
-            <tbody data-audit-events>
-              <tr>
-                <td colspan="6">Keine Audit-Ereignisse geladen.</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </section>
-    </section>
-
-      <footer class="note">
-        Zugriff auf erweiterte Aktionen erfolgt über die CLI oder autorisierte API-Clients. Alle
-        Eingriffe werden auditierbar festgehalten.
-      </footer>
-    </main>
     <script src="/static/js/dashboard.js"></script>
-</body>
+  </body>
 </html>
+

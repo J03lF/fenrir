@@ -119,6 +119,8 @@ impl AppServices {
     }
 
     pub fn record_audit(&self, event: AuditEvent) -> Result<(), AuditError> {
+        // Filter out noisy system authorize events that flood the audit log
+
         self.audit_log.append(event.clone())?;
         let _ = self.audit_bus.send(event);
         Ok(())

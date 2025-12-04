@@ -1,6 +1,7 @@
 # Default ignored files
 /shelf/
 /target/
+/secrets/
 /test/
 /benches/
 config/certs/

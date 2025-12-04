@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::fs;
@@ -54,8 +54,6 @@ struct RunningModuleState {
     started_at: SystemTime,
     restart_count: u32,
     log_file: PathBuf,
-    #[allow(dead_code)]
-    child: Option<Child>,
 }
 
 impl ProcessModuleRuntime {
@@ -179,7 +177,6 @@ impl ProcessModuleRuntime {
             started_at,
             restart_count: persisted.restart_count,
             log_file: PathBuf::from(&persisted.log_file),
-            child: None,
         };
 
         let key = module_id.to_string();
@@ -553,7 +550,6 @@ impl ModuleRuntimePort for ProcessModuleRuntime {
             started_at,
             restart_count: 0,
             log_file: log_file.clone(),
-            child: Some(child),
         };
 
         {

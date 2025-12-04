@@ -1,11 +1,11 @@
 pub mod module_guard {
     pub const AUTO_MANAGED_SUMMARY: &str =
-        "Modules are managed automatically – use 'sync module' or 'install distribution'; modules start/stop on their own.";
+        "Modules are orchestrated by Fenrir – use 'modules services' plus 'modules start|stop|restart <name>' for lifecycle overrides.";
 
     pub fn action_disabled_line(action: &str) -> String {
         format!(
-            "'{} module' is disabled (modules manage themselves).",
-            action
+            "'{} module' is disabled here – use 'modules {} <name>'.",
+            action, action
         )
     }
 }
@@ -49,7 +49,8 @@ pub mod metadata {
 
     pub const START_DESCRIPTION: &str = "Start services or modules";
     pub const START_SYNOPSIS: &str = "start <service|module> <target>";
-    pub const START_USAGE: &str = "Usage: start service <id|--all>  (modules start automatically)";
+    pub const START_USAGE: &str =
+        "Usage: start service <id|--all>  (modules: use 'modules start <name>')";
     pub const START_DETAILS: &[&str] = &[
         "start service <id|--all> – start a controllable service",
         AUTO_MANAGED_SUMMARY,
@@ -58,7 +59,7 @@ pub mod metadata {
     pub const STOP_DESCRIPTION: &str = "Stop services or modules";
     pub const STOP_SYNOPSIS: &str = "stop <service|module> <target> [--force]";
     pub const STOP_USAGE: &str =
-        "Usage: stop service <id|--all> [--force]  (modules stop automatically)";
+        "Usage: stop service <id|--all> [--force]  (modules: use 'modules stop <name>')";
     pub const STOP_DETAILS: &[&str] = &[
         "stop service <id|--all> [--force] – stop a service",
         AUTO_MANAGED_SUMMARY,
@@ -67,7 +68,7 @@ pub mod metadata {
     pub const RESTART_DESCRIPTION: &str = "Restart services or modules";
     pub const RESTART_SYNOPSIS: &str = "restart <service|module> <target> [--force]";
     pub const RESTART_USAGE: &str =
-        "Usage: restart service <id|--all> [--force]  (modules are managed automatically)";
+        "Usage: restart service <id|--all> [--force]  (modules: use 'modules restart <name>')";
     pub const RESTART_DETAILS: &[&str] = &[
         "restart service <id|--all> [--force] – restart services",
         AUTO_MANAGED_SUMMARY,

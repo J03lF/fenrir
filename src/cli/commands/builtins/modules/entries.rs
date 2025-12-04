@@ -19,6 +19,13 @@ const MODULE_ID_ARGUMENT: CommandArgument = CommandArgument {
     completion: CompletionKind::Dynamic(complete_module_ids),
 };
 
+const MODULE_ID_OPTIONAL_ARGUMENT: CommandArgument = CommandArgument {
+    name: "module",
+    optional: true,
+    variadic: false,
+    completion: CompletionKind::Dynamic(complete_module_ids),
+};
+
 const MODULE_LOG_TAIL_ARGUMENT: CommandArgument = CommandArgument {
     name: "--tail",
     optional: true,
@@ -217,6 +224,12 @@ const MODULE_SUBCOMMANDS: &[CommandSubcommand] = &[
         msg_modules::subcommands::RELEASE_DESC,
     ),
     CommandSubcommand::new(
+        "release-dev-overrides",
+        &["release_dev_overrides", "release-dev"],
+        &[],
+        msg_modules::subcommands::RELEASE_DEV_OVERRIDES_DESC,
+    ),
+    CommandSubcommand::new(
         "uninstall",
         &["remove"],
         &[MODULE_ID_ARGUMENT],
@@ -233,6 +246,36 @@ const MODULE_SUBCOMMANDS: &[CommandSubcommand] = &[
         &[],
         &[MODULE_ID_ARGUMENT, MODULE_LOG_TAIL_ARGUMENT],
         msg_modules::subcommands::LOGS_DESC,
+    ),
+    CommandSubcommand::new(
+        "services",
+        &[],
+        &[MODULE_ID_OPTIONAL_ARGUMENT],
+        msg_modules::subcommands::SERVICES_DESC,
+    ),
+    CommandSubcommand::new(
+        "start",
+        &[],
+        &[MODULE_ID_ARGUMENT],
+        msg_modules::subcommands::START_DESC,
+    ),
+    CommandSubcommand::new(
+        "stop",
+        &[],
+        &[MODULE_ID_ARGUMENT],
+        msg_modules::subcommands::STOP_DESC,
+    ),
+    CommandSubcommand::new(
+        "restart",
+        &[],
+        &[MODULE_ID_ARGUMENT],
+        msg_modules::subcommands::RESTART_DESC,
+    ),
+    CommandSubcommand::new(
+        "stop-all",
+        &["stop_all"],
+        &[],
+        msg_modules::subcommands::STOP_ALL_DESC,
     ),
 ];
 

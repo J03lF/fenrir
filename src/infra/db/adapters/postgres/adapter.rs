@@ -3,12 +3,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use base64::{engine::general_purpose::STANDARD as BASE64_ENGINE, Engine as _};
 use tokio::time;
-use tokio_postgres::{NoTls, SimpleQueryMessage};
+use tokio_postgres::{types::ToSql, NoTls, Row, SimpleQueryMessage};
 
 use crate::domain::db::{
     DbAdminPort, DbColumn, DbError, DbExecutionResult, DbResult, DbResultSet, DbTable, DbTableKind,
-    DbTableSchema,
+    DbTableSchema, DbValue,
 };
 use crate::utils::messages::infra::db as infra_db_messages;
 
@@ -139,6 +140,83 @@ impl PostgresAdapter {
 
         Ok(results)
     }
+
+    fn prepare_params(params: &[DbValue]) -> Vec<PreparedParamBinding> {
+        params
+            .iter()
+            .map(|value| match value {
+                DbValue::Null => PreparedParamBinding::Null(None),
+                DbValue::Text(text) => PreparedParamBinding::Text(text.clone()),
+                DbValue::Integer(num) => PreparedParamBinding::Integer(*num),
+                DbValue::Float(num) => PreparedParamBinding::Float(*num),
+                DbValue::Bool(flag) => PreparedParamBinding::Bool(*flag),
+                DbValue::Json(json) => PreparedParamBinding::Json(json.clone()),
+            })
+            .collect()
+    }
+
+    fn map_rows(rows: Vec<Row>) -> DbResult<Vec<DbExecutionResult>> {
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+        let columns = rows[0]
+            .columns()
+            .iter()
+            .map(|col| col.name().to_string())
+            .collect();
+        let mut table = Vec::with_capacity(rows.len());
+        for row in rows {
+            let mut values = Vec::with_capacity(row.len());
+            for idx in 0..row.len() {
+                values.push(Self::stringify_row_value(&row, idx));
+            }
+            table.push(values);
+        }
+        Ok(vec![DbExecutionResult::ResultSet(DbResultSet::new(
+            columns, table,
+        ))])
+    }
+
+    fn stringify_row_value(row: &Row, idx: usize) -> String {
+        if let Ok(value) = row.try_get::<usize, Option<String>>(idx) {
+            return value.unwrap_or_else(|| "NULL".to_string());
+        }
+        if let Ok(value) = row.try_get::<usize, i64>(idx) {
+            return value.to_string();
+        }
+        if let Ok(value) = row.try_get::<usize, f64>(idx) {
+            return value.to_string();
+        }
+        if let Ok(value) = row.try_get::<usize, bool>(idx) {
+            return value.to_string();
+        }
+        if let Ok(value) = row.try_get::<usize, Vec<u8>>(idx) {
+            return BASE64_ENGINE.encode(value);
+        }
+        "<unsupported>".to_string()
+    }
+}
+
+enum PreparedParamBinding {
+    Null(Option<String>),
+    Text(String),
+    Integer(i64),
+    Float(f64),
+    Bool(bool),
+    Json(String),
+}
+
+impl PreparedParamBinding {
+    fn as_binding(&self) -> &(dyn ToSql + Sync) {
+        match self {
+            PreparedParamBinding::Null(value) => value,
+            PreparedParamBinding::Text(value) => value,
+            PreparedParamBinding::Integer(value) => value,
+            PreparedParamBinding::Float(value) => value,
+            PreparedParamBinding::Bool(value) => value,
+            PreparedParamBinding::Json(value) => value,
+        }
+    }
 }
 
 impl DbTableKind {
@@ -189,7 +267,8 @@ impl DbAdminPort for PostgresAdapter {
         const SQL: &str = "SELECT table_schema, table_name, table_type FROM information_schema.tables \
             WHERE table_schema NOT IN ('pg_catalog', 'information_schema') ORDER BY table_schema, table_name";
         let client = self.connect().await?;
-        let fut = client.query(SQL, &[]);
+        let empty_params: Vec<&(dyn ToSql + Sync)> = Vec::new();
+        let fut = client.query(SQL, &empty_params);
         let rows = Self::await_pg(
             self.query_timeout,
             fut,
@@ -218,7 +297,9 @@ impl DbAdminPort for PostgresAdapter {
             FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 ORDER BY ordinal_position";
         let schema_owned = schema.to_string();
         let name_owned = name.to_string();
-        let params: [&(dyn tokio_postgres::types::ToSql + Sync); 2] = [&schema_owned, &name_owned];
+        let schema_param: &(dyn ToSql + Sync) = &schema_owned;
+        let name_param: &(dyn ToSql + Sync) = &name_owned;
+        let params: Vec<&(dyn ToSql + Sync)> = vec![schema_param, name_param];
         let fut = client.query(SQL, &params);
         let rows = Self::await_pg(
             self.query_timeout,
@@ -253,5 +334,45 @@ impl DbAdminPort for PostgresAdapter {
             },
             columns,
         })
+    }
+
+    async fn prepared_query(
+        &self,
+        statement: &str,
+        params: &[DbValue],
+    ) -> DbResult<Vec<DbExecutionResult>> {
+        let client = self.connect().await?;
+        let bindings = Self::prepare_params(params);
+        let refs: Vec<&(dyn ToSql + Sync)> = bindings
+            .iter()
+            .map(|binding| binding.as_binding())
+            .collect();
+        let fut = client.query(statement, &refs);
+        let rows = Self::await_pg(
+            self.query_timeout,
+            fut,
+            || DbError::query(infra_db_messages::postgres::query_timeout()),
+            DbError::query,
+        )
+        .await?;
+        Self::map_rows(rows)
+    }
+
+    async fn prepared_execute(&self, statement: &str, params: &[DbValue]) -> DbResult<u64> {
+        let client = self.connect().await?;
+        let bindings = Self::prepare_params(params);
+        let refs: Vec<&(dyn ToSql + Sync)> = bindings
+            .iter()
+            .map(|binding| binding.as_binding())
+            .collect();
+        let fut = client.execute(statement, &refs);
+        let affected = Self::await_pg(
+            self.query_timeout,
+            fut,
+            || DbError::query(infra_db_messages::postgres::query_timeout()),
+            DbError::query,
+        )
+        .await?;
+        Ok(affected)
     }
 }

@@ -1,6 +1,9 @@
+use std::fs;
 use std::io::{self, Write};
+use std::net::SocketAddr;
 use std::sync::Arc;
 
+use time::OffsetDateTime;
 use tokio::sync::mpsc;
 
 use crate::audit::{AuditMetadata, AuditOutcome};
@@ -10,7 +13,8 @@ use crate::domain::module::{
     ModuleVersion,
 };
 use crate::services::module::{
-    DistributionAction, DistributionPlanEntry, ModuleService, ModuleSyncOutcome,
+    sanitize_service_id, write_plain_env_file, write_shell_env_file, DevEnvArtifacts,
+    DistributionAction, DistributionPlanEntry, ModuleDevServices, ModuleService, ModuleSyncOutcome,
 };
 use crate::utils::messages::cli::builtins::modules as msg_modules;
 
@@ -107,6 +111,82 @@ pub(super) async fn run_synchronize_task(
                 "{}",
                 msg_modules::tasks_flow::sync_done(&module_id.to_string())
             )?;
+            let env_artifacts = match persist_dev_env_files(
+                Arc::clone(&service),
+                &module_id,
+                &dev_services,
+                &mut out,
+            )
+            .await
+            {
+                Ok(artifacts) => artifacts,
+                Err(err) => {
+                    writeln!(
+                        out,
+                        "{}",
+                        msg_modules::synchronize_flow::env_file_error(&err.to_string())
+                    )?;
+                    DevEnvArtifacts::default()
+                }
+            };
+            if let Some(run) = &dev_services.run {
+                if run.auto_start {
+                    if let Some(log_path) = &run.log_path {
+                        writeln!(
+                            out,
+                            "{}",
+                            msg_modules::synchronize_flow::dev_agent_started(
+                                &run.command,
+                                &run.workdir.display().to_string(),
+                                &log_path.display().to_string(),
+                                run.auto_restart,
+                            )
+                        )?;
+                    }
+                } else {
+                    let hint_path = env_artifacts
+                        .shared_env
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                        .or_else(|| {
+                            env_artifacts
+                                .per_service
+                                .first()
+                                .map(|(_, path)| path.display().to_string())
+                        });
+                    writeln!(
+                        out,
+                        "{}",
+                        msg_modules::synchronize_flow::dev_agent_manual(
+                            &run.command,
+                            &run.workdir.display().to_string(),
+                            hint_path.as_deref(),
+                        )
+                    )?;
+                    if let (Some(shared_path), Some(expires_at)) = (
+                        env_artifacts.shared_env.clone(),
+                        env_artifacts.shared_expires_at,
+                    ) {
+                        if let Err(err) = service
+                            .enable_manual_token_rotation(
+                                &module_id,
+                                shared_path,
+                                env_artifacts.shared_endpoint,
+                                expires_at,
+                            )
+                            .await
+                        {
+                            writeln!(out, "warning: failed to enable token rotation ({err})")?;
+                        }
+                    }
+                }
+            } else {
+                writeln!(
+                    out,
+                    "{}",
+                    msg_modules::synchronize_flow::DEV_AGENT_NOT_CONFIGURED
+                )?;
+            }
             record_module_audit(
                 &deps,
                 "module::synchronize",
@@ -115,6 +195,25 @@ pub(super) async fn run_synchronize_task(
                 AuditOutcome::Success,
                 dev_services_metadata(&dev_services),
             );
+            if let Some(run) = &dev_services.run {
+                if run.auto_start {
+                    let mut metadata = AuditMetadata::default()
+                        .insert("command", run.command.clone())
+                        .insert("workdir", run.workdir.display().to_string())
+                        .insert("auto_restart", run.auto_restart.to_string());
+                    if let Some(log_path) = &run.log_path {
+                        metadata = metadata.insert("log_path", log_path.display().to_string());
+                    }
+                    record_module_audit(
+                        &deps,
+                        "module::sync::dev-agent-start",
+                        &module_id,
+                        Some(&dev_services.version),
+                        AuditOutcome::Success,
+                        metadata,
+                    );
+                }
+            }
         }
         Err(err) => {
             render_service_error(&mut out, msg_modules::synchronize_flow::ERROR_CONTEXT, &err)?;
@@ -130,6 +229,69 @@ pub(super) async fn run_synchronize_task(
     }
 
     Ok(CommandOutcome::Continue)
+}
+
+async fn persist_dev_env_files(
+    service: Arc<ModuleService>,
+    module_id: &ModuleId,
+    dev_services: &ModuleDevServices,
+    out: &mut OwnedStreamedWriter,
+) -> io::Result<DevEnvArtifacts> {
+    let Some(module_root) = service.dev_module_root(module_id) else {
+        return Ok(DevEnvArtifacts::default());
+    };
+    let env_dir = module_root.join(".fenrir");
+    fs::create_dir_all(&env_dir)?;
+    let shared_env_path = env_dir.join("dev.env");
+    let shared_env_display = shared_env_path.display().to_string();
+
+    let mut files = Vec::new();
+    let mut shared_env_values: Option<Vec<(String, String)>> = None;
+    let mut shared_endpoint: Option<SocketAddr> = None;
+    let mut shared_expires_at: Option<OffsetDateTime> = None;
+    for svc in &dev_services.services {
+        let env_export = service
+            .export_runtime_environment(module_id, Some(svc.endpoint))
+            .await
+            .map_err(|err| io::Error::other(err.to_string()))?;
+        let mut env_values = env_export.entries.clone();
+        env_values.push((
+            "FENRIR_DEV_ENV_FILE".to_string(),
+            shared_env_display.clone(),
+        ));
+        if shared_env_values.is_none() {
+            shared_env_values = Some(env_values.clone());
+            shared_endpoint = Some(svc.endpoint);
+            shared_expires_at = Some(env_export.token.claims.expires_at);
+        }
+        let service_suffix = svc.service_id.split("::").last().unwrap_or(&svc.service_id);
+        let file_name = format!("dev-env-{}.sh", sanitize_service_id(service_suffix));
+        let file_path = env_dir.join(file_name);
+        write_shell_env_file(&file_path, &env_values)?;
+        writeln!(
+            out,
+            "{}",
+            msg_modules::synchronize_flow::env_file_hint(
+                &svc.service_id,
+                &file_path.display().to_string()
+            )
+        )?;
+        files.push((svc.service_id.clone(), file_path));
+    }
+
+    let shared_env = if let Some(values) = shared_env_values {
+        write_plain_env_file(&shared_env_path, &values)?;
+        Some(shared_env_path)
+    } else {
+        None
+    };
+
+    Ok(DevEnvArtifacts {
+        per_service: files,
+        shared_env,
+        shared_endpoint,
+        shared_expires_at,
+    })
 }
 
 pub(super) async fn run_release_task(
@@ -154,7 +316,8 @@ pub(super) async fn run_release_task(
         .await;
 
     match result {
-        Ok(install_result) => {
+        Ok(outcome) => {
+            let install_result = outcome.install_result;
             let recorded_version = ModuleVersion(install_result.manifest.version.clone());
             let steps = vec![
                 (
@@ -190,6 +353,16 @@ pub(super) async fn run_release_task(
                 AuditOutcome::Success,
                 AuditMetadata::default().insert("source", install_result.source.label()),
             );
+            if outcome.dev_override_cleared {
+                record_module_audit(
+                    &deps,
+                    "module::sync::dev-agent-stop",
+                    &module_id,
+                    Some(&recorded_version),
+                    AuditOutcome::Success,
+                    AuditMetadata::default().insert("reason", "release"),
+                );
+            }
         }
         Err(err) => {
             render_service_error(&mut out, msg_modules::release_flow::ERROR_CONTEXT, &err)?;

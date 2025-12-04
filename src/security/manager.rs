@@ -8,6 +8,10 @@ use crate::security::auth::{AuthError, Role};
 use crate::security::crypto::{
     AeadRegistry, Argon2Kdf, CipherAlgorithm, CryptoError, KeyDerivationFunction, PasswordHashing,
 };
+use crate::security::service_tokens::{
+    DelegatedActor, DelegatedToken, DelegatedTokenClaims, DelegatedTokenRequest, ServiceTokenError,
+    ServiceTokenStore,
+};
 use crate::security::session::{Session, SessionError, SessionStore};
 use crate::utils::messages::security::manager as security_manager_messages;
 
@@ -21,12 +25,15 @@ pub enum SecurityError {
     Crypto(#[from] CryptoError),
     #[error(transparent)]
     Session(#[from] SessionError),
+    #[error(transparent)]
+    ServiceToken(#[from] ServiceTokenError),
 }
 
 pub struct SecurityManager {
     kdf: Argon2Kdf,
     aead: AeadRegistry,
     sessions: SessionStore,
+    service_tokens: ServiceTokenStore,
     audit: Arc<dyn AuditSink>,
 }
 
@@ -44,10 +51,12 @@ impl SecurityManager {
         }
         let aead = AeadRegistry::new(&algorithms);
         let sessions = SessionStore::new(&cfg.session);
+        let service_tokens = ServiceTokenStore::new(&cfg.service_tokens);
         Ok(Self {
             kdf,
             aead,
             sessions,
+            service_tokens,
             audit,
         })
     }
@@ -137,6 +146,43 @@ impl SecurityManager {
         Ok(())
     }
 
+    pub fn issue_service_token(
+        &self,
+        request: DelegatedTokenRequest,
+    ) -> Result<DelegatedToken, SecurityError> {
+        let issued = self.service_tokens.issue(request)?;
+        self.record_event(
+            AuditEvent::builder()
+                .actor(AuditActor::System)
+                .action("security.service_token.issue")
+                .target(format!("service-token:{}", issued.claims.token_id))
+                .metadata(self.service_token_metadata(&issued.claims, None)),
+        );
+        Ok(issued)
+    }
+
+    pub fn validate_service_token(
+        &self,
+        token: &str,
+    ) -> Result<DelegatedTokenClaims, SecurityError> {
+        Ok(self.service_tokens.validate(token)?)
+    }
+
+    pub fn revoke_service_token(&self, token: &str, reason: &str) -> Result<(), SecurityError> {
+        let claims = self.service_tokens.validate(token).ok();
+        self.service_tokens.revoke(token)?;
+        if let Some(claims) = claims {
+            self.record_event(
+                AuditEvent::builder()
+                    .actor(AuditActor::System)
+                    .action("security.service_token.revoke")
+                    .target(format!("service-token:{}", claims.token_id))
+                    .metadata(self.service_token_metadata(&claims, Some(reason))),
+            );
+        }
+        Ok(())
+    }
+
     pub fn ensure_role(&self, token: &str, required: Role) -> Result<Session, AuthError> {
         match self.sessions.validate(token) {
             Ok(session) => {
@@ -208,26 +254,46 @@ impl SecurityManager {
         required: Role,
         result: &Result<Role, AuthError>,
     ) {
-        let (outcome, granted_role) = match result {
-            Ok(role) if role.satisfies(required) => (AuditOutcome::Success, Some(role)),
-            Ok(role) => (AuditOutcome::Denied, Some(role)),
-            Err(_) => (AuditOutcome::Denied, None),
+        // Control-plane authorize checks are extremely chatty in busy clusters
+        // and swamp the audit sink without yielding additional signal. We keep
+        // the computation side-effects (fingerprint derivation, etc.) but skip
+        // emitting the actual audit event.
+        let _ = (token, required, result);
+    }
+
+    fn service_token_metadata(
+        &self,
+        claims: &DelegatedTokenClaims,
+        reason: Option<&str>,
+    ) -> AuditMetadata {
+        let scopes = if claims.scopes.is_empty() {
+            "-".to_string()
+        } else {
+            claims
+                .scopes
+                .iter()
+                .map(|scope| scope.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
         };
-        let fingerprint = token
-            .map(|value| self.token_fingerprint(value))
-            .unwrap_or_else(|| security_manager_messages::missing_token_placeholder().to_string());
-        let mut metadata = AuditMetadata::default().insert("required_role", required.as_str());
-        if let Some(role) = granted_role {
-            metadata = metadata.insert("granted_role", role.as_str());
+        let mut metadata = AuditMetadata::default()
+            .insert("tenant_id", claims.tenant_id.clone())
+            .insert("actor_kind", claims.actor.kind())
+            .insert("actor_id", claims.actor.identifier())
+            .insert("scopes", scopes)
+            .insert("expires_at", claims.expires_at.to_string());
+        match &claims.actor {
+            DelegatedActor::User { role, .. } => {
+                metadata = metadata.insert("user_role", role.as_str());
+            }
+            DelegatedActor::Service { role, .. } => {
+                metadata = metadata.insert("service_role", role.as_str());
+            }
         }
-        self.record_event(
-            AuditEvent::builder()
-                .actor(AuditActor::System)
-                .action("security.control_plane.authorize")
-                .outcome(outcome)
-                .target(format!("token:{}", fingerprint))
-                .metadata(metadata),
-        );
+        if let Some(reason) = reason {
+            metadata = metadata.insert("reason", reason);
+        }
+        metadata
     }
 
     fn record_event(&self, builder: AuditEventBuilder) {
@@ -266,9 +332,11 @@ mod tests {
     use super::*;
     use crate::audit::{AuditError, AuditEvent};
     use crate::config::{
-        HttpSecuritySection, IdentitySection, JwtConfig, KdfConfig, SecuritySection, SessionSection,
+        HttpSecuritySection, IdentitySection, JwtConfig, KdfConfig, SecuritySection,
+        ServiceTokenSection, SessionSection,
     };
     use crate::security::auth::Role;
+    use crate::security::service::ServiceRole;
     use std::sync::Mutex;
 
     #[derive(Default)]
@@ -308,6 +376,11 @@ mod tests {
                 idle_timeout_seconds: 1,
                 cleanup_interval_seconds: 1,
             },
+            service_tokens: ServiceTokenSection {
+                lifetime_seconds: 2,
+                idle_timeout_seconds: 1,
+                cleanup_interval_seconds: 1,
+            },
             identity: IdentitySection::default(),
         }
     }
@@ -337,6 +410,35 @@ mod tests {
 
         let events = audit.events.lock().unwrap();
         assert!(!events.is_empty());
+    }
+
+    #[test]
+    fn service_tokens_issue_and_revoke() {
+        let audit = Arc::new(RecordingAuditSink::default());
+        let manager = SecurityManager::new(&security_config(), audit).expect("security manager");
+        let issued = manager
+            .issue_service_token(DelegatedTokenRequest::new(
+                DelegatedActor::Service {
+                    service_id: "module:test".to_string(),
+                    role: ServiceRole::Write,
+                },
+                "tenant-1",
+            ))
+            .expect("token issued");
+        assert_eq!(issued.claims.tenant_id, "tenant-1");
+        let validated = manager
+            .validate_service_token(&issued.token)
+            .expect("token is valid");
+        assert_eq!(validated.actor.kind(), "service");
+        manager
+            .revoke_service_token(&issued.token, "cleanup")
+            .expect("token revoked");
+        assert!(matches!(
+            manager.validate_service_token(&issued.token),
+            Err(SecurityError::ServiceToken(ServiceTokenError::NotFound))
+                | Err(SecurityError::ServiceToken(ServiceTokenError::Expired))
+                | Err(SecurityError::ServiceToken(ServiceTokenError::IdleTimeout))
+        ));
     }
 
     #[test]

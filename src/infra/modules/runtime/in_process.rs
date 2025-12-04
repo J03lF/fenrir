@@ -303,6 +303,7 @@ mod tests {
             installed_at: SystemTime::now(),
             path: "test".into(),
             source: ModuleInstallSource::Distribution,
+            distribution_version: None,
         }
     }
 

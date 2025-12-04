@@ -95,8 +95,6 @@ pub(super) struct RawHeader {
 #[derive(Deserialize)]
 pub(super) struct Header {
     pub(super) alg: String,
-    #[allow(dead_code)]
-    pub(super) typ: String,
     pub(super) kid: String,
 }
 

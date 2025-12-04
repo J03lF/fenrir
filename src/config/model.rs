@@ -1,5 +1,9 @@
 use serde::Deserialize;
-use std::{path::PathBuf, str::FromStr};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::PathBuf,
+    str::FromStr,
+};
 
 use super::{error::ConfigError, validation::validate_identity_tls};
 use crate::security::auth::Role;
@@ -97,6 +101,8 @@ pub struct SecuritySection {
     pub http: HttpSecuritySection,
     #[serde(default)]
     pub session: SessionSection,
+    #[serde(default)]
+    pub service_tokens: ServiceTokenSection,
     #[serde(default)]
     pub identity: IdentitySection,
 }
@@ -345,6 +351,8 @@ pub struct ModulesSection {
     pub trust: ModuleTrustSection,
     #[serde(default)]
     pub dev_sources: ModuleDevSourcesSection,
+    #[serde(default)]
+    pub services: HashMap<String, ModuleServiceOverride>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -366,6 +374,10 @@ pub struct ModuleRuntimeSection {
     pub engine: ModuleRuntimeEngine,
     #[serde(default)]
     pub ports: ModuleRuntimePortSection,
+    #[serde(default)]
+    pub default_service_scopes: Vec<String>,
+    #[serde(default)]
+    pub clients: ModuleRuntimeClientSection,
 }
 
 impl Default for ModuleRuntimeSection {
@@ -373,6 +385,8 @@ impl Default for ModuleRuntimeSection {
         Self {
             engine: default_module_runtime_engine(),
             ports: ModuleRuntimePortSection::default(),
+            default_service_scopes: Vec::new(),
+            clients: ModuleRuntimeClientSection::default(),
         }
     }
 }
@@ -460,6 +474,78 @@ pub struct ModuleStorageSection {
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
+pub struct ModuleRuntimeClientSection {
+    #[serde(default = "default_client_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default = "default_client_retries")]
+    pub retries: u32,
+    #[serde(default = "default_client_backoff_ms")]
+    pub backoff_ms: u64,
+    #[serde(default = "default_health_probe_interval_secs")]
+    pub health_probe_interval_seconds: u64,
+    #[serde(default)]
+    pub tls: ModuleRuntimeClientTlsSection,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ModuleRuntimeClientTlsSection {
+    pub ca_cert_path: Option<String>,
+    pub client_cert_path: Option<String>,
+    pub client_key_path: Option<String>,
+    #[serde(default)]
+    pub accept_invalid_certs: bool,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ModuleServiceOverride {
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub secrets: BTreeMap<String, String>,
+    #[serde(default)]
+    pub policy: ModuleServicePolicyOverride,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ModuleServicePolicyOverride {
+    pub internal_only: Option<bool>,
+    #[serde(default)]
+    pub allowed_roles: Vec<String>,
+    #[serde(default)]
+    pub required_scopes: Vec<String>,
+    #[serde(default)]
+    pub tenant: Option<ModuleServiceTenantConfig>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ModuleServiceTenantConfig {
+    #[serde(default = "default_tenant_mode")]
+    pub mode: ModuleServiceTenantMode,
+    #[serde(default)]
+    pub value: Option<String>,
+    #[serde(default)]
+    pub allow: Vec<String>,
+}
+
+impl Default for ModuleServiceTenantConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_tenant_mode(),
+            value: None,
+            allow: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModuleServiceTenantMode {
+    Any,
+    Fixed,
+    AllowList,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct ModuleDevSourcesSection {
     #[serde(default)]
     pub base_path: Option<String>,
@@ -494,6 +580,16 @@ pub struct SessionSection {
     pub cleanup_interval_seconds: u64,
 }
 
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ServiceTokenSection {
+    #[serde(default = "default_service_token_lifetime_seconds")]
+    pub lifetime_seconds: u64,
+    #[serde(default = "default_service_token_idle_timeout_seconds")]
+    pub idle_timeout_seconds: u64,
+    #[serde(default = "default_service_token_cleanup_interval_seconds")]
+    pub cleanup_interval_seconds: u64,
+}
+
 fn default_require_signature() -> bool {
     true
 }
@@ -515,6 +611,26 @@ fn default_module_port_range() -> ModulePortRange {
         min: 41000,
         max: 46000,
     }
+}
+
+fn default_client_timeout_ms() -> u64 {
+    10_000
+}
+
+fn default_client_retries() -> u32 {
+    2
+}
+
+fn default_client_backoff_ms() -> u64 {
+    200
+}
+
+fn default_health_probe_interval_secs() -> u64 {
+    30
+}
+
+fn default_tenant_mode() -> ModuleServiceTenantMode {
+    ModuleServiceTenantMode::Any
 }
 
 fn default_kdf_version() -> u32 {
@@ -551,6 +667,18 @@ fn default_session_idle_timeout_seconds() -> u64 {
 
 fn default_session_cleanup_interval_seconds() -> u64 {
     300
+}
+
+fn default_service_token_lifetime_seconds() -> u64 {
+    600
+}
+
+fn default_service_token_idle_timeout_seconds() -> u64 {
+    300
+}
+
+fn default_service_token_cleanup_interval_seconds() -> u64 {
+    60
 }
 
 fn default_identity_provider() -> IdentityProviderKind {
@@ -842,12 +970,118 @@ impl ModuleStorageSection {
     }
 }
 
+impl ModuleRuntimeClientSection {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.timeout_ms == 0 {
+            return Err(ConfigError::Invalid(
+                "modules.runtime.clients.timeout_ms must be > 0",
+            ));
+        }
+        if self.backoff_ms == 0 {
+            return Err(ConfigError::Invalid(
+                "modules.runtime.clients.backoff_ms must be > 0",
+            ));
+        }
+        if self.health_probe_interval_seconds == 0 {
+            return Err(ConfigError::Invalid(
+                "modules.runtime.clients.health_probe_interval_seconds must be > 0",
+            ));
+        }
+        if self.tls.client_cert_path.is_some() ^ self.tls.client_key_path.is_some() {
+            return Err(ConfigError::Invalid(
+                "modules.runtime.clients.tls.client_cert_path and client_key_path must be set together",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl ModulesSection {
+    pub fn validate_services(&self) -> Result<(), ConfigError> {
+        for (service_id, override_cfg) in &self.services {
+            override_cfg.validate(service_id)?;
+        }
+        Ok(())
+    }
+}
+
+impl ModuleServiceOverride {
+    fn validate(&self, service_id: &str) -> Result<(), ConfigError> {
+        if service_id.trim().is_empty() {
+            return Err(ConfigError::Invalid(
+                "modules.services keys must not be empty",
+            ));
+        }
+        for key in self.env.keys().chain(self.secrets.keys()) {
+            let trimmed = key.trim();
+            if trimmed.is_empty() {
+                return Err(ConfigError::InvalidMessage(format!(
+                    "modules.services.{service_id} env keys must not be empty"
+                )));
+            }
+            if trimmed.contains(char::is_whitespace) {
+                return Err(ConfigError::InvalidMessage(format!(
+                    "modules.services.{service_id} env key '{trimmed}' must not contain whitespace"
+                )));
+            }
+        }
+        if let Some(tenant) = &self.policy.tenant {
+            tenant.validate(service_id)?;
+        }
+        Ok(())
+    }
+}
+
+impl ModuleServiceTenantConfig {
+    fn validate(&self, service_id: &str) -> Result<(), ConfigError> {
+        match self.mode {
+            ModuleServiceTenantMode::Any => Ok(()),
+            ModuleServiceTenantMode::Fixed => {
+                let value = self
+                    .value
+                    .as_ref()
+                    .map(|v| v.trim())
+                    .filter(|v| !v.is_empty())
+                    .ok_or_else(|| {
+                        ConfigError::InvalidMessage(format!(
+                            "modules.services.{service_id}.policy.tenant.value must be set for mode=fixed"
+                        ))
+                    })?;
+                if value.contains(char::is_whitespace) {
+                    return Err(ConfigError::InvalidMessage(format!(
+                        "modules.services.{service_id}.policy.tenant.value must not contain whitespace"
+                    )));
+                }
+                Ok(())
+            }
+            ModuleServiceTenantMode::AllowList => {
+                if self.allow.is_empty() {
+                    return Err(ConfigError::InvalidMessage(format!(
+                        "modules.services.{service_id}.policy.tenant.allow must list at least one tenant for mode=allow_list"
+                    )));
+                }
+                if self
+                    .allow
+                    .iter()
+                    .any(|value| value.trim().is_empty() || value.contains(char::is_whitespace))
+                {
+                    return Err(ConfigError::InvalidMessage(format!(
+                        "modules.services.{service_id}.policy.tenant.allow entries must be non-empty and without whitespace"
+                    )));
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
 impl ModuleRuntimeSection {
     pub fn validate(&self) -> Result<(), ConfigError> {
         match self.engine {
             ModuleRuntimeEngine::Process | ModuleRuntimeEngine::Stub => {}
         }
-        self.ports.validate()
+        self.ports.validate()?;
+        self.clients.validate()
     }
 }
 

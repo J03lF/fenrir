@@ -1,21 +1,28 @@
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::sync::Arc;
 
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tar::Builder;
-use tokio::task;
+use tokio::{fs as tokio_fs, task};
 
 use crate::domain::module::{
     ChecksumAlgorithm, InstalledModule, ModuleBundle, ModuleId, ModuleInstallSource, ModuleResult,
     ModuleRuntimeError, ModuleServiceError, ModuleStorageError,
 };
-use crate::services::{ServiceDescriptorOwned, ServiceKind, ServiceStatus, ServiceTag};
+use crate::security::service::{ServiceRole, ServiceScope};
+use crate::services::{
+    ServiceDescriptorOwned, ServiceIngressMetadata, ServiceIngressProtocol, ServiceKind,
+    ServiceRateLimit, ServiceSecurityMetadata, ServiceStatus, ServiceTag, ServiceTenantGuard,
+};
 use crate::utils::messages::services::module::{
     dev::{
         errors as module_dev_errors, logs as module_dev_logs, names as module_dev_names,
@@ -24,7 +31,10 @@ use crate::utils::messages::services::module::{
     service::errors as module_service_errors,
 };
 
-use super::types::{ModuleDevServices, ModuleSyncOutcome, ModuleSyncPackage, RegisteredDevService};
+use super::types::{
+    ModuleDevRunState, ModuleDevServices, ModuleSyncOutcome, ModuleSyncPackage,
+    RegisteredDevService,
+};
 use super::ModuleService;
 
 #[derive(Clone)]
@@ -46,6 +56,7 @@ impl DevSourceConfig {
 struct DevSourceInfo {
     package_source: Option<PathBuf>,
     services: Vec<DevServiceBinding>,
+    run: Option<DevRunConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -55,22 +66,39 @@ struct DevServiceBinding {
     name: Option<String>,
     description: Option<String>,
     kind: ServiceKind,
+    security: ServiceSecurityMetadata,
+    ingress: ServiceIngressMetadata,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct DevRunConfig {
+    pub(super) command: DevRunCommand,
+    pub(super) workdir: Option<PathBuf>,
+    pub(super) auto_restart: bool,
+    pub(super) auto_start: bool,
+    pub(super) env: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct DevRunCommand {
+    pub(super) args: Vec<String>,
+    pub(super) display: String,
 }
 
 #[derive(Debug, Default)]
 pub(super) struct DevOverrideState {
-    service_ids: Vec<String>,
+    pub(super) services: HashMap<String, SocketAddr>,
 }
 
 #[derive(Debug, Default)]
 pub(super) struct DeclaredServicesState {
-    service_ids: Vec<String>,
+    pub(super) services: HashMap<String, SocketAddr>,
 }
 
 impl ModuleService {
     /// Synchronize an installed module with the files located on this machine.
     pub async fn synchronize_from_local(
-        &self,
+        self: &Arc<Self>,
         module_id: &ModuleId,
     ) -> ModuleResult<ModuleSyncOutcome> {
         let installed = self.storage.load(module_id).await?.ok_or_else(|| {
@@ -79,11 +107,11 @@ impl ModuleService {
             ))
         })?;
 
-        if let Err(err) = self.stop_all_modules().await {
-            return Err(ModuleServiceError::Storage(
-                ModuleStorageError::InvalidState(module_dev_errors::stop_all_failed(err)),
-            ));
-        }
+        self.ensure_distribution_backup(module_id, &installed)
+            .await?;
+
+        self.stop_module_process(module_id).await;
+        self.stop_dev_agent_if_any(module_id).await;
 
         if let Some(dev_info) = self.locate_dev_source(module_id)? {
             if !dev_info.services.is_empty() {
@@ -93,9 +121,39 @@ impl ModuleService {
                     "{}",
                     module_dev_logs::ACTIVATING_DEV_OVERRIDE
                 );
-                return self
+                let mut dev_services = self
                     .activate_dev_services(module_id, &installed, dev_info.services)
-                    .await;
+                    .await?;
+                if let Some(run) = dev_info.run {
+                    if run.auto_start {
+                        match self.start_dev_agent(module_id, &dev_services, run).await {
+                            Ok((agent_state, expires_at)) => {
+                                dev_services.run = Some(agent_state);
+                                self.register_dev_agent_rotation(module_id, expires_at)
+                                    .await;
+                            }
+                            Err(err) => {
+                                self.clear_dev_services_if_any(module_id).await;
+                                return Err(err);
+                            }
+                        }
+                    } else {
+                        let command = run.command.display.clone();
+                        let workdir = run
+                            .workdir
+                            .clone()
+                            .or_else(|| self.dev_module_root(module_id))
+                            .unwrap_or_else(|| PathBuf::from("."));
+                        dev_services.run = Some(ModuleDevRunState {
+                            command,
+                            workdir,
+                            auto_restart: run.auto_restart,
+                            auto_start: false,
+                            log_path: None,
+                        });
+                    }
+                }
+                return Ok(ModuleSyncOutcome::ExternalServices(dev_services));
             }
 
             if let Some(source) = dev_info.package_source {
@@ -130,6 +188,8 @@ impl ModuleService {
         installed: &InstalledModule,
         package_source: PathBuf,
     ) -> ModuleResult<ModuleSyncOutcome> {
+        self.ensure_distribution_backup(module_id, installed)
+            .await?;
         self.clear_dev_services_if_any(module_id).await;
         let archive = package_module_directory(package_source.clone()).await?;
         let mut hasher = Sha256::new();
@@ -172,6 +232,12 @@ impl ModuleService {
             }
         }
 
+        if let Err(err) = self.ensure_running(module_id).await {
+            return Err(ModuleServiceError::Storage(
+                ModuleStorageError::InvalidState(module_dev_errors::start_after_sync_failed(err)),
+            ));
+        }
+
         Ok(ModuleSyncOutcome::Packaged(Box::new(ModuleSyncPackage {
             install_result: result,
             packaged_from: package_source,
@@ -183,7 +249,7 @@ impl ModuleService {
         module_id: &ModuleId,
         installed: &InstalledModule,
         bindings: Vec<DevServiceBinding>,
-    ) -> ModuleResult<ModuleSyncOutcome> {
+    ) -> ModuleResult<ModuleDevServices> {
         self.clear_dev_services_if_any(module_id).await;
         self.clear_declared_services_if_any(module_id).await;
         if let Err(err) = self.runtime.stop(module_id).await {
@@ -196,6 +262,8 @@ impl ModuleService {
                 );
             }
         }
+        self.revoke_service_token_if_any(module_id, "dev-override")
+            .await;
 
         if bindings.is_empty() {
             return Err(ModuleServiceError::Storage(
@@ -204,7 +272,7 @@ impl ModuleService {
         }
 
         let mut registered = Vec::new();
-        let mut ids = Vec::new();
+        let mut remembered = Vec::new();
 
         for binding in bindings {
             let service_id = format!("module:{}::{}", module_id, binding.id);
@@ -216,31 +284,38 @@ impl ModuleService {
                 .description
                 .clone()
                 .unwrap_or_else(|| module_dev_names::default_dev_service().to_string());
-            let descriptor = ServiceDescriptorOwned::new(
+            let mut descriptor = ServiceDescriptorOwned::new(
                 service_id.clone(),
                 service_name.clone(),
                 service_description,
                 binding.kind,
             )
-            .with_tags(vec![ServiceTag::Auxiliary]);
-
+            .with_tags(vec![ServiceTag::Auxiliary])
+            .with_security(binding.security.clone())
+            .with_ingress(binding.ingress.clone());
+            descriptor = self.apply_descriptor_overrides(descriptor);
+            let adjusted_security = descriptor.security.clone();
+            let adjusted_ingress = descriptor.ingress.clone();
+            let endpoint = binding.endpoint;
             self.service_registry.register(
                 descriptor,
                 ServiceStatus::Active,
-                Some(module_dev_notes::dev_endpoint(binding.endpoint)),
+                Some(module_dev_notes::dev_endpoint(endpoint)),
             );
 
             registered.push(RegisteredDevService {
                 service_id: service_id.clone(),
-                endpoint: binding.endpoint,
+                endpoint,
                 name: service_name,
                 description: binding.description.clone(),
                 kind: binding.kind,
+                security: adjusted_security.clone(),
+                ingress: adjusted_ingress.clone(),
             });
-            ids.push(service_id);
+            remembered.push((service_id, endpoint));
         }
 
-        self.remember_dev_services(module_id, ids).await;
+        self.remember_dev_services(module_id, remembered).await;
         self.update_module_service_status(
             module_id,
             &installed.manifest,
@@ -248,11 +323,12 @@ impl ModuleService {
             Some(module_dev_notes::DEV_OVERRIDE_ACTIVE.to_string()),
         );
 
-        Ok(ModuleSyncOutcome::ExternalServices(ModuleDevServices {
+        Ok(ModuleDevServices {
             module_id: module_id.clone(),
             version: installed.manifest.module_version(),
             services: registered,
-        }))
+            run: None,
+        })
     }
 
     pub(super) async fn register_declared_services(
@@ -272,7 +348,7 @@ impl ModuleService {
             return Ok(());
         }
 
-        let mut ids = Vec::new();
+        let mut remembered = Vec::new();
         for binding in declared {
             let service_id = binding.id.clone();
             let name = binding.name.clone().unwrap_or_else(|| binding.id.clone());
@@ -280,24 +356,36 @@ impl ModuleService {
                 .description
                 .clone()
                 .unwrap_or_else(|| module_dev_names::binding(&name, module_id));
-            let descriptor =
+            let endpoint = binding.endpoint;
+            let mut descriptor =
                 ServiceDescriptorOwned::new(service_id.clone(), name, description, binding.kind)
-                    .with_tags(vec![ServiceTag::Auxiliary]);
+                    .with_tags(vec![ServiceTag::Auxiliary])
+                    .with_security(binding.security.clone())
+                    .with_ingress(binding.ingress.clone());
+            descriptor = self.apply_descriptor_overrides(descriptor);
             self.service_registry.register(
                 descriptor,
                 ServiceStatus::Active,
-                Some(module_dev_notes::endpoint(binding.endpoint)),
+                Some(module_dev_notes::endpoint(endpoint)),
             );
-            ids.push(service_id);
+            remembered.push((service_id, endpoint));
         }
 
-        self.remember_declared_services(module_id, ids).await;
+        self.remember_declared_services(module_id, remembered).await;
         Ok(())
     }
 
-    async fn remember_dev_services(&self, module_id: &ModuleId, service_ids: Vec<String>) {
+    async fn remember_dev_services(
+        &self,
+        module_id: &ModuleId,
+        service_ids: Vec<(String, SocketAddr)>,
+    ) {
         let mut guard = self.dev_overrides.write().await;
-        guard.insert(module_id.clone(), DevOverrideState { service_ids });
+        let mut services = HashMap::new();
+        for (id, endpoint) in service_ids {
+            services.insert(id, endpoint);
+        }
+        guard.insert(module_id.clone(), DevOverrideState { services });
     }
 
     pub(super) async fn clear_dev_services_if_any(&self, module_id: &ModuleId) -> bool {
@@ -306,23 +394,84 @@ impl ModuleService {
             guard.remove(module_id)
         };
         if let Some(state) = removed {
-            for id in state.service_ids {
-                self.service_registry.unregister(&id);
+            for id in state.services.keys() {
+                self.service_registry.unregister(id);
             }
+            self.stop_dev_agent_if_any(module_id).await;
+            self.cancel_manual_token_rotation(module_id).await;
+            self.cleanup_dev_artifacts(module_id).await;
             true
         } else {
             false
         }
     }
 
-    async fn remember_declared_services(&self, module_id: &ModuleId, service_ids: Vec<String>) {
+    async fn cleanup_dev_artifacts(&self, module_id: &ModuleId) {
+        let Some(root) = self.dev_module_root(module_id) else {
+            return;
+        };
+        let fenrir_dir = root.join(".fenrir");
+        if tokio_fs::metadata(&fenrir_dir).await.is_err() {
+            return;
+        }
+
+        let agent_dir = fenrir_dir.join("dev-agent");
+        if tokio_fs::metadata(&agent_dir).await.is_ok() {
+            if let Err(err) = tokio_fs::remove_dir_all(&agent_dir).await {
+                tracing::debug!(
+                    module = %module_id,
+                    error = %err,
+                    "failed to remove dev-agent artifacts"
+                );
+            }
+        }
+
+        let shared_env = fenrir_dir.join("dev.env");
+        if tokio_fs::remove_file(&shared_env).await.is_err() {
+            // ignore missing file
+        }
+
+        let mut dir = match tokio_fs::read_dir(&fenrir_dir).await {
+            Ok(dir) => dir,
+            Err(err) => {
+                tracing::debug!(
+                    module = %module_id,
+                    error = %err,
+                    "failed to iterate env export directory"
+                );
+                return;
+            }
+        };
+
+        while let Ok(Some(entry)) = dir.next_entry().await {
+            let file_name = entry.file_name();
+            let Some(name) = file_name.to_str() else {
+                continue;
+            };
+            if name.starts_with("dev-env-") && name.ends_with(".sh") {
+                if let Err(err) = tokio_fs::remove_file(entry.path()).await {
+                    tracing::debug!(
+                        module = %module_id,
+                        file = %name,
+                        error = %err,
+                        "failed to remove env export"
+                    );
+                }
+            }
+        }
+    }
+
+    async fn remember_declared_services(
+        &self,
+        module_id: &ModuleId,
+        service_ids: Vec<(String, SocketAddr)>,
+    ) {
         let mut guard = self.declared_services.write().await;
-        guard.insert(
-            module_id.clone(),
-            DeclaredServicesState {
-                service_ids: service_ids.clone(),
-            },
-        );
+        let mut services = HashMap::new();
+        for (id, endpoint) in service_ids {
+            services.insert(id, endpoint);
+        }
+        guard.insert(module_id.clone(), DeclaredServicesState { services });
     }
 
     pub(super) async fn clear_declared_services_if_any(&self, module_id: &ModuleId) -> bool {
@@ -331,20 +480,13 @@ impl ModuleService {
             guard.remove(module_id)
         };
         if let Some(state) = removed {
-            for id in state.service_ids {
-                self.service_registry.unregister(&id);
+            for id in state.services.keys() {
+                self.service_registry.unregister(id);
             }
             true
         } else {
             false
         }
-    }
-
-    #[allow(dead_code)]
-    async fn has_service_bindings(&self, module_id: &ModuleId) -> bool {
-        let dev = self.dev_overrides.read().await.contains_key(module_id);
-        let declared = self.declared_services.read().await.contains_key(module_id);
-        dev || declared
     }
 
     fn locate_dev_source(&self, module_id: &ModuleId) -> ModuleResult<Option<DevSourceInfo>> {
@@ -387,11 +529,12 @@ impl ModuleService {
         Ok(Some(DevSourceInfo {
             package_source,
             services,
+            run: override_definition.run,
         }))
     }
 }
 
-async fn package_module_directory(module_dir: PathBuf) -> ModuleResult<Vec<u8>> {
+pub(super) async fn package_module_directory(module_dir: PathBuf) -> ModuleResult<Vec<u8>> {
     if !module_dir.exists() {
         return Err(ModuleServiceError::Storage(
             ModuleStorageError::InvalidState(module_dev_errors::directory_missing(
@@ -511,6 +654,7 @@ fn load_dev_override(module_root: &Path) -> ModuleResult<DevOverrideDefinition> 
                 output_path: None,
                 services: Vec::new(),
                 config_path: module_root.join(".fenrir-dev.toml"),
+                run: None,
             });
         }
     };
@@ -521,7 +665,7 @@ fn load_dev_override(module_root: &Path) -> ModuleResult<DevOverrideDefinition> 
         ))
     })?;
 
-    let output_path = if let Some(output) = parsed.output {
+    let output_path = if let Some(output) = parsed.output.clone() {
         let trimmed = output.trim();
         if trimmed.is_empty() {
             return Err(ModuleServiceError::Storage(
@@ -535,10 +679,17 @@ fn load_dev_override(module_root: &Path) -> ModuleResult<DevOverrideDefinition> 
         None
     };
 
+    let run = parse_dev_run(
+        parsed.dev.as_ref().and_then(|section| section.run.clone()),
+        module_root,
+        &config_path,
+    )?;
+
     Ok(DevOverrideDefinition {
         output_path,
         services: parsed.services,
         config_path,
+        run,
     })
 }
 
@@ -624,21 +775,202 @@ fn parse_dev_services(
             ))
         })?;
 
+        let allowed_roles = if definition.allowed_roles.is_empty() {
+            ServiceSecurityMetadata::default_allowed_roles()
+        } else {
+            let mut roles = Vec::new();
+            for role in &definition.allowed_roles {
+                match ServiceRole::from_str(role) {
+                    Ok(parsed) => roles.push(parsed),
+                    Err(_) => {
+                        return Err(ModuleServiceError::Storage(
+                            ModuleStorageError::InvalidState(
+                                module_dev_errors::dev_service_invalid_role(
+                                    config_path.display(),
+                                    id,
+                                    role,
+                                ),
+                            ),
+                        ));
+                    }
+                }
+            }
+            roles
+        };
+
+        let mut scopes = Vec::new();
+        for scope in &definition.required_scopes {
+            match ServiceScope::new(scope) {
+                Ok(parsed) => scopes.push(parsed),
+                Err(err) => {
+                    return Err(ModuleServiceError::Storage(
+                        ModuleStorageError::InvalidState(
+                            module_dev_errors::dev_service_invalid_scope(
+                                config_path.display(),
+                                id,
+                                scope,
+                                err,
+                            ),
+                        ),
+                    ));
+                }
+            }
+        }
+
+        let security = ServiceSecurityMetadata {
+            internal_only: definition.internal_only.unwrap_or(true),
+            allowed_roles,
+            required_scopes: scopes,
+            tenant: ServiceTenantGuard::any(),
+        };
+
+        let mut ingress = match definition
+            .access
+            .unwrap_or(DevOverrideIngressAccess::Internal)
+        {
+            DevOverrideIngressAccess::Internal => ServiceIngressMetadata::internal(),
+            DevOverrideIngressAccess::Public => ServiceIngressMetadata::public(),
+        };
+        if let Some(prefix) = definition.route_prefix.as_deref() {
+            ingress = ingress.with_route_prefix(prefix);
+        }
+        if let Some(health) = definition.health_endpoint.as_deref() {
+            ingress = ingress.with_health_endpoint(health);
+        }
+        let rate_limit = if definition.disable_rate_limit.unwrap_or(false) {
+            ServiceRateLimit::Unlimited
+        } else if let Some(limit) = definition.rate_limit_per_second {
+            if limit == 0 {
+                return Err(ModuleServiceError::Storage(
+                    ModuleStorageError::InvalidState(
+                        module_dev_errors::dev_service_invalid_rate_limit(
+                            config_path.display(),
+                            id,
+                            limit,
+                        ),
+                    ),
+                ));
+            }
+            ServiceRateLimit::CustomPerSecond(limit)
+        } else {
+            ServiceRateLimit::Default
+        };
+        ingress = ingress.with_rate_limit(rate_limit);
+        let protocols = if definition.protocols.is_empty() {
+            vec![DevOverrideServiceProtocol::Http]
+        } else {
+            definition.protocols.clone()
+        };
+        let mapped = protocols
+            .into_iter()
+            .map(ServiceIngressProtocol::from)
+            .collect::<Vec<_>>();
+        ingress = ingress.with_protocols(mapped);
+
         services.push(DevServiceBinding {
             id: id.to_string(),
             endpoint,
             name: definition.name.clone(),
             description: definition.description.clone(),
             kind: definition.kind.into(),
+            security,
+            ingress,
         });
     }
     Ok(services)
+}
+
+fn parse_dev_run(
+    definition: Option<DevRunDefinition>,
+    module_root: &Path,
+    config_path: &Path,
+) -> ModuleResult<Option<DevRunConfig>> {
+    let Some(definition) = definition else {
+        return Ok(None);
+    };
+    let command_value = definition.command.ok_or_else(|| {
+        ModuleServiceError::Storage(ModuleStorageError::InvalidState(
+            module_dev_errors::dev_run_missing_command(config_path.display()),
+        ))
+    })?;
+    let command = normalize_dev_command(command_value, config_path)?;
+    let workdir = if let Some(raw) = definition.workdir {
+        let candidate = PathBuf::from(raw);
+        let resolved = if candidate.is_absolute() {
+            candidate
+        } else {
+            module_root.join(candidate)
+        };
+        if !resolved.exists() {
+            return Err(ModuleServiceError::Storage(
+                ModuleStorageError::InvalidState(module_dev_errors::dev_run_workdir_missing(
+                    config_path.display(),
+                    resolved.display(),
+                )),
+            ));
+        }
+        Some(resolved)
+    } else {
+        None
+    };
+
+    let auto_restart = definition.auto_restart.unwrap_or(true);
+    let auto_start = definition.auto_start.unwrap_or(true);
+    let env = definition.env;
+
+    Ok(Some(DevRunConfig {
+        command,
+        workdir,
+        auto_restart,
+        auto_start,
+        env,
+    }))
+}
+
+fn normalize_dev_command(
+    value: DevRunCommandValue,
+    config_path: &Path,
+) -> ModuleResult<DevRunCommand> {
+    let (args, display) = match value {
+        DevRunCommandValue::String(cmd) => {
+            let display = cmd.clone();
+            (shell_wrapped_command(cmd), display)
+        }
+        DevRunCommandValue::List(list) => {
+            if list.is_empty() {
+                return Err(ModuleServiceError::Storage(
+                    ModuleStorageError::InvalidState(module_dev_errors::dev_run_invalid_command(
+                        config_path.display(),
+                    )),
+                ));
+            }
+            let display = list.join(" ");
+            (list, display)
+        }
+    };
+    if args.is_empty() {
+        return Err(ModuleServiceError::Storage(
+            ModuleStorageError::InvalidState(module_dev_errors::dev_run_invalid_command(
+                config_path.display(),
+            )),
+        ));
+    }
+    Ok(DevRunCommand { args, display })
+}
+
+fn shell_wrapped_command(script: String) -> Vec<String> {
+    if cfg!(windows) {
+        vec!["cmd".to_string(), "/C".to_string(), script]
+    } else {
+        vec!["/bin/sh".to_string(), "-c".to_string(), script]
+    }
 }
 
 struct DevOverrideDefinition {
     output_path: Option<PathBuf>,
     services: Vec<DevOverrideServiceDefinition>,
     config_path: PathBuf,
+    run: Option<DevRunConfig>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -647,8 +979,16 @@ struct DevOverrideFile {
     output: Option<String>,
     #[serde(default)]
     services: Vec<DevOverrideServiceDefinition>,
+    #[serde(default)]
+    dev: Option<DevOverrideDevSection>,
     #[serde(flatten)]
     _extra: toml::value::Table,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+struct DevOverrideDevSection {
+    #[serde(default)]
+    run: Option<DevRunDefinition>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -661,6 +1001,45 @@ struct DevOverrideServiceDefinition {
     #[serde(default)]
     kind: DevOverrideServiceKind,
     endpoint: String,
+    #[serde(default)]
+    internal_only: Option<bool>,
+    #[serde(default)]
+    allowed_roles: Vec<String>,
+    #[serde(default)]
+    required_scopes: Vec<String>,
+    #[serde(default)]
+    route_prefix: Option<String>,
+    #[serde(default)]
+    health_endpoint: Option<String>,
+    #[serde(default)]
+    access: Option<DevOverrideIngressAccess>,
+    #[serde(default)]
+    protocols: Vec<DevOverrideServiceProtocol>,
+    #[serde(default)]
+    rate_limit_per_second: Option<u32>,
+    #[serde(default)]
+    disable_rate_limit: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+struct DevRunDefinition {
+    #[serde(default)]
+    command: Option<DevRunCommandValue>,
+    #[serde(default)]
+    workdir: Option<String>,
+    #[serde(default)]
+    auto_restart: Option<bool>,
+    #[serde(default)]
+    auto_start: Option<bool>,
+    #[serde(default)]
+    env: HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+enum DevRunCommandValue {
+    String(String),
+    List(Vec<String>),
 }
 
 #[derive(Debug, Deserialize, Clone, Copy)]
@@ -691,6 +1070,29 @@ impl From<DevOverrideServiceKind> for ServiceKind {
             DevOverrideServiceKind::Security => ServiceKind::Security,
             DevOverrideServiceKind::Storage => ServiceKind::Storage,
             DevOverrideServiceKind::Other => ServiceKind::Other,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+enum DevOverrideIngressAccess {
+    Internal,
+    Public,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+enum DevOverrideServiceProtocol {
+    Http,
+    Grpc,
+}
+
+impl From<DevOverrideServiceProtocol> for ServiceIngressProtocol {
+    fn from(value: DevOverrideServiceProtocol) -> Self {
+        match value {
+            DevOverrideServiceProtocol::Http => ServiceIngressProtocol::Http,
+            DevOverrideServiceProtocol::Grpc => ServiceIngressProtocol::Grpc,
         }
     }
 }

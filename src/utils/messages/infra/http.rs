@@ -130,6 +130,167 @@ pub mod problems {
     pub fn forbidden() -> ProblemText {
         ProblemText::new("forbidden", "access denied")
     }
+
+    pub fn module_token_service_only() -> ProblemText {
+        ProblemText::new(
+            "module_token_service_only",
+            "token exchange is limited to module service tokens",
+        )
+    }
+
+    pub fn module_token_invalid_service(id: &str) -> ProblemText {
+        ProblemText::new(
+            "module_token_invalid_service",
+            format!("'{id}' is not a managed module service"),
+        )
+    }
+
+    pub fn module_token_scope_invalid(scope: &str) -> ProblemText {
+        ProblemText::new(
+            "module_token_scope_invalid",
+            format!("scope '{scope}' is not allowed for module tokens"),
+        )
+    }
+
+    pub fn module_token_scope_missing() -> ProblemText {
+        ProblemText::new(
+            "module_token_scope_missing",
+            "at least one scope must be requested",
+        )
+    }
+
+    pub fn module_token_issue_failed(err: impl fmt::Display) -> ProblemText {
+        ProblemText::new(
+            "module_token_issue_failed",
+            format!("failed to issue module token: {err}"),
+        )
+    }
+
+    pub fn gateway_invalid_service(value: &str) -> ProblemText {
+        ProblemText::new(
+            "gateway_invalid_service",
+            format!("service identifier '{value}' is invalid"),
+        )
+    }
+
+    pub fn gateway_unknown_service(id: &str) -> ProblemText {
+        ProblemText::new(
+            "gateway_unknown_service",
+            format!("service '{id}' is not registered for ingress"),
+        )
+    }
+
+    pub fn gateway_security_unavailable() -> ProblemText {
+        ProblemText::new(
+            "gateway_security_unavailable",
+            "security manager unavailable for service gateway",
+        )
+    }
+
+    pub fn gateway_security_missing(id: &str) -> ProblemText {
+        ProblemText::new(
+            "gateway_security_missing",
+            format!("service '{id}' is missing security metadata"),
+        )
+    }
+
+    pub fn gateway_token_missing() -> ProblemText {
+        ProblemText::new(
+            "gateway_token_missing",
+            "service token missing from Authorization header",
+        )
+    }
+
+    pub fn gateway_token_invalid() -> ProblemText {
+        ProblemText::new(
+            "gateway_token_invalid",
+            "service token is malformed or unsupported",
+        )
+    }
+
+    pub fn gateway_token_expired() -> ProblemText {
+        ProblemText::new(
+            "gateway_token_expired",
+            "service token is expired, revoked, or idle timed out",
+        )
+    }
+
+    pub fn gateway_security_failure(err: impl fmt::Display) -> ProblemText {
+        ProblemText::new(
+            "gateway_security_failure",
+            format!("security subsystem rejected token: {err}"),
+        )
+    }
+
+    pub fn gateway_access_denied(id: &str) -> ProblemText {
+        ProblemText::new(
+            "gateway_access_denied",
+            format!("service '{id}' denied the provided token"),
+        )
+    }
+
+    pub fn gateway_service_unavailable(id: &str) -> ProblemText {
+        ProblemText::new(
+            "gateway_service_unavailable",
+            format!("service '{id}' is not currently running"),
+        )
+    }
+
+    pub fn gateway_service_failure(id: &str, err: impl fmt::Display) -> ProblemText {
+        ProblemText::new(
+            "gateway_service_failure",
+            format!("service '{id}' cannot be reached: {err}"),
+        )
+    }
+
+    pub fn gateway_rate_limited(id: &str) -> ProblemText {
+        ProblemText::new(
+            "gateway_rate_limited",
+            format!("service '{id}' exceeded the rate limit"),
+        )
+    }
+
+    pub fn gateway_protocol_unsupported(id: &str, protocol: &str) -> ProblemText {
+        ProblemText::new(
+            "gateway_protocol_unsupported",
+            format!("service '{id}' does not expose {protocol} ingress"),
+        )
+    }
+
+    pub fn gateway_upstream_unreachable(id: &str) -> ProblemText {
+        ProblemText::new(
+            "gateway_upstream_unreachable",
+            format!("service '{id}' is unreachable"),
+        )
+    }
+
+    pub fn gateway_upstream_read_failed(err: impl fmt::Display) -> ProblemText {
+        ProblemText::new(
+            "gateway_upstream_read_failed",
+            format!("failed to read upstream response: {err}"),
+        )
+    }
+
+    pub fn gateway_upstream_conversion_failed(err: impl fmt::Display) -> ProblemText {
+        ProblemText::new(
+            "gateway_upstream_conversion_failed",
+            format!("failed to map upstream response: {err}"),
+        )
+    }
+
+    pub fn gateway_method_not_allowed(method: &str) -> ProblemText {
+        ProblemText::new(
+            "gateway_method_not_allowed",
+            format!("HTTP method '{method}' is not supported"),
+        )
+    }
+
+    pub fn gateway_body_read_failed(err: impl fmt::Display) -> ProblemText {
+        ProblemText::new(
+            "gateway_body_read_failed",
+            format!("failed to read request body: {err}"),
+        )
+    }
 }
 
 pub mod tls {

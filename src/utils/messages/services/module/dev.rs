@@ -7,14 +7,13 @@ pub mod logs {
         "failed to register declared services after sync";
     pub const STOP_RUNTIME_FOR_DEV_FAILED: &str =
         "failed to stop module runtime before activating dev services";
+    pub const DEV_AGENT_STARTING: &str = "spawning dev agent for local override";
+    pub const DEV_AGENT_STOPPING: &str = "stopping dev agent";
+    pub const DEV_AGENT_SPAWN_FAILED: &str = "failed to start dev agent";
 }
 
 pub mod errors {
     use super::fmt;
-
-    pub fn stop_all_failed(err: impl fmt::Display) -> String {
-        format!("failed to stop modules: {err}")
-    }
 
     pub fn install_path_missing(path: impl fmt::Display) -> String {
         format!("installation path {path} does not exist")
@@ -92,6 +91,59 @@ pub mod errors {
         err: impl fmt::Display,
     ) -> String {
         format!("dev service {id} in {path} has an invalid endpoint {endpoint}: {err}")
+    }
+
+    pub fn dev_service_invalid_role(
+        path: impl fmt::Display,
+        id: impl fmt::Display,
+        role: impl fmt::Display,
+    ) -> String {
+        format!("dev service {id} in {path} has an unknown service role {role}")
+    }
+
+    pub fn dev_service_invalid_scope(
+        path: impl fmt::Display,
+        id: impl fmt::Display,
+        scope: impl fmt::Display,
+        err: impl fmt::Display,
+    ) -> String {
+        format!("dev service {id} in {path} has an invalid scope {scope}: {err}")
+    }
+
+    pub fn dev_service_invalid_rate_limit(
+        path: impl fmt::Display,
+        id: impl fmt::Display,
+        value: impl fmt::Display,
+    ) -> String {
+        format!("dev service {id} in {path} has an invalid rate_limit_per_second value {value}")
+    }
+
+    pub fn start_after_sync_failed(err: impl fmt::Display) -> String {
+        format!("failed to restart module after sync: {err}")
+    }
+
+    pub fn dev_run_missing_command(path: impl fmt::Display) -> String {
+        format!("dev run configuration {path} requires a 'command'")
+    }
+
+    pub fn dev_run_invalid_command(path: impl fmt::Display) -> String {
+        format!("dev run configuration {path} must provide at least one command argument")
+    }
+
+    pub fn dev_run_workdir_missing(path: impl fmt::Display, dir: impl fmt::Display) -> String {
+        format!("dev run configuration {path} references missing workdir {dir}")
+    }
+
+    pub fn dev_agent_binary_missing(path: impl fmt::Display) -> String {
+        format!("unable to locate fenrir binary near {path}; dev agent cannot start")
+    }
+
+    pub fn dev_agent_spawn_failed(module: impl fmt::Display, err: impl fmt::Display) -> String {
+        format!("failed to spawn dev agent for module {module}: {err}")
+    }
+
+    pub fn dev_agent_missing(module: impl fmt::Display) -> String {
+        format!("dev agent for module {module} is not active")
     }
 }
 

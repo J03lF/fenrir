@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use crate::domain::db::{DbEngine, DbError, DbExecutionResult, DbResult, DbTable, DbTableSchema};
+use crate::domain::db::{
+    DbEngine, DbError, DbExecutionResult, DbResult, DbTable, DbTableSchema, DbValue,
+};
 use crate::utils::messages::services::db_shell::errors as db_shell_errors;
 
 use super::DbShellService;
@@ -68,5 +70,21 @@ impl DbShellSession {
         self.guard_enabled()?;
         let adapter = self.service.adapter(self.current_engine)?;
         adapter.describe_table(table).await
+    }
+
+    pub async fn prepared_query(
+        &self,
+        statement: &str,
+        params: &[DbValue],
+    ) -> DbResult<Vec<DbExecutionResult>> {
+        self.guard_enabled()?;
+        let adapter = self.service.adapter(self.current_engine)?;
+        adapter.prepared_query(statement, params).await
+    }
+
+    pub async fn prepared_execute(&self, statement: &str, params: &[DbValue]) -> DbResult<u64> {
+        self.guard_enabled()?;
+        let adapter = self.service.adapter(self.current_engine)?;
+        adapter.prepared_execute(statement, params).await
     }
 }

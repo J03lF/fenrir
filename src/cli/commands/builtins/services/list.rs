@@ -8,6 +8,7 @@ use std::io::{self, Write};
 
 pub(super) fn list_services(deps: &CliDependencies, out: &mut dyn Write) -> io::Result<()> {
     let mut entries = deps.services.registry().snapshot();
+    entries.retain(|svc| !is_module_placeholder(&svc.descriptor.id));
     if entries.is_empty() {
         writeln!(out, "{}", list_messages::NO_SERVICES)?;
         return Ok(());
@@ -75,6 +76,10 @@ fn render_tags(tags: &[ServiceTag]) -> String {
     }
     let labels: Vec<&'static str> = tags.iter().map(ServiceTag::as_str).collect();
     labels.join(", ")
+}
+
+fn is_module_placeholder(id: &str) -> bool {
+    id.starts_with("module:") && !id.contains("::")
 }
 
 fn render_job(table: &mut Table, job: ScheduledJobSnapshot) {

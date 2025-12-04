@@ -48,7 +48,11 @@ audience = "fenrir-clients"
 exp_seconds = 3600
 
 [security.http]
-control_tokens = []
+control_tokens = [
+    "admin:env:FENRIR_HTTP_TOKEN_ADMIN",
+    "operator:env:FENRIR_HTTP_TOKEN_OPERATOR",
+    "viewer:env:FENRIR_HTTP_TOKEN_VIEWER",
+]
 
 [security.identity]
 provider = "external"
@@ -70,6 +74,11 @@ audience = "fenrir-control-plane"
 lifetime_seconds = 3600
 idle_timeout_seconds = 900
 cleanup_interval_seconds = 300
+
+[security.service_tokens]
+lifetime_seconds = 900
+idle_timeout_seconds = 300
+cleanup_interval_seconds = 60
 
 [db]
 default_engine = "postgres"
@@ -106,8 +115,8 @@ persist_interval_seconds = 30
 [cli]
 prompt_theme = "default"
 
-[modules]
-bootstrap = ["fenrir-api"]
+#[modules]
+#bootstrap = ["fenrir-api"]
 
 [modules.registry]
 url = "http://localhost:8443"
@@ -124,6 +133,7 @@ accept_invalid_certs = false
 [modules.runtime]
 # stub = expiremtel (fake engine)
 engine = "process"
+default_service_scopes = ["db:read"]
 
 [modules.runtime.ports]
 strategy = "dynamic"
@@ -132,6 +142,31 @@ strategy = "dynamic"
 min = 41000
 max = 46000
 
+[modules.runtime.clients]
+timeout_ms = 10000
+retries = 2
+backoff_ms = 200
+health_probe_interval_seconds = 30
+
+[modules.runtime.clients.tls]
+# ca_cert_path = "config/certs/control-plane-ca.pem"
+# client_cert_path = "config/certs/control-plane-client.crt"
+# client_key_path = "config/certs/control-plane-client.key"
+accept_invalid_certs = false
+
+[modules.services]
+# Example service overrides:
+# [modules.services."module:fenrir-api".env]
+# PUBLIC_URL = "https://tickets.local"
+# [modules.services."module:fenrir-api".secrets]
+# API_KEY = "env:FENRIR_API_KEY"
+# [modules.services."module:fenrir-api".policy]
+# internal_only = false
+# allowed_roles = ["service-read", "service-write"]
+# required_scopes = ["tickets:read"]
+# [modules.services."module:fenrir-api".policy.tenant]
+# mode = "fixed"
+# value = "default"
 
 [modules.storage]
 install_dir = "/Users/jfurocket/Documents/personal/modules"

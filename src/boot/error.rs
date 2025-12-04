@@ -28,6 +28,7 @@ pub enum BootErrorCode {
     SessionAttach,
     SchedulerJobs,
     HttpServerInit,
+    DbConnectorInit,
 }
 
 impl BootErrorCode {
@@ -53,6 +54,7 @@ impl BootErrorCode {
             BootErrorCode::SessionAttach => "BOOT-SESSION-ATTACH",
             BootErrorCode::SchedulerJobs => "BOOT-SCHEDULER-JOBS",
             BootErrorCode::HttpServerInit => "BOOT-HTTP-INIT",
+            BootErrorCode::DbConnectorInit => "BOOT-DB-CONNECTOR",
         }
     }
 }
@@ -89,6 +91,11 @@ impl BootError {
                 err,
             ),
             ConfigError::Invalid(_) => BootError::new(
+                BootErrorCode::ConfigInvalid,
+                boot_errors::CONFIG_INVALID,
+                err,
+            ),
+            ConfigError::InvalidMessage(_) => BootError::new(
                 BootErrorCode::ConfigInvalid,
                 boot_errors::CONFIG_INVALID,
                 err,

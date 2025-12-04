@@ -5,15 +5,25 @@ pub mod logs {
         "failed to refresh declared services for already installed module";
     pub const AUTO_START_FAILED: &str = "failed to auto-start module";
     pub const UPDATE_FAILED: &str = "failed to update module";
+    pub const SERVICE_TOKEN_REVOKE_FAILED: &str =
+        "failed to revoke delegated service token for module";
+    pub const DB_CONNECTOR_ENDPOINT_SET_FAILED: &str =
+        "failed to update db connector endpoint for modules";
+    pub const HEALTH_PROBE_FAILED: &str = "module health probe cycle failed";
 }
 
 pub mod notes {
     use super::fmt;
 
     pub const INSTALLED: &str = "installed";
+    pub const HEALTHY: &str = "healthy";
 
     pub fn start_failed(err: impl fmt::Display) -> String {
         format!("start failed: {err}")
+    }
+
+    pub fn quarantined(until: impl fmt::Display) -> String {
+        format!("quarantined until {until}")
     }
 }
 

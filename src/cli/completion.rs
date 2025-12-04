@@ -523,17 +523,17 @@ mod tests {
         DbConnections, DbPoolSettings, DbSection, HttpConfig, HttpSecuritySection, HttpTlsConfig,
         IdentitySection, JwtConfig, KdfConfig, ModuleDevSourcesSection, ModuleRegistrySection,
         ModuleRegistryTlsSection, ModuleRuntimeSection, ModuleStorageSection, ModuleTrustSection,
-        ModulesSection, SecuritySection, ServerSection, SessionSection, SshConfig, SshTlsConfig,
-        TelemetryHealthSection, TelemetryMetricsSection, TelemetrySection, TelemetrySystemSection,
-        TelemetryTracingSection,
+        ModulesSection, SecuritySection, ServerSection, ServiceTokenSection, SessionSection,
+        SshConfig, SshTlsConfig, TelemetryHealthSection, TelemetryMetricsSection, TelemetrySection,
+        TelemetrySystemSection, TelemetryTracingSection,
     };
     use crate::domain::db::{
-        DbAdminPort, DbEngine, DbExecutionResult, DbResult, DbTable, DbTableSchema,
+        DbAdminPort, DbEngine, DbExecutionResult, DbResult, DbTable, DbTableSchema, DbValue,
     };
     use crate::services::ServiceRegistry;
     use crate::services::{AppServices, DbShellService, SchedulerService};
     use async_trait::async_trait;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::sync::Arc;
 
     struct DummyDbAdapter;
@@ -557,6 +557,22 @@ mod tests {
         async fn describe_table(&self, _table: &str) -> DbResult<DbTableSchema> {
             Err(crate::domain::db::DbError::NotImplemented {
                 message: "describe_table not available in DummyDbAdapter".to_string(),
+            })
+        }
+
+        async fn prepared_query(
+            &self,
+            _statement: &str,
+            _params: &[DbValue],
+        ) -> DbResult<Vec<DbExecutionResult>> {
+            Err(crate::domain::db::DbError::NotImplemented {
+                message: "prepared_query not available in DummyDbAdapter".to_string(),
+            })
+        }
+
+        async fn prepared_execute(&self, _statement: &str, _params: &[DbValue]) -> DbResult<u64> {
+            Err(crate::domain::db::DbError::NotImplemented {
+                message: "prepared_execute not available in DummyDbAdapter".to_string(),
             })
         }
     }
@@ -619,6 +635,11 @@ mod tests {
                     idle_timeout_seconds: 900,
                     cleanup_interval_seconds: 300,
                 },
+                service_tokens: ServiceTokenSection {
+                    lifetime_seconds: 900,
+                    idle_timeout_seconds: 300,
+                    cleanup_interval_seconds: 60,
+                },
                 identity: IdentitySection::default(),
             },
             db: DbSection {
@@ -663,6 +684,7 @@ mod tests {
                 bootstrap: Vec::new(),
                 trust: ModuleTrustSection::default(),
                 dev_sources: ModuleDevSourcesSection::default(),
+                services: HashMap::new(),
             },
         })
     }

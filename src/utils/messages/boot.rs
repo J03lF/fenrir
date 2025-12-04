@@ -33,6 +33,9 @@ pub mod errors {
     pub const SESSION_SERVICE_ATTACH_FAILED: &str = "failed to attach session service";
     pub const SCHEDULER_JOBS_INSTALL_FAILED: &str = "failed to install scheduler jobs";
     pub const HTTP_SERVER_INIT_FAILED: &str = "failed to initialize http server";
+    pub const MODULE_SERVICE_SCOPE_INVALID: &str =
+        "invalid default service scopes configured for modules";
+    pub const DB_CONNECTOR_INIT_FAILED: &str = "failed to initialize db connector";
 }
 
 pub mod helpers {
@@ -60,6 +63,7 @@ pub mod services {
         pub const SCHEDULER: &str = "Background Scheduler";
         pub const HTTP: &str = "HTTP Transport";
         pub const IDENTITY: &str = "Identity Broker";
+        pub const DB_CONNECTOR: &str = "DB Connector";
     }
 
     pub mod descriptions {
@@ -70,6 +74,7 @@ pub mod services {
         pub const SCHEDULER: &str = "Manages periodic jobs and tasks";
         pub const HTTP: &str = "REST API, health, and telemetry";
         pub const IDENTITY: &str = "Issues and validates control-plane tokens";
+        pub const DB_CONNECTOR: &str = "Proxies module database requests over IPC";
     }
 
     pub mod notes {

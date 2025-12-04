@@ -6,7 +6,6 @@ config/certs/
 config/modules/
 /test/
 /benches/
-config/certs/
 ../target/
 target/
 /.idea/workspace.xml

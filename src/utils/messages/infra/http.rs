@@ -152,13 +152,6 @@ pub mod problems {
         )
     }
 
-    pub fn module_token_scope_missing() -> ProblemText {
-        ProblemText::new(
-            "module_token_scope_missing",
-            "at least one scope must be requested",
-        )
-    }
-
     pub fn module_token_issue_failed(err: impl fmt::Display) -> ProblemText {
         ProblemText::new(
             "module_token_issue_failed",

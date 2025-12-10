@@ -41,7 +41,8 @@ Dieser Plan konkretisiert, wie Service-Definitionen aus dem Modulcode heraus erf
   - Default aus `[modules.runtime.default_service_scopes]`, pro Service overridebar.  
 - **Token Flow** (`src/security/manager.rs`, `module-kit/src/tokens.rs`):  
   - `issue_service_token(service_id, scopes)` via Control-Plane API `/modules/runtime/tokens`.  
-  - SDK helper `ServiceTokenProvider::for_scope("notifications:send")`.
+  - Fenrir liefert mit `FENRIR_SERVICE_TOKEN_{ISSUED_AT,EXPIRES_AT,TTL_SECS}` die Lease-Daten des aktuell injizierten Tokens, so dass Clients vor Ablauf rotieren können.  
+  - Das module-kit stellt mit `ServiceTokenProvider` einen zentralen Refresh-Helper bereit (`ModuleEnvironment::token_provider()`), der das Standard-Token automatisch erneuert und bei Bedarf zusätzliche Scopes (z. B. `db:write`) per API anfordert.
 - **Gateway Enforcement** (`src/infra/http/gateway.rs`):  
   - Requests erhalten `X-Fenrir-Actor`, `X-Fenrir-Scopes`, `X-Fenrir-Tenant`.  
   - Policies prüfen `ensure_scope` + `ensure_role`.

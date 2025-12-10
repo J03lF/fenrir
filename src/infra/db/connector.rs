@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::anyhow;
@@ -63,9 +63,7 @@ async fn start_ipc_server(
         "{}",
         connector_messages::IPC_READY
     );
-    Ok(DbConnectorEndpoint::Ipc {
-        path: PathBuf::from(socket_path),
-    })
+    Ok(DbConnectorEndpoint::Ipc { path: socket_path })
 }
 
 #[cfg(unix)]

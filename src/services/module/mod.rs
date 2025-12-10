@@ -15,7 +15,7 @@ pub use dev_env::{
     sanitize_service_id, write_plain_env_file, write_shell_env_file, DevEnvArtifacts,
 };
 pub use ports::ModulePortAllocator;
-pub use service::ModuleService;
+pub use service::{ModuleService, ModuleServiceInit};
 pub use types::{
     DistributionAction, DistributionPlanEntry, ModuleDevServices, ModuleIngressError,
     ModuleIngressTarget, ModuleSyncOutcome, ModuleSyncPackage, ModuleUpdateInfo,

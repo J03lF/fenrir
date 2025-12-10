@@ -58,6 +58,9 @@ rand = { version = "0.8", features = ["std"] }
 rand_core = "0.6"
 fenrir-module-kit = { git = "https://github.com/J03lF/module-kit.git" }
 
+[patch."https://github.com/J03lF/module-kit.git"]
+fenrir-module-kit = { path = "../module-kit" }
+
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.27", features = ["signal", "process"] }
 

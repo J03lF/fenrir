@@ -156,8 +156,8 @@ async fn show_status(client: &Client, base_url: &str, token: &str) -> Result<()>
             .as_deref()
             .unwrap_or("unknown timestamp");
         println!(
-            " - {} v{} (installed_at: {installed}, source: {})",
-            module.manifest.id, module.manifest.version, module.source,
+            " - {} v{} (installed_at: {installed}, path: {}, source: {})",
+            module.manifest.id, module.manifest.version, module.path, module.source,
         );
     }
     Ok(())

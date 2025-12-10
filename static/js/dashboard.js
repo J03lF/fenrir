@@ -1,14 +1,18 @@
 /* ============================================
-   INTRO ANIMATION (Demo - kann entfernt werden)
-   Set data-intro-enabled="false" in HTML to disable
-   Set data-intro-mode="always" to show on every page load
-   Set data-intro-mode="once" to show only first time (default)
+   INTRO ANIMATION CONFIGURATION
+   ============================================
+   
+   INTRO_MODE options:
+   - "always" = Show intro on every page load
+   - "once"   = Show intro only on first visit (saved in localStorage)
+   - "none"   = Never show intro (disabled)
    
    RESET: resetFenrirIntro() dann F5
    ============================================ */
 
+const INTRO_MODE = 'once'; // Options: "always", "once", "none"
 const INTRO_STORAGE_KEY = 'fenrir_intro_seen';
-const INTRO_SHOW_DURATION = 2500; // How long to show the intro
+const INTRO_SHOW_DURATION = 2500; // How long to show the intro (ms)
 
 const initIntroAnimation = () => {
   const introOverlay = document.querySelector('[data-intro]');
@@ -20,16 +24,18 @@ const initIntroAnimation = () => {
     return;
   }
   
-  // Check if intro is disabled
-  if (introOverlay.dataset.introEnabled === 'false') {
+  // Check if intro is disabled via JS config or HTML attribute
+  const isDisabledByHtml = introOverlay.dataset.introEnabled === 'false';
+  const isDisabledByConfig = INTRO_MODE === 'none';
+  
+  if (isDisabledByHtml || isDisabledByConfig) {
     introOverlay.style.display = 'none';
     appShell.classList.add('app-visible');
     return;
   }
   
-  // Get intro mode: "always" = show every time, "once" = show only first time (default)
-  const introMode = introOverlay.dataset.introMode || 'once';
-  const showAlways = introMode === 'always';
+  // Determine intro mode (JS config takes priority over HTML attribute)
+  const showAlways = INTRO_MODE === 'always';
   
   // Check if user already saw the intro (only if mode is "once")
   if (!showAlways && localStorage.getItem(INTRO_STORAGE_KEY)) {
@@ -311,6 +317,13 @@ let serviceTableEmptyMessage = 'Keine Services registriert.';
 let serviceMetaOverride = null;
 let modulesCache = [];
 let lastRefreshAt = null;
+
+// Cache variables to prevent flickering on refresh
+let lastServicesTableHtml = '';
+let lastIncidentsHtml = '';
+let lastModulesHtml = '';
+let lastAuditTableHtml = '';
+let lastAuditPreviewHtml = '';
 
 const loadToken = () => {
   try {
@@ -1171,7 +1184,67 @@ const setupCanvasDPI = (canvas, ctx) => {
   canvas.style.height = height + 'px';
   
   ctx.scale(dpr, dpr);
+
   return { width, height, dpr };
+};
+
+// ============================================
+// SMOOTH BEZIER CURVE HELPER
+// Creates smooth rounded lines instead of sharp edges
+// ============================================
+
+/**
+ * Draw a smooth curve using quadratic bezier curves through midpoints
+ * This creates genuinely smooth, rounded lines
+ * @param {CanvasRenderingContext2D} ctx - Canvas context
+ * @param {Array<{x: number, y: number}>} points - Array of points
+ * @param {boolean} closePath - Whether to close the path (for area fill)
+ * @param {number} baseY - Base Y coordinate for closing path (area fill)
+ */
+const drawSmoothCurve = (ctx, points, closePath = false, baseY = 0) => {
+  if (points.length < 2) return;
+  
+  ctx.beginPath();
+  
+  if (closePath) {
+    ctx.moveTo(points[0].x, baseY);
+    ctx.lineTo(points[0].x, points[0].y);
+  } else {
+    ctx.moveTo(points[0].x, points[0].y);
+  }
+  
+  // For only 2 points, draw a straight line
+  if (points.length === 2) {
+    ctx.lineTo(points[1].x, points[1].y);
+    if (closePath) {
+      ctx.lineTo(points[1].x, baseY);
+      ctx.closePath();
+    }
+    return;
+  }
+  
+  // Draw smooth curve using quadratic bezier through midpoints
+  // Start with line to first midpoint
+  let midX = (points[0].x + points[1].x) / 2;
+  let midY = (points[0].y + points[1].y) / 2;
+  ctx.lineTo(midX, midY);
+  
+  // Draw quadratic curves through each point
+  for (let i = 1; i < points.length - 1; i++) {
+    const nextMidX = (points[i].x + points[i + 1].x) / 2;
+    const nextMidY = (points[i].y + points[i + 1].y) / 2;
+    
+    // Quadratic curve with control point at the actual data point
+    ctx.quadraticCurveTo(points[i].x, points[i].y, nextMidX, nextMidY);
+  }
+  
+  // Line to last point
+  ctx.lineTo(points[points.length - 1].x, points[points.length - 1].y);
+  
+  if (closePath) {
+    ctx.lineTo(points[points.length - 1].x, baseY);
+    ctx.closePath();
+  }
 };
 
 // ============================================
@@ -1340,7 +1413,7 @@ const renderMiniChart = (chartId) => {
     y: padding.top + plotHeight * (1 - (val - yMin) / yRange)
   }));
   
-  // Area gradient fill
+  // Area gradient fill with smooth curve
   ctx.save();
   const gradient = ctx.createLinearGradient(0, padding.top, 0, height - padding.bottom);
   gradient.addColorStop(0, withAlpha(color, 0.3));
@@ -1348,22 +1421,17 @@ const renderMiniChart = (chartId) => {
   gradient.addColorStop(1, withAlpha(color, 0.02));
   ctx.fillStyle = gradient;
   
-  ctx.beginPath();
-  ctx.moveTo(points[0].x, height - padding.bottom);
-  points.forEach((p) => ctx.lineTo(p.x, p.y));
-  ctx.lineTo(points[points.length - 1].x, height - padding.bottom);
-  ctx.closePath();
+  drawSmoothCurve(ctx, points, true, height - padding.bottom);
   ctx.fill();
   ctx.restore();
   
-  // Main line (clean, no glow)
+  // Main line with smooth curve
   ctx.save();
   ctx.strokeStyle = color;
   ctx.lineWidth = 1.5;
   ctx.lineJoin = 'round';
   ctx.lineCap = 'round';
-  ctx.beginPath();
-  points.forEach((p, i) => i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
+  drawSmoothCurve(ctx, points, false);
   ctx.stroke();
   ctx.restore();
 };
@@ -1645,7 +1713,7 @@ const renderMetricChart = () => {
       return;
     }
 
-    // ===== AREA FILL (Grafana style) =====
+    // ===== AREA FILL (Grafana style with smooth curve) =====
     if (pathPoints.length > 1) {
       ctx.save();
       const areaGradient = ctx.createLinearGradient(0, padding, 0, height - padding);
@@ -1653,32 +1721,18 @@ const renderMetricChart = () => {
       areaGradient.addColorStop(1, withAlpha(color, 0.05));
       
       ctx.fillStyle = areaGradient;
-      ctx.beginPath();
-      ctx.moveTo(pathPoints[0].x, height - padding);
-      
-      // Simple line-to for jagged realistic look
-      pathPoints.forEach((point) => ctx.lineTo(point.x, point.y));
-      
-      ctx.lineTo(pathPoints[pathPoints.length - 1].x, height - padding);
-      ctx.closePath();
+      drawSmoothCurve(ctx, pathPoints, true, height - padding);
       ctx.fill();
       ctx.restore();
     }
 
-    // ===== MAIN LINE =====
+    // ===== MAIN LINE (smooth bezier curve) =====
     ctx.save();
     ctx.strokeStyle = color;
     ctx.lineWidth = 1.5;
     ctx.lineJoin = 'round';
-    ctx.beginPath();
-    
-    pathPoints.forEach((point, i) => {
-      if (i === 0) {
-        ctx.moveTo(point.x, point.y);
-      } else {
-        ctx.lineTo(point.x, point.y);
-      }
-    });
+    ctx.lineCap = 'round';
+    drawSmoothCurve(ctx, pathPoints, false);
     ctx.stroke();
     ctx.restore();
 
@@ -2004,14 +2058,17 @@ const renderServiceIncidents = () => {
     return INCIDENT_STATUS_SET.has(status);
   });
   if (incidents.length === 0) {
-    serviceIncidentsList.innerHTML = '';
-    if (serviceIncidentsEmpty) {
+    if (lastIncidentsHtml !== '') {
+      serviceIncidentsList.innerHTML = '';
+      lastIncidentsHtml = '';
+    }
+    if (serviceIncidentsEmpty && serviceIncidentsEmpty.dataset.visible !== 'true') {
       serviceIncidentsEmpty.dataset.visible = 'true';
     }
     return;
   }
   const limited = incidents.slice(0, 5);
-  serviceIncidentsList.innerHTML = limited
+  const newHtml = limited
     .map((svc) => {
       const displayName = escapeHtml(svc.name ?? svc.id ?? 'unbekannt');
       const identifier = escapeHtml(svc.id ?? '—');
@@ -2027,7 +2084,13 @@ const renderServiceIncidents = () => {
       `;
     })
     .join('');
-  if (serviceIncidentsEmpty) {
+  
+  // Only update DOM if content actually changed
+  if (newHtml !== lastIncidentsHtml) {
+    serviceIncidentsList.innerHTML = newHtml;
+    lastIncidentsHtml = newHtml;
+  }
+  if (serviceIncidentsEmpty && serviceIncidentsEmpty.dataset.visible !== 'false') {
     serviceIncidentsEmpty.dataset.visible = 'false';
   }
 };
@@ -2035,10 +2098,13 @@ const renderServiceIncidents = () => {
 const showModulesEmpty = (message = modulesEmptyDefault) => {
   if (modulesEmpty) {
     modulesEmpty.textContent = message;
-    modulesEmpty.dataset.visible = 'true';
+    if (modulesEmpty.dataset.visible !== 'true') {
+      modulesEmpty.dataset.visible = 'true';
+    }
   }
-  if (modulesList) {
+  if (modulesList && lastModulesHtml !== '') {
     modulesList.innerHTML = '';
+    lastModulesHtml = '';
   }
 };
 
@@ -2050,7 +2116,7 @@ const renderModulesList = () => {
     showModulesEmpty(modulesEmptyDefault);
     return;
   }
-  modulesList.innerHTML = modulesCache.slice(0, 6)
+  const newHtml = modulesCache.slice(0, 6)
     .map((entry) => {
       const manifest = entry.manifest || {};
       const title = manifest.title || manifest.id || 'unbekanntes Modul';
@@ -2079,7 +2145,13 @@ const renderModulesList = () => {
       `;
     })
     .join('');
-  if (modulesEmpty) {
+  
+  // Only update DOM if content changed
+  if (newHtml !== lastModulesHtml) {
+    modulesList.innerHTML = newHtml;
+    lastModulesHtml = newHtml;
+  }
+  if (modulesEmpty && modulesEmpty.dataset.visible !== 'false') {
     modulesEmpty.dataset.visible = 'false';
   }
 };
@@ -2288,13 +2360,17 @@ const renderMetadata = (metadata) => {
 
 const renderAuditCache = () => {
   if (!auditCache || auditCache.length === 0) {
-    auditBody.innerHTML = '<tr><td colspan="4">Keine Audit-Ereignisse vorhanden.</td></tr>';
+    const emptyHtml = '<tr><td colspan="4">Keine Audit-Ereignisse vorhanden.</td></tr>';
+    if (lastAuditTableHtml !== emptyHtml) {
+      auditBody.innerHTML = emptyHtml;
+      lastAuditTableHtml = emptyHtml;
+    }
     auditMeta.textContent = `0 Einträge · Range ${currentAuditRange}`;
     renderAuditPreview();
     return;
   }
   auditMeta.textContent = `${auditCache.length} Einträge · Range ${currentAuditRange}`;
-  auditBody.innerHTML = auditCache
+  const newHtml = auditCache
     .map((event, index) => {
       const outcomeClass = event.outcome === 'success'
         ? 'pill success'
@@ -2314,7 +2390,13 @@ const renderAuditCache = () => {
       `;
     })
     .join('');
-  attachAuditRowListeners();
+  
+  // Only update DOM if content changed
+  if (newHtml !== lastAuditTableHtml) {
+    auditBody.innerHTML = newHtml;
+    lastAuditTableHtml = newHtml;
+    attachAuditRowListeners();
+  }
   renderAuditPreview();
 };
 
@@ -2428,14 +2510,17 @@ const renderAuditPreview = () => {
     return;
   }
   if (!auditCache || auditCache.length === 0) {
-    auditPreviewList.innerHTML = '';
-    if (auditPreviewEmpty) {
+    if (lastAuditPreviewHtml !== '') {
+      auditPreviewList.innerHTML = '';
+      lastAuditPreviewHtml = '';
+    }
+    if (auditPreviewEmpty && auditPreviewEmpty.dataset.visible !== 'true') {
       auditPreviewEmpty.dataset.visible = 'true';
     }
     return;
   }
   const items = auditCache.slice(0, 5);
-  auditPreviewList.innerHTML = items
+  const newHtml = items
     .map((event) => {
       const relative = formatRelativeTime(Date.parse(event.timestamp ?? '')) || '–';
       const outcomeRaw = (event.outcome ?? 'unknown').toLowerCase();
@@ -2452,7 +2537,13 @@ const renderAuditPreview = () => {
       `;
     })
     .join('');
-  if (auditPreviewEmpty) {
+  
+  // Only update DOM if content changed
+  if (newHtml !== lastAuditPreviewHtml) {
+    auditPreviewList.innerHTML = newHtml;
+    lastAuditPreviewHtml = newHtml;
+  }
+  if (auditPreviewEmpty && auditPreviewEmpty.dataset.visible !== 'false') {
     auditPreviewEmpty.dataset.visible = 'false';
   }
 };
@@ -2690,7 +2781,11 @@ const serviceMatchesFilter = (svc) => {
 
 function renderServicesTable() {
   if (servicesCache.size === 0) {
-    svcBody.innerHTML = `<tr><td colspan="6">${serviceTableEmptyMessage}</td></tr>`;
+    const emptyHtml = `<tr><td colspan="6">${serviceTableEmptyMessage}</td></tr>`;
+    if (lastServicesTableHtml !== emptyHtml) {
+      svcBody.innerHTML = emptyHtml;
+      lastServicesTableHtml = emptyHtml;
+    }
     if (metaServices) {
       if (serviceMetaOverride) {
         metaServices.textContent = serviceMetaOverride;
@@ -2718,11 +2813,15 @@ function renderServicesTable() {
     }
   }
   if (filtered.length === 0) {
-    svcBody.innerHTML = '<tr><td colspan="6">Keine Services passend zum Filter.</td></tr>';
+    const noFilterHtml = '<tr><td colspan="6">Keine Services passend zum Filter.</td></tr>';
+    if (lastServicesTableHtml !== noFilterHtml) {
+      svcBody.innerHTML = noFilterHtml;
+      lastServicesTableHtml = noFilterHtml;
+    }
     renderServiceIncidents();
     return;
   }
-  svcBody.innerHTML = filtered
+  const newHtml = filtered
     .map((svc) => {
       const status = svc.status ?? 'unknown';
       const note = svc.note ?? '–';
@@ -2739,6 +2838,12 @@ function renderServicesTable() {
       `;
     })
     .join('');
+  
+  // Only update DOM if content actually changed
+  if (newHtml !== lastServicesTableHtml) {
+    svcBody.innerHTML = newHtml;
+    lastServicesTableHtml = newHtml;
+  }
   renderServiceIncidents();
 }
 
@@ -2889,11 +2994,12 @@ const loadAll = async ({ background = false } = {}) => {
     lastRefreshAt = Date.now();
     updateRefreshNote();
   } catch (error) {
+    console.error('[Fenrir] loadAll failed:', error);
     servicesCache = new Map();
     serviceTableEmptyMessage = 'Netzwerkfehler: Daten konnten nicht geladen werden.';
     serviceMetaOverride = 'Fehler';
     renderServicesTable();
-    showAlert(background ? 'Auto-Refresh fehlgeschlagen – Verbindung prüfen.' : 'Netzwerkfehler: Bitte Verbindung prüfen.');
+    showAlert(background ? 'Auto-Refresh fehlgeschlagen – Verbindung prüfen.' : `Netzwerkfehler: ${error.message || 'Bitte Verbindung prüfen.'}`);
     auditBody.innerHTML = '<tr><td colspan="4">Netzwerkfehler – keine Audit-Daten.</td></tr>';
     auditMeta.textContent = 'Fehler';
     auditHistoryLoaded = false;

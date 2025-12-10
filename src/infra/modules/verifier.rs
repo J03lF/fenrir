@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::convert::{TryFrom, TryInto};
+use std::convert::TryInto;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
@@ -186,8 +186,7 @@ impl ModuleVerifierPort for Ed25519ModuleVerifier {
                     ),
                 )
             })?;
-        let signature = Signature::try_from(signature_bytes)
-            .map_err(|err| ModuleVerificationError::Signature(err.to_string()))?;
+        let signature = Signature::from(signature_bytes);
         verifying_key
             .verify(digest.as_slice(), &signature)
             .map_err(|err| ModuleVerificationError::Signature(err.to_string()))?;

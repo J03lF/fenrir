@@ -1333,9 +1333,7 @@ impl ModuleServiceRow {
             note,
         } = snapshot;
         let (module_id, suffix) = parse_module_service_id(&descriptor.id)?;
-        if suffix.is_none() {
-            return None;
-        }
+        suffix.as_ref()?;
         let endpoint_hint = extract_endpoint_hint(note.as_deref());
         let kind = if is_dev_endpoint(note.as_deref()) {
             ModuleServiceEntryKind::DevOverride

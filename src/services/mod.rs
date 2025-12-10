@@ -15,7 +15,7 @@ pub use db_shell::DbShellService;
 pub use managed::{ManagedService, ServiceControlError, ServiceControlOutcome};
 pub use module::{
     ModuleClientSettings, ModuleHealthHttpClient, ModulePortAllocator, ModuleService,
-    ModuleServiceOverrides,
+    ModuleServiceInit, ModuleServiceOverrides,
 };
 pub use registry::ServiceRegistry;
 pub use scheduler::SchedulerService;

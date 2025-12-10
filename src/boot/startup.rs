@@ -24,8 +24,8 @@ use crate::security::service::ServiceScope;
 use crate::services::scheduler::install_default_jobs;
 use crate::services::{
     AppServices, DbShellService, ModuleClientSettings, ModuleHealthHttpClient, ModulePortAllocator,
-    ModuleService, ModuleServiceOverrides, SchedulerService, ServiceDescriptor, ServiceKind,
-    ServiceRegistry, ServiceStatus, ServiceTag, SessionService,
+    ModuleService, ModuleServiceInit, ModuleServiceOverrides, SchedulerService, ServiceDescriptor,
+    ServiceKind, ServiceRegistry, ServiceStatus, ServiceTag, SessionService,
 };
 use crate::utils::messages::boot::{
     errors as boot_errors, logs as boot_logs, runtime as runtime_messages,
@@ -397,22 +397,22 @@ pub fn boot() -> Result<BootContext, BootError> {
     } else {
         None
     };
-    let module_service = ModuleService::new(
-        Arc::clone(&module_registry),
-        Arc::clone(&module_storage),
-        Arc::clone(&module_verifier),
-        Arc::clone(&module_runtime),
-        Arc::clone(&registry),
-        Arc::clone(&port_allocator),
-        Arc::clone(&security_manager),
+    let module_service = ModuleService::new(ModuleServiceInit {
+        registry: Arc::clone(&module_registry),
+        storage: Arc::clone(&module_storage),
+        verifier: Arc::clone(&module_verifier),
+        runtime: Arc::clone(&module_runtime),
+        service_registry: Arc::clone(&registry),
+        port_allocator: Arc::clone(&port_allocator),
+        security: Arc::clone(&security_manager),
         dev_sources,
-        service_overrides,
+        overrides: service_overrides,
         client_settings,
         health_client,
         default_service_scopes,
         control_plane_url,
-        Some(runtime_state_dir.join("services.json")),
-    );
+        service_snapshot_path: Some(runtime_state_dir.join("services.json")),
+    });
     services
         .attach_module_service(Arc::clone(&module_service))
         .map_err(|err| {

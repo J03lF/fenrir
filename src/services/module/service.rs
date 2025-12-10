@@ -56,13 +56,16 @@ const FAILURE_WINDOW_SECS: u64 = 120;
 const FAILURE_THRESHOLD: u32 = 3;
 const QUARANTINE_DURATION_SECS: u64 = 300;
 pub(super) const MODULE_SERVICE_MANIFEST_PATH: &str = "/.fenrir/services";
-pub(super) const RESERVED_ENV_KEYS: [&str; 11] = [
+pub(super) const RESERVED_ENV_KEYS: [&str; 14] = [
     "FENRIR_MODULE_ID",
     "FENRIR_SERVICE_ID",
     "FENRIR_SERVICE_URI",
     "FENRIR_SERVICE_PORT",
     "FENRIR_SERVICE_ADDR",
     "FENRIR_SERVICE_TOKEN",
+    "FENRIR_SERVICE_TOKEN_ISSUED_AT",
+    "FENRIR_SERVICE_TOKEN_EXPIRES_AT",
+    "FENRIR_SERVICE_TOKEN_TTL_SECS",
     "FENRIR_DB_CONNECTOR_PROTOCOL",
     "FENRIR_DB_CONNECTOR_ENDPOINT",
     "FENRIR_DB_CONNECTOR_URI",
@@ -87,6 +90,23 @@ pub(super) struct ModuleHealth {
     failure_count: u32,
     last_failure: Option<SystemTime>,
     quarantined_until: Option<SystemTime>,
+}
+
+pub struct ModuleServiceInit {
+    pub registry: Arc<dyn ModuleRegistryPort>,
+    pub storage: Arc<dyn ModuleStoragePort>,
+    pub verifier: Arc<dyn ModuleVerifierPort>,
+    pub runtime: Arc<dyn ModuleRuntimePort>,
+    pub service_registry: Arc<ServiceRegistry>,
+    pub port_allocator: Arc<ModulePortAllocator>,
+    pub security: Arc<SecurityManager>,
+    pub dev_sources: Option<PathBuf>,
+    pub overrides: ModuleServiceOverrides,
+    pub client_settings: ModuleClientSettings,
+    pub health_client: ModuleHealthHttpClient,
+    pub default_service_scopes: Vec<ServiceScope>,
+    pub control_plane_url: Option<String>,
+    pub service_snapshot_path: Option<PathBuf>,
 }
 
 pub struct ModuleService {
@@ -136,8 +156,14 @@ impl ModuleService {
         if self.is_dev_override_active(module_id).await {
             return Ok(None);
         }
+        self.issue_default_service_token(module_id).map(Some)
+    }
+
+    pub fn issue_default_service_token(
+        &self,
+        module_id: &ModuleId,
+    ) -> Result<DelegatedToken, ModuleRuntimeError> {
         self.issue_service_token_with_scopes(module_id, self.default_service_scopes.clone())
-            .map(Some)
     }
 
     pub fn spawn_health_monitor(self: &Arc<Self>) {
@@ -221,7 +247,7 @@ impl ModuleService {
             .await;
         let port = endpoint.map(|addr| addr.port());
         let mut env = self
-            .inject_runtime_env(Vec::new(), module_id, port, Some(issued.token.as_str()))
+            .inject_runtime_env(Vec::new(), module_id, port, Some(&issued))
             .map_err(|err| {
                 ModuleServiceError::Storage(ModuleStorageError::InvalidState(err.to_string()))
             })?;
@@ -600,23 +626,24 @@ impl ModuleService {
         self.resolve_runtime_ingress_target(&module_id).await
     }
 
-    pub fn new(
-        registry: Arc<dyn ModuleRegistryPort>,
-        storage: Arc<dyn ModuleStoragePort>,
-        verifier: Arc<dyn ModuleVerifierPort>,
-        runtime: Arc<dyn ModuleRuntimePort>,
-        service_registry: Arc<ServiceRegistry>,
-        port_allocator: Arc<ModulePortAllocator>,
-        security: Arc<SecurityManager>,
-        dev_sources: Option<PathBuf>,
-        overrides: ModuleServiceOverrides,
-        client_settings: ModuleClientSettings,
-        health_client: ModuleHealthHttpClient,
-        default_service_scopes: Vec<ServiceScope>,
-        control_plane_url: Option<String>,
-        service_snapshot_path: Option<PathBuf>,
-    ) -> Arc<Self> {
-        Arc::new_cyclic(|weak| {
+    pub fn new(init: ModuleServiceInit) -> Arc<Self> {
+        Arc::new_cyclic(move |weak| {
+            let ModuleServiceInit {
+                registry,
+                storage,
+                verifier,
+                runtime,
+                service_registry,
+                port_allocator,
+                security,
+                dev_sources,
+                overrides,
+                client_settings,
+                health_client,
+                default_service_scopes,
+                control_plane_url,
+                service_snapshot_path,
+            } = init;
             let manifest_client = Client::builder()
                 .timeout(client_settings.timeout)
                 .build()

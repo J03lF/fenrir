@@ -10,6 +10,7 @@ use crate::domain::module::{
     ModuleStartConfig, ModuleVersion,
 };
 use crate::security::service::{ServiceRole, ServiceScope};
+use crate::security::service_tokens::DelegatedToken;
 use crate::services::{
     ServiceDescriptorOwned, ServiceIngressMetadata, ServiceIngressProtocol, ServiceKind,
     ServiceSecurityMetadata, ServiceStatus, ServiceTag,
@@ -27,6 +28,8 @@ use super::config::ModuleEnvResolutionError;
 use super::reported::{ReportedServiceEntry, ReportedServicesPayload};
 use super::service::{MODULE_SERVICE_MANIFEST_PATH, RESERVED_ENV_KEYS};
 use super::{ModuleClientSettings, ModuleService};
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 
 const MANIFEST_REFRESH_MAX_ATTEMPTS: u32 = 20;
 const MANIFEST_REFRESH_MIN_DELAY_MS: u64 = 500;
@@ -240,7 +243,7 @@ impl ModuleService {
             config.env_vars,
             &config.module_id,
             assigned_port,
-            issued_token.as_ref().map(|token| token.token.as_str()),
+            issued_token.as_ref(),
         )?;
 
         let manifest = installed.manifest.clone();
@@ -452,7 +455,7 @@ impl ModuleService {
         mut env: Vec<(String, String)>,
         module_id: &ModuleId,
         port: Option<u16>,
-        service_token: Option<&str>,
+        service_token: Option<&DelegatedToken>,
     ) -> Result<Vec<(String, String)>, ModuleRuntimeError> {
         env.retain(|(key, _)| !RESERVED_ENV_KEYS.contains(&key.as_str()));
 
@@ -473,7 +476,7 @@ impl ModuleService {
             ));
         }
         if let Some(token) = service_token {
-            env.push(("FENRIR_SERVICE_TOKEN".to_string(), token.to_string()));
+            self.append_service_token_env(&mut env, token);
         }
         self.append_db_connector_env(&mut env);
         self.append_control_plane_env(&mut env);
@@ -520,6 +523,20 @@ impl ModuleService {
                 path.to_string_lossy().to_string(),
             );
         }
+    }
+
+    fn append_service_token_env(&self, env: &mut Vec<(String, String)>, token: &DelegatedToken) {
+        env.push(("FENRIR_SERVICE_TOKEN".to_string(), token.token.clone()));
+        if let Some(value) = Self::format_timestamp(token.claims.issued_at) {
+            env.push(("FENRIR_SERVICE_TOKEN_ISSUED_AT".to_string(), value));
+        }
+        if let Some(value) = Self::format_timestamp(token.claims.expires_at) {
+            env.push(("FENRIR_SERVICE_TOKEN_EXPIRES_AT".to_string(), value));
+        }
+        env.push((
+            "FENRIR_SERVICE_TOKEN_TTL_SECS".to_string(),
+            Self::remaining_token_ttl_seconds(token).to_string(),
+        ));
     }
 
     fn append_client_env(&self, env: &mut Vec<(String, String)>) {
@@ -624,6 +641,18 @@ impl ModuleService {
     fn replace_env(&self, env: &mut Vec<(String, String)>, key: &str, value: String) {
         env.retain(|(existing, _)| existing != key);
         env.push((key.to_string(), value));
+    }
+
+    fn format_timestamp(value: OffsetDateTime) -> Option<String> {
+        value.format(&Rfc3339).ok()
+    }
+
+    fn remaining_token_ttl_seconds(token: &DelegatedToken) -> u64 {
+        let now = OffsetDateTime::now_utc();
+        if token.claims.expires_at <= now {
+            return 0;
+        }
+        (token.claims.expires_at - now).whole_seconds().max(0) as u64
     }
 
     pub(super) async fn refresh_reported_services(

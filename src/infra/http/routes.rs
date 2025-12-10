@@ -760,12 +760,6 @@ fn module_id_from_claims(claims: &DelegatedTokenClaims) -> Result<ModuleId, Serv
 }
 
 fn parse_requested_scopes(scopes: &[String]) -> Result<Vec<ServiceScope>, ServiceActionProblem> {
-    if scopes.is_empty() {
-        return Err(http_problem(
-            StatusCode::BAD_REQUEST,
-            http_messages::problems::module_token_scope_missing(),
-        ));
-    }
     let mut parsed = Vec::with_capacity(scopes.len());
     for scope in scopes {
         let scope_trimmed = scope.trim();
@@ -817,9 +811,9 @@ fn extract_gateway_token(headers: &HeaderMap) -> Result<&str, ServiceActionProbl
     }
 }
 
-fn extract_optional_gateway_token<'a>(
-    headers: &'a HeaderMap,
-) -> Result<Option<&'a str>, ServiceActionProblem> {
+fn extract_optional_gateway_token(
+    headers: &HeaderMap,
+) -> Result<Option<&str>, ServiceActionProblem> {
     let Some(value) = headers.get(AUTHORIZATION) else {
         return Ok(None);
     };
@@ -1222,14 +1216,27 @@ async fn issue_module_service_token(
         Ok(scopes) => scopes,
         Err(problem) => return problem.into_response(),
     };
-    let issued = match module_service.issue_scoped_service_token(&module_id, scopes) {
-        Ok(token) => token,
-        Err(err) => {
-            return http_problem(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                http_messages::problems::module_token_issue_failed(&err),
-            )
-            .into_response()
+    let issued = if scopes.is_empty() {
+        match module_service.issue_default_service_token(&module_id) {
+            Ok(token) => token,
+            Err(err) => {
+                return http_problem(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    http_messages::problems::module_token_issue_failed(&err),
+                )
+                .into_response()
+            }
+        }
+    } else {
+        match module_service.issue_scoped_service_token(&module_id, scopes) {
+            Ok(token) => token,
+            Err(err) => {
+                return http_problem(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    http_messages::problems::module_token_issue_failed(&err),
+                )
+                .into_response()
+            }
         }
     };
     let response = ModuleTokenExchangeResponse {
@@ -1353,6 +1360,11 @@ async fn release_dev_overrides(State(state): State<HttpState>, headers: HeaderMa
         .into_response()
 }
 
+struct GatewayRoute {
+    service_param: String,
+    tail: String,
+}
+
 async fn proxy_module_service(
     State(state): State<HttpState>,
     AxumPath((service_param, tail)): AxumPath<(String, String)>,
@@ -1361,10 +1373,13 @@ async fn proxy_module_service(
     OriginalUri(original_uri): OriginalUri,
     body: Body,
 ) -> Response {
-    match gateway_proxy(
-        state,
+    let route = GatewayRoute {
         service_param,
         tail,
+    };
+    match gateway_proxy(
+        state,
+        route,
         method,
         headers,
         original_uri,
@@ -1386,10 +1401,13 @@ async fn proxy_module_service_grpc(
     OriginalUri(original_uri): OriginalUri,
     body: Body,
 ) -> Response {
-    match gateway_proxy(
-        state,
+    let route = GatewayRoute {
         service_param,
         tail,
+    };
+    match gateway_proxy(
+        state,
+        route,
         method,
         headers,
         original_uri,
@@ -1405,14 +1423,17 @@ async fn proxy_module_service_grpc(
 
 async fn gateway_proxy(
     state: HttpState,
-    service_param: String,
-    tail: String,
+    route: GatewayRoute,
     method: Method,
     headers: HeaderMap,
     original_uri: Uri,
     body: Body,
     kind: GatewayRequestKind,
 ) -> Result<Response, ServiceActionProblem> {
+    let GatewayRoute {
+        service_param,
+        tail,
+    } = route;
     let Some(module_service) = state.services.module_service() else {
         return Err(module_service_unavailable());
     };

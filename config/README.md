@@ -128,6 +128,7 @@ Use these instead of hardcoded ports/URLs inside modules.
 Delegated Service Tokens
 - `[security.service_tokens]` controls how long delegated service credentials stay valid (`lifetime_seconds`) and when idle tokens are retired (`idle_timeout_seconds`).
 - Fenrir injects these ephemeral tokens into managed modules via `FENRIR_SERVICE_TOKEN`; modules must present them when calling other services through the internal gateway.
+- Each issued token is accompanied by `FENRIR_SERVICE_TOKEN_ISSUED_AT`, `FENRIR_SERVICE_TOKEN_EXPIRES_AT` (both RFC 3339 timestamps) as well as `FENRIR_SERVICE_TOKEN_TTL_SECS` so modules can refresh long-running credentials before they expire.
 - Keep `cleanup_interval_seconds` low (default 60s) to reclaim stale tokens quickly in development.
 
 Internal Gateway
@@ -139,5 +140,5 @@ DB Connector & Scoped Tokens
 - Modules talk to the DB connector exclusively over the provided IPC/TCP endpoint; every request must include a service token with `db:read` or `db:write`.
 - The connector proxies SQL statements via Fenrir's DB adapters, so modules never read raw DB credentials.
 - Requests now support prepared statements: set `"command": "prepared"`, provide `"params": [{"name": "p1", "value": 42}, ...]` and optionally `"tenant": {"param": "tenant_id", "mode": "inject|require_match"}` to bind the caller tenant.
-- Use the bundled `fenrir-module-kit` crate for a ready-made connector client; it reads all `FENRIR_*` env vars, automatically exchanges `db:write` tokens via `POST /modules/runtime/tokens`, and exposes high-level helpers for simple/prepared statements.
+- Use the bundled `fenrir-module-kit` crate for a ready-made connector client; it reads all `FENRIR_*` env vars, automatically exchanges `db:write` tokens via `POST /modules/runtime/tokens`, and exposes high-level helpers for simple/prepared statements. Eine leere Scope-Liste beim Token-Endpoint bedeutet „Standard-Scopes auffrischen“ und liefert eine neue Basisauthentifizierung für das Modul.
 - The control plane exposes lifecycle hooks at `/modules/runtime/:id/{start,stop,restart}` (role `operator`) and quarantines modules after repeated start failures. Quarantine windows and status notes are visible via the Service Registry.

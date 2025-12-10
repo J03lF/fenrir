@@ -262,10 +262,14 @@ fn parse_env_assignment(
     }
 
     let mut value = value_part.trim().to_string();
-    if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
-        value = value[1..value.len() - 1].to_string();
-    } else if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
-        value = value[1..value.len() - 1].to_string();
+    if value.len() >= 2 {
+        let first = value.as_bytes().first().copied();
+        let last = value.as_bytes().last().copied();
+        if let (Some(start), Some(end)) = (first, last) {
+            if start == end && (start == b'"' || start == b'\'') {
+                value = value[1..value.len() - 1].to_string();
+            }
+        }
     }
     Ok(Some((key.to_string(), value)))
 }

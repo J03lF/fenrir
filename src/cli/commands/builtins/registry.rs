@@ -1,6 +1,6 @@
 use crate::cli::commands::registry::CommandRegistry;
 
-use super::{audit, clear, db_shell, exit, help, log, modules, services, show, user};
+use super::{audit, clear, db_shell, exit, help, log, modules, services, show, status, user};
 
 pub fn register_builtins(registry: &mut CommandRegistry) {
     registry.register(help::command());
@@ -11,6 +11,9 @@ pub fn register_builtins(registry: &mut CommandRegistry) {
     registry.register(services::start_command());
     registry.register(services::stop_command());
     registry.register(services::restart_command());
+    registry.register(services::pause_command());
+    registry.register(services::resume_command());
+    registry.register(status::command());
     registry.register(log::command());
     registry.register(modules::search_command());
     registry.register(modules::install_command());
@@ -18,7 +21,6 @@ pub fn register_builtins(registry: &mut CommandRegistry) {
     registry.register(modules::release_command());
     registry.register(modules::uninstall_command());
     registry.register(modules::check_command());
-    registry.register(modules::logs_command());
     registry.register(user::command());
     registry.register(show::command());
     registry.register(exit::command());

@@ -1,5 +1,7 @@
 use std::io::{self, Write};
 
+use crate::cli::commands::builtins::jobs::{parse_tail_flag, stream_job_logs};
+use crate::cli::commands::builtins::modules::{self, complete_module_ids};
 use crate::cli::commands::registry::{
     CliDependencies, CommandArgument, CommandEntry, CommandOutcome, CommandRegistry, CommandShape,
     CommandSubcommand, CompletionKind, ShellEnvironment,
@@ -19,6 +21,18 @@ const LOG_LEVEL_ARGUMENT: CommandArgument =
     CommandArgument::required("level").with_completion(CompletionKind::Static(LOG_LEVEL_OPTIONS));
 const LOG_ARCHIVE_ARGUMENT: CommandArgument = CommandArgument::optional("target")
     .with_completion(CompletionKind::Static(LOG_ARCHIVE_OPTIONS));
+const LOG_MODULE_ARGUMENT: CommandArgument = CommandArgument::required("module")
+    .with_completion(CompletionKind::Dynamic(complete_module_ids));
+const LOG_MODULE_TAIL_ARGUMENT: CommandArgument = CommandArgument {
+    name: "--tail",
+    optional: true,
+    variadic: false,
+    completion: CompletionKind::Static(&["--tail"]),
+};
+const LOG_JOB_ARGUMENT: CommandArgument = CommandArgument::required("job_id").with_completion(
+    CompletionKind::Dynamic(crate::cli::commands::builtins::jobs::complete_job_ids),
+);
+const LOG_JOB_TAIL_ARGUMENT: CommandArgument = LOG_MODULE_TAIL_ARGUMENT;
 
 const LOG_SUBCOMMANDS: &[CommandSubcommand] = &[
     CommandSubcommand::new("app", &[], &[], log_command_messages::SUB_APP_DESCRIPTION),
@@ -35,6 +49,24 @@ const LOG_SUBCOMMANDS: &[CommandSubcommand] = &[
         &[],
         &[LOG_ARCHIVE_ARGUMENT],
         log_command_messages::SUB_ARCHIVE_DESCRIPTION,
+    ),
+    CommandSubcommand::new(
+        "module",
+        &[],
+        &[LOG_MODULE_ARGUMENT, LOG_MODULE_TAIL_ARGUMENT],
+        log_command_messages::SUB_MODULE_DESCRIPTION,
+    ),
+    CommandSubcommand::new(
+        "env",
+        &[],
+        &[LOG_MODULE_ARGUMENT],
+        log_command_messages::SUB_ENV_DESCRIPTION,
+    ),
+    CommandSubcommand::new(
+        "job",
+        &[],
+        &[LOG_JOB_ARGUMENT, LOG_JOB_TAIL_ARGUMENT],
+        log_command_messages::SUB_JOB_DESCRIPTION,
     ),
 ];
 
@@ -145,6 +177,41 @@ fn handle(
                 )?;
             }
         }
+        "module" => {
+            let tail_args: Vec<_> = iter.collect();
+            let tail = strip_module_keyword(&tail_args);
+            if tail.is_empty() {
+                writeln!(out, "{}", log_handler_messages::MODULE_LOG_USAGE)?;
+                return Ok(CommandOutcome::Continue);
+            }
+            return modules::run_module_command(deps, "log", tail, out);
+        }
+        "env" => {
+            let tail_args: Vec<_> = iter.collect();
+            let tail = strip_module_keyword(&tail_args);
+            if tail.is_empty() {
+                writeln!(out, "{}", log_handler_messages::MODULE_ENV_USAGE)?;
+                return Ok(CommandOutcome::Continue);
+            }
+            return modules::run_module_command(deps, "env", tail, out);
+        }
+        "job" => {
+            let tail_args: Vec<_> = iter.collect();
+            if tail_args.is_empty() {
+                writeln!(out, "{}", log_handler_messages::JOB_LOG_USAGE)?;
+                return Ok(CommandOutcome::Continue);
+            }
+            let job_id = tail_args[0];
+            let tail_tokens = &tail_args[1..];
+            let tail = match parse_tail_flag(tail_tokens) {
+                Ok(value) => value,
+                Err(msg) => {
+                    writeln!(out, "{msg}")?;
+                    return Ok(CommandOutcome::Continue);
+                }
+            };
+            stream_job_logs(deps, job_id, tail, out)?;
+        }
         other => {
             warn!(command = "log", target = other, "unknown log subcommand");
             writeln!(out, "{}", log_handler_messages::unknown_action(other))?;
@@ -152,4 +219,13 @@ fn handle(
     }
 
     Ok(CommandOutcome::Continue)
+}
+
+fn strip_module_keyword<'a>(args: &'a [&'a str]) -> &'a [&'a str] {
+    if let Some(first) = args.first() {
+        if first.eq_ignore_ascii_case("module") {
+            return &args[1..];
+        }
+    }
+    args
 }

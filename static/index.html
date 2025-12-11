@@ -426,48 +426,13 @@
           <section class="page" data-page="services" data-visible="false">
             <div class="page-title">
               <h1>Services</h1>
-              <p>Aktionen, Filter und Registry-Übersicht</p>
+              <p>Service-Registry und Verwaltung</p>
             </div>
 
-            <article class="card actions-card">
-              <header class="card-header">
-                <div class="card-title-group">
-                  <span class="card-eyebrow">Aktionen</span>
-                  <h3>Bulk Operations</h3>
-                </div>
-              </header>
-              <div class="actions-row">
-                <button type="button" class="action-btn start" data-bulk-start>
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <polygon points="5,3 19,12 5,21"/>
-                  </svg>
-                  Start All
-                </button>
-                <button type="button" class="action-btn stop" data-bulk-stop>
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <rect x="6" y="6" width="12" height="12"/>
-                  </svg>
-                  Stop All
-                </button>
-                <button type="button" class="action-btn restart" data-bulk-restart>
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M23 4v6h-6M1 20v-6h6"/>
-                    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
-                  </svg>
-                  Restart All
-                </button>
-              </div>
-              <p class="actions-hint">Nur nicht-core Services werden beeinflusst.</p>
-            </article>
-
             <article class="card services-table-card">
-              <header class="card-header services-header">
-                <div class="card-title-group">
-                  <span class="card-eyebrow">Registry</span>
-                  <h3>Registrierte Services</h3>
-                  <span class="card-meta" data-service-meta>lade Registry …</span>
-                </div>
-                <div class="filter-section">
+              <!-- Compact toolbar -->
+              <div class="services-toolbar">
+                <div class="toolbar-left">
                   <div class="search-box">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                       <circle cx="11" cy="11" r="8"/>
@@ -476,7 +441,7 @@
                     <input
                       type="search"
                       autocomplete="off"
-                      placeholder="Suchen …"
+                      placeholder="Services suchen …"
                       aria-label="Services filtern"
                       data-service-filter
                     />
@@ -495,7 +460,29 @@
                     <button type="button" data-service-filter-status="stopped">Stopped</button>
                   </div>
                 </div>
-              </header>
+                <div class="toolbar-right">
+                  <span class="services-count" data-service-meta>–</span>
+                  <div class="bulk-actions">
+                    <button type="button" class="bulk-btn start" data-bulk-start title="Alle starten">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polygon points="5,3 19,12 5,21"/>
+                      </svg>
+                    </button>
+                    <button type="button" class="bulk-btn stop" data-bulk-stop title="Alle stoppen">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="6" y="6" width="12" height="12"/>
+                      </svg>
+                    </button>
+                    <button type="button" class="bulk-btn restart" data-bulk-restart title="Alle neustarten">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M23 4v6h-6M1 20v-6h6"/>
+                        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+              </div>
+              
               <div class="table-scroll">
                 <table class="data-table services-table">
                   <thead>
@@ -526,27 +513,26 @@
             </div>
 
             <article class="card audit-table-card">
-              <header class="card-header audit-header">
-                <div class="card-title-group">
-                  <span class="card-eyebrow">Timeline</span>
-                  <h3>Audit Verlauf</h3>
-                  <span class="card-meta" data-audit-meta>–</span>
-                </div>
-                <div class="audit-controls">
+              <!-- Compact toolbar like services -->
+              <div class="audit-toolbar">
+                <div class="toolbar-left">
                   <div class="range-toggle" role="tablist" aria-label="Audit-Zeitraum">
                     <button type="button" data-audit-range="1h" data-active="true">1h</button>
                     <button type="button" data-audit-range="3h">3h</button>
                     <button type="button" data-audit-range="24h">24h</button>
                   </div>
-                  <button type="button" class="refresh-btn" data-audit-refresh>
+                </div>
+                <div class="toolbar-right">
+                  <span class="audit-count" data-audit-meta>–</span>
+                  <button type="button" class="toolbar-btn refresh" data-audit-refresh title="Aktualisieren">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                       <path d="M23 4v6h-6M1 20v-6h6"/>
                       <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
                     </svg>
-                    Refresh
                   </button>
                 </div>
-              </header>
+              </div>
+              
               <div class="table-scroll">
                 <table class="data-table audit-table">
                   <thead>
@@ -566,6 +552,24 @@
               </div>
             </article>
           </section>
+        </div>
+
+        <!-- Service Detail Modal -->
+        <div class="modal-overlay" data-service-modal data-visible="false">
+          <div class="modal-container">
+            <header class="modal-header">
+              <h3 data-service-modal-title>Service Details</h3>
+              <button type="button" class="modal-close" data-service-modal-close aria-label="Schließen">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <line x1="18" y1="6" x2="6" y2="18"/>
+                  <line x1="6" y1="6" x2="18" y2="18"/>
+                </svg>
+              </button>
+            </header>
+            <div class="modal-body" data-service-modal-content>
+              <!-- Filled by JS -->
+            </div>
+          </div>
         </div>
 
         <!-- Audit Detail Modal -->
@@ -595,4 +599,3 @@
     <script src="/static/js/dashboard.js"></script>
   </body>
 </html>
-

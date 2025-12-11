@@ -230,6 +230,12 @@ impl ModuleRuntimePort for InProcessModuleRuntime {
 
         Ok(logs)
     }
+
+    async fn env(&self, module_id: &ModuleId) -> Result<Vec<(String, String)>, ModuleRuntimeError> {
+        Err(ModuleRuntimeError::EnvUnavailable {
+            module_id: module_id.to_string(),
+        })
+    }
 }
 
 #[cfg(test)]

@@ -122,16 +122,6 @@ pub(super) fn handle_check_command(
     run_scoped_module_command(deps, args, out, &CHECK_SPEC)
 }
 
-pub(super) fn handle_logs_command(
-    deps: &CliDependencies,
-    args: &[&str],
-    _registry: &CommandRegistry,
-    out: &mut dyn Write,
-    _env: ShellEnvironment,
-) -> io::Result<CommandOutcome> {
-    run_scoped_module_command(deps, args, out, &LOGS_SPEC)
-}
-
 pub fn run_module_command(
     deps: &CliDependencies,
     action: &str,
@@ -161,7 +151,8 @@ fn dispatch_module(
         "release-dev-overrides" => handle_release_dev_overrides(ctx, out, args),
         "uninstall" => handle_uninstall(ctx, out, args),
         "check-updates" => handle_check_updates(ctx, out, args),
-        "logs" => handle_logs(ctx, out, args),
+        "log" => handle_logs(ctx, out, args),
+        "env" => handle_env(ctx, out, args),
         "services" => handle_services(ctx, out, args),
         "start" => handle_start(ctx, out, args),
         "stop" => handle_stop(ctx, out, args),
@@ -881,6 +872,7 @@ fn handle_logs(
     out: &mut dyn Write,
     args: &[&str],
 ) -> io::Result<CommandOutcome> {
+    let args = strip_module_keyword(args);
     if args.is_empty() {
         writeln!(out, "{}", msg_modules::logs_flow::USAGE)?;
         return Ok(CommandOutcome::Continue);
@@ -894,7 +886,7 @@ fn handle_logs(
     let mut tail = None;
     let mut iter = args[1..].iter();
     while let Some(flag) = iter.next() {
-        if flag == &"--tail" {
+        if *flag == "--tail" {
             let Some(value) = iter.next() else {
                 writeln!(out, "{}", msg_modules::logs_flow::TAIL_REQUIRES_VALUE)?;
                 return Ok(CommandOutcome::Continue);
@@ -933,6 +925,48 @@ fn handle_logs(
         }
     }
 
+    Ok(CommandOutcome::Continue)
+}
+
+fn handle_env(
+    ctx: &ModulesCommandCtx,
+    out: &mut dyn Write,
+    args: &[&str],
+) -> io::Result<CommandOutcome> {
+    let args = strip_module_keyword(args);
+    if args.is_empty() {
+        writeln!(out, "{}", msg_modules::env_view::USAGE)?;
+        return Ok(CommandOutcome::Continue);
+    }
+    let module_id = match parse_module_id(out, args[0])? {
+        Some(id) => id,
+        None => return Ok(CommandOutcome::Continue),
+    };
+    let module_id_for_call = module_id.clone();
+    let env_result = ctx
+        .runtime_call(move |service| async move { service.runtime_env(&module_id_for_call).await });
+    match env_result {
+        Ok(mut entries) => {
+            entries.retain(|(key, _)| key.starts_with("FENRIR_"));
+            if entries.is_empty() {
+                writeln!(out, "{}", msg_modules::env_view::EMPTY_STATE)?;
+                return Ok(CommandOutcome::Continue);
+            }
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            writeln!(out, "{}", msg_modules::env_view::TITLE)?;
+            for (key, value) in entries {
+                let rendered = if is_secret_env_key(&key) {
+                    msg_modules::env_view::REDACTED.to_string()
+                } else {
+                    value
+                };
+                writeln!(out, "{key}={rendered}")?;
+            }
+        }
+        Err(err) => {
+            render_runtime_error(out, msg_modules::env_view::ERROR_CONTEXT, &err)?;
+        }
+    }
     Ok(CommandOutcome::Continue)
 }
 
@@ -1049,6 +1083,7 @@ fn handle_start(
     out: &mut dyn Write,
     args: &[&str],
 ) -> io::Result<CommandOutcome> {
+    let args = strip_module_keyword(args);
     if args.len() != 1 {
         writeln!(out, "{}", msg_modules::lifecycle::START_USAGE)?;
         return Ok(CommandOutcome::Continue);
@@ -1098,6 +1133,7 @@ fn handle_stop(
     out: &mut dyn Write,
     args: &[&str],
 ) -> io::Result<CommandOutcome> {
+    let args = strip_module_keyword(args);
     if args.len() != 1 {
         writeln!(out, "{}", msg_modules::lifecycle::STOP_USAGE)?;
         return Ok(CommandOutcome::Continue);
@@ -1145,6 +1181,7 @@ fn handle_restart(
     out: &mut dyn Write,
     args: &[&str],
 ) -> io::Result<CommandOutcome> {
+    let args = strip_module_keyword(args);
     if args.len() != 1 {
         writeln!(out, "{}", msg_modules::lifecycle::RESTART_USAGE)?;
         return Ok(CommandOutcome::Continue);
@@ -1202,6 +1239,41 @@ fn parse_module_id(out: &mut dyn Write, raw: &str) -> io::Result<Option<ModuleId
             Ok(None)
         }
     }
+}
+
+fn strip_module_keyword<'a>(args: &'a [&'a str]) -> &'a [&'a str] {
+    if let Some(first) = args.first() {
+        if first.eq_ignore_ascii_case("module") {
+            return &args[1..];
+        }
+    }
+    args
+}
+
+fn is_secret_env_key(key: &str) -> bool {
+    let upper = key.to_ascii_uppercase();
+    if upper == "FENRIR_SERVICE_TOKEN" {
+        return true;
+    }
+    let exempt_suffixes = ["_ISSUED_AT", "_EXPIRES_AT", "_TTL_SECS"];
+    if upper.starts_with("FENRIR_SERVICE_TOKEN_")
+        && exempt_suffixes.iter().any(|suffix| upper.ends_with(suffix))
+    {
+        return false;
+    }
+    if upper.contains("PASSWORD") || upper.contains("SECRET") {
+        return true;
+    }
+    if upper.contains("PRIVATE_KEY") {
+        return true;
+    }
+    if upper.ends_with("_KEY") {
+        return true;
+    }
+    if upper.ends_with("_TOKEN") || upper.contains("_TOKEN_") {
+        return true;
+    }
+    false
 }
 
 fn parse_module_target(
@@ -1419,7 +1491,8 @@ fn is_declared_endpoint(note: Option<&str>) -> bool {
         .unwrap_or(false)
 }
 
-const MODULE_ALIASES: &[&str] = &["module", "modules"];
+const MODULE_SINGULAR_ALIASES: &[&str] = &["module"];
+const MODULE_PLURAL_ALIASES: &[&str] = &["modules"];
 const DISTRIBUTION_ALIASES: &[&str] = &["distribution", "distributions"];
 
 #[derive(Clone, Copy)]
@@ -1441,7 +1514,8 @@ impl ModuleCommandSpec {
 
 #[derive(Clone, Copy)]
 enum ModuleResourceKind {
-    Module,
+    ModuleSingular,
+    ModulePlural,
     Distribution,
 }
 
@@ -1454,7 +1528,8 @@ impl ModuleResourceKind {
 
     fn aliases(self) -> &'static [&'static str] {
         match self {
-            ModuleResourceKind::Module => MODULE_ALIASES,
+            ModuleResourceKind::ModuleSingular => MODULE_SINGULAR_ALIASES,
+            ModuleResourceKind::ModulePlural => MODULE_PLURAL_ALIASES,
             ModuleResourceKind::Distribution => DISTRIBUTION_ALIASES,
         }
     }
@@ -1463,7 +1538,7 @@ impl ModuleResourceKind {
 const SEARCH_SPEC: ModuleCommandSpec = ModuleCommandSpec::new(
     "search",
     "search modules [pattern]",
-    ModuleResourceKind::Module,
+    ModuleResourceKind::ModulePlural,
 );
 const INSTALL_DISTRIBUTION_SPEC: ModuleCommandSpec = ModuleCommandSpec::new(
     "install-distribution",
@@ -1473,24 +1548,22 @@ const INSTALL_DISTRIBUTION_SPEC: ModuleCommandSpec = ModuleCommandSpec::new(
 const SYNCHRONIZE_SPEC: ModuleCommandSpec = ModuleCommandSpec::new(
     "synchronize",
     "synchronize module <name>",
-    ModuleResourceKind::Module,
+    ModuleResourceKind::ModuleSingular,
 );
 const RELEASE_SPEC: ModuleCommandSpec = ModuleCommandSpec::new(
     "release",
     "release module <name>",
-    ModuleResourceKind::Module,
+    ModuleResourceKind::ModuleSingular,
 );
 const UNINSTALL_SPEC: ModuleCommandSpec = ModuleCommandSpec::new(
     "uninstall",
     "uninstall module <name>",
-    ModuleResourceKind::Module,
+    ModuleResourceKind::ModuleSingular,
 );
-const CHECK_SPEC: ModuleCommandSpec =
-    ModuleCommandSpec::new("check-updates", "check modules", ModuleResourceKind::Module);
-const LOGS_SPEC: ModuleCommandSpec = ModuleCommandSpec::new(
-    "logs",
-    "logs module <name> [--tail N]",
-    ModuleResourceKind::Module,
+const CHECK_SPEC: ModuleCommandSpec = ModuleCommandSpec::new(
+    "check-updates",
+    "check modules",
+    ModuleResourceKind::ModulePlural,
 );
 fn run_scoped_module_command(
     deps: &CliDependencies,

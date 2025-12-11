@@ -33,12 +33,16 @@ const MODULE_LOG_TAIL_ARGUMENT: CommandArgument = CommandArgument {
     completion: CompletionKind::Static(&["--tail"]),
 };
 
-const MODULE_RESOURCE_OPTIONS: &[&str] = &["module", "modules"];
-const MODULE_RESOURCE_ARGUMENT: CommandArgument = CommandArgument::required("resource")
-    .with_completion(CompletionKind::Static(MODULE_RESOURCE_OPTIONS));
+const MODULE_RESOURCE_SINGULAR_OPTIONS: &[&str] = &["module"];
+const MODULE_RESOURCE_PLURAL_OPTIONS: &[&str] = &["modules"];
+const MODULE_RESOURCE_SINGULAR_ARGUMENT: CommandArgument = CommandArgument::required("resource")
+    .with_completion(CompletionKind::Static(MODULE_RESOURCE_SINGULAR_OPTIONS));
+const MODULE_RESOURCE_PLURAL_ARGUMENT: CommandArgument = CommandArgument::required("resource")
+    .with_completion(CompletionKind::Static(MODULE_RESOURCE_PLURAL_OPTIONS));
 const MODULE_PATTERN_ARGUMENT: CommandArgument = CommandArgument::optional("pattern");
 
-const SEARCH_ARGUMENTS: &[CommandArgument] = &[MODULE_RESOURCE_ARGUMENT, MODULE_PATTERN_ARGUMENT];
+const SEARCH_ARGUMENTS: &[CommandArgument] =
+    &[MODULE_RESOURCE_PLURAL_ARGUMENT, MODULE_PATTERN_ARGUMENT];
 const SEARCH_SHAPE: CommandShape = CommandShape::new("search", &[], SEARCH_ARGUMENTS, &[]);
 
 const DISTRIBUTION_RESOURCE_OPTIONS: &[&str] = &["distribution", "distributions"];
@@ -49,26 +53,22 @@ const INSTALL_ARGUMENTS: &[CommandArgument] = &[DISTRIBUTION_RESOURCE_ARGUMENT];
 const INSTALL_SHAPE: CommandShape =
     CommandShape::new("install", &["import"], INSTALL_ARGUMENTS, &[]);
 
-const UNINSTALL_ARGUMENTS: &[CommandArgument] = &[MODULE_RESOURCE_ARGUMENT, MODULE_ID_ARGUMENT];
+const UNINSTALL_ARGUMENTS: &[CommandArgument] =
+    &[MODULE_RESOURCE_SINGULAR_ARGUMENT, MODULE_ID_ARGUMENT];
 const UNINSTALL_SHAPE: CommandShape =
     CommandShape::new("uninstall", &["remove"], UNINSTALL_ARGUMENTS, &[]);
 
-const CHECK_ARGUMENTS: &[CommandArgument] = &[MODULE_RESOURCE_ARGUMENT];
+const CHECK_ARGUMENTS: &[CommandArgument] = &[MODULE_RESOURCE_PLURAL_ARGUMENT];
 const CHECK_SHAPE: CommandShape = CommandShape::new("check", &[], CHECK_ARGUMENTS, &[]);
 
-const SYNCHRONIZE_ARGUMENTS: &[CommandArgument] = &[MODULE_RESOURCE_ARGUMENT, MODULE_ID_ARGUMENT];
+const SYNCHRONIZE_ARGUMENTS: &[CommandArgument] =
+    &[MODULE_RESOURCE_SINGULAR_ARGUMENT, MODULE_ID_ARGUMENT];
 const SYNCHRONIZE_SHAPE: CommandShape =
     CommandShape::new("synchronize", &["sync"], SYNCHRONIZE_ARGUMENTS, &[]);
 
-const RELEASE_ARGUMENTS: &[CommandArgument] = &[MODULE_RESOURCE_ARGUMENT, MODULE_ID_ARGUMENT];
+const RELEASE_ARGUMENTS: &[CommandArgument] =
+    &[MODULE_RESOURCE_SINGULAR_ARGUMENT, MODULE_ID_ARGUMENT];
 const RELEASE_SHAPE: CommandShape = CommandShape::new("release", &[], RELEASE_ARGUMENTS, &[]);
-
-const LOGS_ARGUMENTS: &[CommandArgument] = &[
-    MODULE_RESOURCE_ARGUMENT,
-    MODULE_ID_ARGUMENT,
-    MODULE_LOG_TAIL_ARGUMENT,
-];
-const LOGS_SHAPE: CommandShape = CommandShape::new("logs", &["tail"], LOGS_ARGUMENTS, &[]);
 
 pub fn search_command() -> CommandEntry {
     CommandEntry::with_shape(
@@ -133,17 +133,6 @@ pub fn check_command() -> CommandEntry {
         msg_modules::check::DETAILS,
         handlers::handle_check_command,
         CHECK_SHAPE,
-    )
-}
-
-pub fn logs_command() -> CommandEntry {
-    CommandEntry::with_shape(
-        "logs",
-        msg_modules::logs::DESCRIPTION,
-        msg_modules::logs::SYNOPSIS,
-        msg_modules::logs::DETAILS,
-        handlers::handle_logs_command,
-        LOGS_SHAPE,
     )
 }
 
@@ -242,10 +231,16 @@ const MODULE_SUBCOMMANDS: &[CommandSubcommand] = &[
         msg_modules::subcommands::CHECK_DESC,
     ),
     CommandSubcommand::new(
-        "logs",
+        "log",
         &[],
         &[MODULE_ID_ARGUMENT, MODULE_LOG_TAIL_ARGUMENT],
-        msg_modules::subcommands::LOGS_DESC,
+        msg_modules::subcommands::LOG_DESC,
+    ),
+    CommandSubcommand::new(
+        "env",
+        &[],
+        &[MODULE_ID_ARGUMENT],
+        msg_modules::subcommands::ENV_DESC,
     ),
     CommandSubcommand::new(
         "services",

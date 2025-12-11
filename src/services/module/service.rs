@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock as SyncRwLock, Weak};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::dev_agent::config::{DevAgentConfig, DevAgentService};
 use crate::domain::module::{
@@ -16,8 +16,9 @@ use crate::security::manager::SecurityManager;
 use crate::security::service::{ServiceRole, ServiceScope};
 use crate::security::service_tokens::{DelegatedActor, DelegatedToken, DelegatedTokenRequest};
 use crate::services::{
-    DbConnectorEndpoint, ServiceDescriptorOwned, ServiceIngressMetadata, ServiceKind,
-    ServiceRegistry, ServiceSecurityMetadata, ServiceStatus, ServiceTag, ServiceTenantGuard,
+    diagnostics::ServiceDiagnostics, DbConnectorEndpoint, ServiceDescriptorOwned,
+    ServiceIngressMetadata, ServiceKind, ServiceRegistry, ServiceSecurityMetadata, ServiceStatus,
+    ServiceTag, ServiceTenantGuard,
 };
 use crate::utils::messages::services::module::{
     dev::errors as module_dev_errors,
@@ -92,6 +93,51 @@ pub(super) struct ModuleHealth {
     quarantined_until: Option<SystemTime>,
 }
 
+#[derive(Clone)]
+pub struct ModuleTokenLease {
+    token: String,
+    issued_at: OffsetDateTime,
+    expires_at: OffsetDateTime,
+    scopes: Vec<ServiceScope>,
+}
+
+impl ModuleTokenLease {
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    pub fn issued_at(&self) -> OffsetDateTime {
+        self.issued_at
+    }
+
+    pub fn expires_at(&self) -> OffsetDateTime {
+        self.expires_at
+    }
+
+    pub fn scopes(&self) -> &[ServiceScope] {
+        &self.scopes
+    }
+
+    pub fn seconds_until_expiry(&self) -> i64 {
+        (self.expires_at - OffsetDateTime::now_utc()).whole_seconds()
+    }
+
+    pub fn is_expired(&self) -> bool {
+        self.seconds_until_expiry() <= 0
+    }
+}
+
+impl From<&DelegatedToken> for ModuleTokenLease {
+    fn from(token: &DelegatedToken) -> Self {
+        Self {
+            token: token.token.clone(),
+            issued_at: token.claims.issued_at,
+            expires_at: token.claims.expires_at,
+            scopes: token.claims.scopes.clone(),
+        }
+    }
+}
+
 pub struct ModuleServiceInit {
     pub registry: Arc<dyn ModuleRegistryPort>,
     pub storage: Arc<dyn ModuleStoragePort>,
@@ -107,6 +153,7 @@ pub struct ModuleServiceInit {
     pub default_service_scopes: Vec<ServiceScope>,
     pub control_plane_url: Option<String>,
     pub service_snapshot_path: Option<PathBuf>,
+    pub diagnostics: Arc<ServiceDiagnostics>,
 }
 
 pub struct ModuleService {
@@ -121,6 +168,7 @@ pub struct ModuleService {
     pub(super) overrides: Arc<ModuleServiceOverrides>,
     pub(super) client_settings: ModuleClientSettings,
     pub(super) health_client: ModuleHealthHttpClient,
+    pub(super) diagnostics: Arc<ServiceDiagnostics>,
     pub(super) dev_overrides: Arc<RwLock<HashMap<ModuleId, DevOverrideState>>>,
     pub(super) dev_agents: Arc<Mutex<HashMap<ModuleId, Arc<Mutex<DevAgentHandle>>>>>,
     pub(super) dev_agent_rotations: Arc<Mutex<HashMap<ModuleId, JoinHandle<()>>>>,
@@ -128,7 +176,7 @@ pub struct ModuleService {
     pub(super) manifest_refresh_tasks: Arc<Mutex<HashMap<ModuleId, JoinHandle<()>>>>,
     pub(super) declared_services: Arc<RwLock<HashMap<ModuleId, DeclaredServicesState>>>,
     pub(super) runtime_services: Arc<RwLock<HashMap<ModuleId, Vec<String>>>>,
-    pub(super) service_tokens: Arc<RwLock<HashMap<ModuleId, String>>>,
+    pub(super) service_tokens: Arc<RwLock<HashMap<ModuleId, ModuleTokenLease>>>,
     pub(super) db_connector_endpoint: SyncRwLock<Option<DbConnectorEndpoint>>,
     pub(super) default_service_scopes: Vec<ServiceScope>,
     pub(super) control_plane_url: SyncRwLock<Option<String>>,
@@ -181,12 +229,23 @@ impl ModuleService {
         let mut ticker = tokio::time::interval(interval);
         loop {
             ticker.tick().await;
-            if let Err(err) = self.run_health_probe_cycle().await {
-                tracing::warn!(
-                    error = %err,
-                    "{}",
-                    module_service_logs::HEALTH_PROBE_FAILED
-                );
+            let started_at = Instant::now();
+            match self.run_health_probe_cycle().await {
+                Ok(_) => {
+                    let latency_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+                    self.diagnostics
+                        .record_probe("module-runtime", latency_ms, true);
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "{}",
+                        module_service_logs::HEALTH_PROBE_FAILED
+                    );
+                    let latency_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+                    self.diagnostics
+                        .record_probe("module-runtime", latency_ms, false);
+                }
             }
         }
     }
@@ -201,6 +260,10 @@ impl ModuleService {
         Ok(())
     }
 
+    pub async fn verify_runtime_health(&self) -> Result<(), ModuleRuntimeError> {
+        self.run_health_probe_cycle().await
+    }
+
     async fn probe_runtime_service(&self, module_id: &ModuleId, port: u16) {
         let service_id = Self::module_service_id(module_id);
         let Some(snapshot) = self.service_registry.get(&service_id) else {
@@ -213,8 +276,11 @@ impl ModuleService {
             .and_then(|meta| meta.health_endpoint.clone())
             .unwrap_or_else(|| "/health".to_string());
         let url = format!("http://127.0.0.1:{port}{health_path}");
+        let started_at = Instant::now();
         match self.health_client.check(&url).await {
             Ok(()) => {
+                let latency_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+                self.diagnostics.record_probe(&service_id, latency_ms, true);
                 if snapshot.status != ServiceStatus::Active {
                     self.service_registry.set_status(
                         &service_id,
@@ -224,6 +290,9 @@ impl ModuleService {
                 }
             }
             Err(err) => {
+                let latency_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+                self.diagnostics
+                    .record_probe(&service_id, latency_ms, false);
                 self.service_registry.set_status(
                     &service_id,
                     ServiceStatus::Degraded,
@@ -243,8 +312,7 @@ impl ModuleService {
             .map_err(|err| {
                 ModuleServiceError::Storage(ModuleStorageError::InvalidState(err.to_string()))
             })?;
-        self.remember_service_token(module_id, issued.token.clone())
-            .await;
+        self.record_service_token(module_id, &issued).await;
         let port = endpoint.map(|addr| addr.port());
         let mut env = self
             .inject_runtime_env(Vec::new(), module_id, port, Some(&issued))
@@ -560,19 +628,31 @@ impl ModuleService {
             .map_err(|err| ModuleRuntimeError::InvalidState(err.to_string()))
     }
 
-    pub(super) async fn remember_service_token(&self, module_id: &ModuleId, token: String) {
+    pub(crate) async fn record_service_token(&self, module_id: &ModuleId, token: &DelegatedToken) {
+        let lease = ModuleTokenLease::from(token);
         let mut guard = self.service_tokens.write().await;
-        guard.insert(module_id.clone(), token);
+        guard.insert(module_id.clone(), lease);
     }
 
-    pub(super) async fn take_service_token(&self, module_id: &ModuleId) -> Option<String> {
+    pub(super) fn record_lifecycle_metrics(&self, started_at: Instant, success: bool) {
+        let latency_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+        self.diagnostics
+            .record_probe("module-runtime", latency_ms, success);
+        self.diagnostics
+            .record_probe("module-lifecycle", latency_ms, success);
+    }
+
+    pub(super) async fn take_service_token(
+        &self,
+        module_id: &ModuleId,
+    ) -> Option<ModuleTokenLease> {
         let mut guard = self.service_tokens.write().await;
         guard.remove(module_id)
     }
 
     pub(super) async fn revoke_service_token_if_any(&self, module_id: &ModuleId, reason: &str) {
-        if let Some(token) = self.take_service_token(module_id).await {
-            if let Err(err) = self.security.revoke_service_token(&token, reason) {
+        if let Some(lease) = self.take_service_token(module_id).await {
+            if let Err(err) = self.security.revoke_service_token(lease.token(), reason) {
                 tracing::warn!(
                     module = %module_id,
                     error = %err,
@@ -581,6 +661,23 @@ impl ModuleService {
                 );
             }
         }
+    }
+
+    pub async fn token_leases_snapshot(&self) -> Vec<(ModuleId, ModuleTokenLease)> {
+        let guard = self.service_tokens.read().await;
+        guard
+            .iter()
+            .map(|(id, lease)| (id.clone(), lease.clone()))
+            .collect()
+    }
+
+    pub async fn refresh_service_token(
+        &self,
+        module_id: &ModuleId,
+    ) -> Result<ModuleTokenLease, ModuleRuntimeError> {
+        let token = self.issue_default_service_token(module_id)?;
+        self.record_service_token(module_id, &token).await;
+        Ok(ModuleTokenLease::from(&token))
     }
 
     pub fn configure_db_connector(&self, endpoint: Option<DbConnectorEndpoint>) {
@@ -643,6 +740,7 @@ impl ModuleService {
                 default_service_scopes,
                 control_plane_url,
                 service_snapshot_path,
+                diagnostics,
             } = init;
             let manifest_client = Client::builder()
                 .timeout(client_settings.timeout)
@@ -660,6 +758,7 @@ impl ModuleService {
                 overrides: Arc::new(overrides),
                 client_settings,
                 health_client,
+                diagnostics,
                 dev_overrides: Arc::new(RwLock::new(HashMap::new())),
                 dev_agents: Arc::new(Mutex::new(HashMap::new())),
                 dev_agent_rotations: Arc::new(Mutex::new(HashMap::new())),

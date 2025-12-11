@@ -144,6 +144,10 @@ const auditRefreshBtn = document.querySelector('[data-audit-refresh]');
 const auditModal = document.querySelector('[data-audit-modal]');
 const auditModalContent = document.querySelector('[data-audit-modal-content]');
 const auditModalClose = document.querySelector('[data-audit-modal-close]');
+const serviceModal = document.querySelector('[data-service-modal]');
+const serviceModalTitle = document.querySelector('[data-service-modal-title]');
+const serviceModalContent = document.querySelector('[data-service-modal-content]');
+const serviceModalClose = document.querySelector('[data-service-modal-close]');
 const telemetryNote = document.querySelector('[data-telemetry-note]');
 const metricChartCanvas = document.querySelector('[data-metric-chart]');
 const metricPlaceholder = document.querySelector('[data-chart-empty]');
@@ -1193,16 +1197,87 @@ const setupCanvasDPI = (canvas, ctx) => {
 // Creates smooth rounded lines instead of sharp edges
 // ============================================
 
+// Maximum points for smooth rendering - fewer points = smoother curves
+const MAX_CHART_POINTS = 50;
+
+/**
+ * Downsample points using LTTB-like algorithm to preserve visual shape
+ * @param {Array<{x: number, y: number}>} points - Input points
+ * @param {number} targetCount - Target number of points
+ * @returns {Array<{x: number, y: number}>} Downsampled points
+ */
+const downsamplePoints = (points, targetCount) => {
+  if (points.length <= targetCount) return points;
+  
+  const result = [];
+  const bucketSize = (points.length - 2) / (targetCount - 2);
+  
+  // Always keep first point
+  result.push(points[0]);
+  
+  for (let i = 0; i < targetCount - 2; i++) {
+    const bucketStart = Math.floor(i * bucketSize) + 1;
+    const bucketEnd = Math.min(Math.floor((i + 1) * bucketSize) + 1, points.length - 1);
+    
+    // Find the point with max area (most significant point in bucket)
+    let maxArea = -1;
+    let maxIndex = bucketStart;
+    
+    const prevPoint = result[result.length - 1];
+    
+    // Calculate average point in next bucket for area calculation
+    const nextBucketStart = Math.min(Math.floor((i + 1) * bucketSize) + 1, points.length - 1);
+    const nextBucketEnd = Math.min(Math.floor((i + 2) * bucketSize) + 1, points.length);
+    let avgX = 0, avgY = 0, avgCount = 0;
+    for (let j = nextBucketStart; j < nextBucketEnd; j++) {
+      avgX += points[j].x;
+      avgY += points[j].y;
+      avgCount++;
+    }
+    if (avgCount > 0) {
+      avgX /= avgCount;
+      avgY /= avgCount;
+    } else {
+      avgX = points[points.length - 1].x;
+      avgY = points[points.length - 1].y;
+    }
+    
+    // Find point with largest triangle area
+    for (let j = bucketStart; j < bucketEnd; j++) {
+      const area = Math.abs(
+        (prevPoint.x - avgX) * (points[j].y - prevPoint.y) -
+        (prevPoint.x - points[j].x) * (avgY - prevPoint.y)
+      );
+      if (area > maxArea) {
+        maxArea = area;
+        maxIndex = j;
+      }
+    }
+    
+    result.push(points[maxIndex]);
+  }
+  
+  // Always keep last point
+  result.push(points[points.length - 1]);
+  
+  return result;
+};
+
 /**
  * Draw a smooth curve using quadratic bezier curves through midpoints
  * This creates genuinely smooth, rounded lines
  * @param {CanvasRenderingContext2D} ctx - Canvas context
- * @param {Array<{x: number, y: number}>} points - Array of points
+ * @param {Array<{x: number, y: number}>} rawPoints - Array of points
  * @param {boolean} closePath - Whether to close the path (for area fill)
  * @param {number} baseY - Base Y coordinate for closing path (area fill)
  */
-const drawSmoothCurve = (ctx, points, closePath = false, baseY = 0) => {
-  if (points.length < 2) return;
+const drawSmoothCurve = (ctx, rawPoints, closePath = false, baseY = 0) => {
+  if (rawPoints.length < 2) return;
+  
+  // Downsample if too many points for smooth rendering
+  const points = rawPoints.length > MAX_CHART_POINTS 
+    ? downsamplePoints(rawPoints, MAX_CHART_POINTS) 
+    : rawPoints;
   
   ctx.beginPath();
   
@@ -1253,6 +1328,33 @@ const drawSmoothCurve = (ctx, points, closePath = false, baseY = 0) => {
 
 const miniChartContexts = {};
 
+// Store chart data for hover functionality
+const miniChartData = {};
+
+// Hover state
+let activeHoverChart = null;
+let hoverIndex = -1;
+
+// Create tooltip element for mini charts
+const miniChartTooltip = document.createElement('div');
+miniChartTooltip.className = 'mini-chart-tooltip';
+miniChartTooltip.style.cssText = `
+  position: fixed;
+  display: none;
+  padding: 8px 12px;
+  background: rgba(15, 23, 35, 0.95);
+  border: 1px solid rgba(90, 122, 154, 0.3);
+  border-radius: 8px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: #e8eef4;
+  pointer-events: none;
+  z-index: 1000;
+  backdrop-filter: blur(8px);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+`;
+document.body.appendChild(miniChartTooltip);
+
 const renderMiniChart = (chartId) => {
   const canvas = miniChartCanvases[chartId];
   if (!canvas) return;
@@ -1279,15 +1381,8 @@ const renderMiniChart = (chartId) => {
   const plotWidth = width - padding.left - padding.right;
   const plotHeight = height - padding.top - padding.bottom;
   
-  // Clear canvas
+  // Clear canvas (transparent - no background, blends with card)
   ctx.clearRect(0, 0, width, height);
-  
-  // Background (Wolf Theme - matching card)
-  const bgGrad = ctx.createLinearGradient(0, 0, 0, height);
-  bgGrad.addColorStop(0, 'rgba(17, 26, 36, 0.3)');
-  bgGrad.addColorStop(1, 'rgba(12, 18, 24, 0.6)');
-  ctx.fillStyle = bgGrad;
-  ctx.fillRect(0, 0, width, height);
   
   // Get data for this metric
   const history = metricHistory;
@@ -1363,13 +1458,13 @@ const renderMiniChart = (chartId) => {
   }
   const yRange = yMax - yMin || 1;
   
-  // Draw grid lines (Wolf Theme - subtle)
-  ctx.strokeStyle = 'rgba(90, 122, 154, 0.12)';
+  // Draw subtle grid lines
+  ctx.strokeStyle = 'rgba(90, 122, 154, 0.08)';
   ctx.lineWidth = 1;
   
   const gridLines = 4;
-  for (let i = 0; i <= gridLines; i++) {
-    const y = padding.top + (plotHeight / gridLines) * i;
+  for (let i = 1; i < gridLines; i++) {
+    const y = Math.round(padding.top + (plotHeight / gridLines) * i) + 0.5;
     ctx.beginPath();
     ctx.moveTo(padding.left, y);
     ctx.lineTo(width - padding.right, y);
@@ -1377,7 +1472,7 @@ const renderMiniChart = (chartId) => {
   }
   
   // Y-axis labels
-  ctx.fillStyle = 'rgba(122, 154, 184, 0.5)';
+  ctx.fillStyle = 'rgba(140, 165, 190, 0.6)';
   ctx.font = '500 9px "JetBrains Mono", monospace';
   ctx.textAlign = 'right';
   ctx.textBaseline = 'middle';
@@ -1386,22 +1481,21 @@ const renderMiniChart = (chartId) => {
     const ratio = 1 - (i / gridLines);
     const val = yMin + yRange * ratio;
     const y = padding.top + (plotHeight / gridLines) * i;
-    ctx.fillText(formatAxisVal(val), padding.left - 6, y);
+    ctx.fillText(formatAxisVal(val), padding.left - 8, y);
   }
   
   // X-axis time labels
-  ctx.fillStyle = 'rgba(122, 154, 184, 0.45)';
-  ctx.font = '500 8px "JetBrains Mono", monospace';
-  ctx.textAlign = 'center';
+  ctx.fillStyle = 'rgba(140, 165, 190, 0.5)';
+  ctx.font = '500 9px "JetBrains Mono", monospace';
   ctx.textBaseline = 'top';
   
   if (timestamps.length > 0) {
     const firstTime = new Date(timestamps[0]).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
     const lastTime = new Date(timestamps[timestamps.length - 1]).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
     ctx.textAlign = 'left';
-    ctx.fillText(firstTime, padding.left, height - padding.bottom + 5);
+    ctx.fillText(firstTime, padding.left, height - padding.bottom + 6);
     ctx.textAlign = 'right';
-    ctx.fillText(lastTime, width - padding.right, height - padding.bottom + 5);
+    ctx.fillText(lastTime, width - padding.right, height - padding.bottom + 6);
   }
   
   // Draw area fill
@@ -1416,23 +1510,75 @@ const renderMiniChart = (chartId) => {
   // Area gradient fill with smooth curve
   ctx.save();
   const gradient = ctx.createLinearGradient(0, padding.top, 0, height - padding.bottom);
-  gradient.addColorStop(0, withAlpha(color, 0.3));
-  gradient.addColorStop(0.6, withAlpha(color, 0.1));
-  gradient.addColorStop(1, withAlpha(color, 0.02));
+  gradient.addColorStop(0, withAlpha(color, 0.2));
+  gradient.addColorStop(0.5, withAlpha(color, 0.08));
+  gradient.addColorStop(1, 'transparent');
   ctx.fillStyle = gradient;
   
   drawSmoothCurve(ctx, points, true, height - padding.bottom);
   ctx.fill();
   ctx.restore();
   
-  // Main line with smooth curve
+  // Clean main line (no glow)
   ctx.save();
   ctx.strokeStyle = color;
-  ctx.lineWidth = 1.5;
+  ctx.lineWidth = 2;
   ctx.lineJoin = 'round';
   ctx.lineCap = 'round';
   drawSmoothCurve(ctx, points, false);
   ctx.stroke();
+  ctx.restore();
+  
+  // Store data for hover functionality
+  miniChartData[chartId] = {
+    values,
+    timestamps,
+    points,
+    padding,
+    width,
+    height,
+    color,
+    formatVal,
+    yMin,
+    yRange,
+    plotHeight
+  };
+  
+  // Draw hover overlay if this chart is being hovered
+  if (activeHoverChart === chartId && hoverIndex >= 0 && hoverIndex < points.length) {
+    drawHoverOverlay(ctx, chartId, hoverIndex);
+  }
+};
+
+// Draw hover overlay (vertical line + dot + crosshair)
+const drawHoverOverlay = (ctx, chartId, index) => {
+  const data = miniChartData[chartId];
+  if (!data || !data.points[index]) return;
+  
+  const point = data.points[index];
+  const { padding, height, color } = data;
+  
+  // Vertical line
+  ctx.save();
+  ctx.strokeStyle = 'rgba(140, 165, 190, 0.3)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath();
+  ctx.moveTo(point.x, padding.top);
+  ctx.lineTo(point.x, height - padding.bottom);
+  ctx.stroke();
+  ctx.restore();
+  
+  // Highlight dot
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(point.x, point.y, 5, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(15, 23, 35, 0.8)';
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(point.x, point.y, 4, 0, Math.PI * 2);
+  ctx.fillStyle = color;
+  ctx.fill();
   ctx.restore();
 };
 
@@ -1441,6 +1587,95 @@ const renderAllMiniCharts = () => {
     renderMiniChart(chartId);
   });
 };
+
+// Mini chart hover handlers
+const handleMiniChartHover = (chartId, e) => {
+  const canvas = miniChartCanvases[chartId];
+  const data = miniChartData[chartId];
+  if (!canvas || !data || !data.points.length) return;
+  
+  const rect = canvas.getBoundingClientRect();
+  const mouseX = e.clientX - rect.left;
+  
+  // Find closest point
+  let closestIndex = 0;
+  let closestDist = Infinity;
+  
+  data.points.forEach((point, i) => {
+    const dist = Math.abs(point.x - mouseX);
+    if (dist < closestDist) {
+      closestDist = dist;
+      closestIndex = i;
+    }
+  });
+  
+  // Only update if index changed
+  if (activeHoverChart !== chartId || hoverIndex !== closestIndex) {
+    activeHoverChart = chartId;
+    hoverIndex = closestIndex;
+    renderMiniChart(chartId);
+    
+    // Update tooltip
+    const point = data.points[closestIndex];
+    const value = data.values[closestIndex];
+    const timestamp = data.timestamps[closestIndex];
+    const time = new Date(timestamp).toLocaleTimeString('de-DE', { 
+      hour: '2-digit', 
+      minute: '2-digit',
+      second: '2-digit'
+    });
+    const date = new Date(timestamp).toLocaleDateString('de-DE', {
+      day: '2-digit',
+      month: '2-digit'
+    });
+    
+    miniChartTooltip.innerHTML = `
+      <div style="color: ${data.color}; font-weight: 600; font-size: 13px; margin-bottom: 4px;">
+        ${data.formatVal(value)}
+      </div>
+      <div style="color: rgba(140, 165, 190, 0.8); font-size: 10px;">
+        ${date} · ${time}
+      </div>
+    `;
+    miniChartTooltip.style.display = 'block';
+    
+    // Position tooltip
+    const tooltipRect = miniChartTooltip.getBoundingClientRect();
+    let tooltipX = e.clientX + 15;
+    let tooltipY = e.clientY - tooltipRect.height / 2;
+    
+    // Keep tooltip in viewport
+    if (tooltipX + tooltipRect.width > window.innerWidth - 10) {
+      tooltipX = e.clientX - tooltipRect.width - 15;
+    }
+    if (tooltipY < 10) tooltipY = 10;
+    if (tooltipY + tooltipRect.height > window.innerHeight - 10) {
+      tooltipY = window.innerHeight - tooltipRect.height - 10;
+    }
+    
+    miniChartTooltip.style.left = tooltipX + 'px';
+    miniChartTooltip.style.top = tooltipY + 'px';
+  }
+};
+
+const handleMiniChartLeave = (chartId) => {
+  if (activeHoverChart === chartId) {
+    activeHoverChart = null;
+    hoverIndex = -1;
+    miniChartTooltip.style.display = 'none';
+    renderMiniChart(chartId);
+  }
+};
+
+// Attach hover listeners to mini charts
+Object.keys(miniChartCanvases).forEach((chartId) => {
+  const canvas = miniChartCanvases[chartId];
+  if (canvas) {
+    canvas.addEventListener('mousemove', (e) => handleMiniChartHover(chartId, e));
+    canvas.addEventListener('mouseleave', () => handleMiniChartLeave(chartId));
+    canvas.style.cursor = 'crosshair';
+  }
+});
 
 // ============================================
 // MAIN CHART RENDERING (kept for compatibility)
@@ -2673,6 +2908,55 @@ const statusClass = (status) => {
   }
 };
 
+const healthClass = (state) => {
+  switch (state) {
+    case 'healthy':
+      return 'status-pill status-active';
+    case 'degraded':
+      return 'status-pill status-degraded';
+    case 'stale':
+      return 'status-pill status-standby';
+    default:
+      return 'status-pill status-unknown';
+  }
+};
+
+const formatHeartbeatMetric = (seconds) => {
+  if (typeof seconds !== 'number' || Number.isNaN(seconds)) {
+    return '–';
+  }
+  if (seconds < 1) {
+    return '<1s';
+  }
+  if (seconds < 60) {
+    return `${Math.round(seconds)}s`;
+  }
+  const minutes = seconds / 60;
+  if (minutes < 60) {
+    return `${Math.round(minutes)}m`;
+  }
+  const hours = minutes / 60;
+  if (hours < 24) {
+    return `${Math.round(hours)}h`;
+  }
+  const days = hours / 24;
+  return `${Math.round(days)}d`;
+};
+
+const formatLatencyMetric = (value) => {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value.toFixed(0);
+  }
+  return '–';
+};
+
+const formatErrorRateMetric = (value) => {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value.toFixed(1);
+  }
+  return '–';
+};
+
 const renderTags = (tags) => {
   if (!tags || tags.length === 0) {
     return '<span class="tag">none</span>';
@@ -2827,13 +3111,13 @@ function renderServicesTable() {
       const note = svc.note ?? '–';
       const tags = renderTags(svc.tags ?? []);
       return `
-        <tr>
+        <tr class="service-row" data-service-id="${svc.id}">
           <td class="service-id">${svc.id}</td>
           <td class="service-name">${svc.name ?? svc.id}</td>
           <td class="status-cell"><span class="${statusClass(status)}" title="${status}">${status}</span></td>
           <td class="tags-cell"><div class="tag-list">${tags}</div></td>
           <td class="note-cell">${note}</td>
-          <td>${renderRowActions(svc)}</td>
+          <td class="actions-cell" onclick="event.stopPropagation()">${renderRowActions(svc)}</td>
         </tr>
       `;
     })
@@ -2843,11 +3127,123 @@ function renderServicesTable() {
   if (newHtml !== lastServicesTableHtml) {
     svcBody.innerHTML = newHtml;
     lastServicesTableHtml = newHtml;
+    // Add click listeners for service detail modal
+    attachServiceRowListeners();
   }
   renderServiceIncidents();
 }
 
+// Service row click listeners for detail modal
+const attachServiceRowListeners = () => {
+  const rows = document.querySelectorAll('.service-row[data-service-id]');
+  rows.forEach((row) => {
+    row.addEventListener('click', () => {
+      const serviceId = row.dataset.serviceId;
+      const service = servicesCache.get(serviceId);
+      if (service) {
+        showServiceDetail(service);
+      }
+    });
+  });
+};
+
+// Show service detail modal
+const showServiceDetail = (svc) => {
+  if (!serviceModal || !serviceModalContent) return;
+  
+  const status = svc.status ?? 'unknown';
+  const diagnostics = svc.diagnostics || {};
+  const heartbeat = formatHeartbeatMetric(diagnostics.last_heartbeat_seconds);
+  const latencyP50 = formatLatencyMetric(diagnostics.latency_p50_ms);
+  const latencyP95 = formatLatencyMetric(diagnostics.latency_p95_ms);
+  const errorRate = formatErrorRateMetric(diagnostics.error_rate_pct);
+  const health = (diagnostics.state || status).toLowerCase();
+  const tags = (svc.tags ?? []).join(', ') || '–';
+  
+  if (serviceModalTitle) {
+    serviceModalTitle.textContent = svc.name ?? svc.id;
+  }
+  
+  serviceModalContent.innerHTML = `
+    <div class="detail-grid">
+      <div class="detail-item">
+        <span class="detail-label">Service ID</span>
+        <span class="detail-value mono">${svc.id}</span>
+      </div>
+      <div class="detail-item">
+        <span class="detail-label">Status</span>
+        <span class="detail-value"><span class="${statusClass(status)}">${status}</span></span>
+      </div>
+      <div class="detail-item">
+        <span class="detail-label">Health</span>
+        <span class="detail-value"><span class="${healthClass(health)}">${health}</span></span>
+      </div>
+      <div class="detail-item">
+        <span class="detail-label">Tags</span>
+        <span class="detail-value">${tags}</span>
+      </div>
+    </div>
+    <div class="detail-section">
+      <h4>Metriken</h4>
+      <div class="metrics-grid">
+        <div class="metric-item">
+          <span class="metric-label">Last Heartbeat</span>
+          <span class="metric-value">${heartbeat}</span>
+        </div>
+        <div class="metric-item">
+          <span class="metric-label">Latenz P50</span>
+          <span class="metric-value">${latencyP50}</span>
+        </div>
+        <div class="metric-item">
+          <span class="metric-label">Latenz P95</span>
+          <span class="metric-value">${latencyP95}</span>
+        </div>
+        <div class="metric-item">
+          <span class="metric-label">Error Rate</span>
+          <span class="metric-value">${errorRate}</span>
+        </div>
+      </div>
+    </div>
+    <div class="detail-section">
+      <h4>Hinweis</h4>
+      <p class="detail-note">${svc.note ?? '–'}</p>
+    </div>
+  `;
+  
+  serviceModal.dataset.visible = 'true';
+};
+
+// Close service modal
+const closeServiceModal = () => {
+  if (serviceModal) {
+    serviceModal.dataset.visible = 'false';
+  }
+};
+
+// Service modal event listeners
+if (serviceModalClose) {
+  serviceModalClose.addEventListener('click', closeServiceModal);
+}
+if (serviceModal) {
+  serviceModal.addEventListener('click', (e) => {
+    if (e.target === serviceModal) {
+      closeServiceModal();
+    }
+  });
+}
+
+// Cache for detecting actual data changes
+let lastServicesJson = '';
+
 const updateServices = (payload) => {
+  // Check if data actually changed
+  const newJson = JSON.stringify(payload?.services || []);
+  if (newJson === lastServicesJson) {
+    // Data unchanged, skip re-render
+    return;
+  }
+  lastServicesJson = newJson;
+  
   servicesCache = new Map();
   if (payload?.services && Array.isArray(payload.services)) {
     payload.services.forEach((svc) => {

@@ -31,6 +31,10 @@ pub mod errors {
     pub fn job_already_exists(id: impl fmt::Display) -> String {
         format!("job with id `{id}` already exists")
     }
+
+    pub fn job_not_found(id: impl fmt::Display) -> String {
+        format!("job `{id}` not found")
+    }
 }
 
 pub mod notes {
@@ -46,6 +50,14 @@ pub mod notes {
 
     pub fn job_stopped(id: impl fmt::Display) -> String {
         format!("job {id} stopped")
+    }
+
+    pub fn job_paused(id: impl fmt::Display) -> String {
+        format!("job {id} paused")
+    }
+
+    pub fn job_resumed(id: impl fmt::Display) -> String {
+        format!("job {id} resumed")
     }
 
     pub fn uptime(seconds: impl fmt::Display) -> String {
@@ -65,4 +77,9 @@ pub mod descriptions {
     pub const TELEMETRY_HEALTH_REFRESH: &str = "Refreshes telemetry uptime and scheduler note";
     pub const SERVICE_HEALTH_SCAN: &str = "Scans the service registry for fault states";
     pub const DB_DEFAULT_PING: &str = "Monitors the default database connection";
+    pub const TOKEN_LEASE_MONITOR: &str =
+        "Refreshes expiring module service tokens and audits the rotation";
+    pub const MODULE_HEARTBEAT_VERIFIER: &str =
+        "Verifies module ingress health endpoints when telemetry is stale";
+    pub const AUDIT_DRAIN: &str = "Persists recent audit events to the drain archive";
 }

@@ -2,4 +2,4 @@ mod service;
 mod types;
 
 pub use service::*;
-pub use types::{ScheduledJobSnapshot, ScheduledJobSpec, SchedulerError};
+pub use types::{JobControlOutcome, ScheduledJobSnapshot, ScheduledJobSpec, SchedulerError};

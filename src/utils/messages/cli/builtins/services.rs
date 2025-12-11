@@ -1,13 +1,6 @@
 pub mod module_guard {
     pub const AUTO_MANAGED_SUMMARY: &str =
-        "Modules are orchestrated by Fenrir – use 'modules services' plus 'modules start|stop|restart <name>' for lifecycle overrides.";
-
-    pub fn action_disabled_line(action: &str) -> String {
-        format!(
-            "'{} module' is disabled here – use 'modules {} <name>'.",
-            action, action
-        )
-    }
+        "Modules share the same runtime driver – 'start|stop|restart module <name>' is a verb-first alias for 'modules <verb> <name>'.";
 }
 
 pub mod list_command {
@@ -39,7 +32,15 @@ pub mod actions {
         format!("unknown resource: {value}")
     }
 
-    pub const ACTION_RESOURCE_HINT: &str = "valid: service | module";
+    pub const ACTION_RESOURCE_HINT: &str = "valid: service | module | job (restart only)";
+
+    pub fn missing_job_id() -> String {
+        "missing job id. Usage: restart job <id>".to_string()
+    }
+
+    pub fn job_action_unsupported(action: &str) -> String {
+        format!("'{action} job' is not supported.")
+    }
 }
 
 pub mod metadata {
@@ -49,8 +50,7 @@ pub mod metadata {
 
     pub const START_DESCRIPTION: &str = "Start services or modules";
     pub const START_SYNOPSIS: &str = "start <service|module> <target>";
-    pub const START_USAGE: &str =
-        "Usage: start service <id|--all>  (modules: use 'modules start <name>')";
+    pub const START_USAGE: &str = "Usage: start service <id|--all>  | start module <name>";
     pub const START_DETAILS: &[&str] = &[
         "start service <id|--all> – start a controllable service",
         AUTO_MANAGED_SUMMARY,
@@ -58,8 +58,7 @@ pub mod metadata {
 
     pub const STOP_DESCRIPTION: &str = "Stop services or modules";
     pub const STOP_SYNOPSIS: &str = "stop <service|module> <target> [--force]";
-    pub const STOP_USAGE: &str =
-        "Usage: stop service <id|--all> [--force]  (modules: use 'modules stop <name>')";
+    pub const STOP_USAGE: &str = "Usage: stop service <id|--all> [--force]  | stop module <name>";
     pub const STOP_DETAILS: &[&str] = &[
         "stop service <id|--all> [--force] – stop a service",
         AUTO_MANAGED_SUMMARY,
@@ -68,11 +67,22 @@ pub mod metadata {
     pub const RESTART_DESCRIPTION: &str = "Restart services or modules";
     pub const RESTART_SYNOPSIS: &str = "restart <service|module> <target> [--force]";
     pub const RESTART_USAGE: &str =
-        "Usage: restart service <id|--all> [--force]  (modules: use 'modules restart <name>')";
+        "Usage: restart service <id|--all> [--force]  | restart module <name>";
     pub const RESTART_DETAILS: &[&str] = &[
         "restart service <id|--all> [--force] – restart services",
         AUTO_MANAGED_SUMMARY,
     ];
+
+    pub const PAUSE_DESCRIPTION: &str = "Pause scheduler jobs";
+    pub const PAUSE_SYNOPSIS: &str = "pause job <id>";
+    pub const PAUSE_USAGE: &str = "Usage: pause job <job-id>";
+    pub const PAUSE_DETAILS: &[&str] = &["pause job <id> – stops a scheduler job until resumed."];
+
+    pub const RESUME_DESCRIPTION: &str = "Resume paused scheduler jobs";
+    pub const RESUME_SYNOPSIS: &str = "resume job <id>";
+    pub const RESUME_USAGE: &str = "Usage: resume job <job-id>";
+    pub const RESUME_DETAILS: &[&str] =
+        &["resume job <id> – re-enables a previously paused scheduler job."];
 }
 
 pub mod control {
@@ -159,4 +169,9 @@ pub mod list {
     pub const EMPTY_VALUE: &str = "-";
     pub const STATUS_ACTIVE: &str = "active";
     pub const STATUS_INACTIVE: &str = "inactive";
+    pub const STATUS_PAUSED: &str = "paused";
+    pub const HEALTH_HEALTHY: &str = "healthy";
+    pub const HEALTH_DEGRADED: &str = "degraded";
+    pub const HEALTH_STALE: &str = "stale";
+    pub const HEALTH_UNKNOWN: &str = "unknown";
 }

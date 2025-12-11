@@ -77,8 +77,8 @@ cleanup_interval_seconds = 300
 
 [security.service_tokens]
 lifetime_seconds = 900
-idle_timeout_seconds = 300
-cleanup_interval_seconds = 60
+idle_timeout_seconds = 850
+cleanup_interval_seconds = 50
 
 [db]
 default_engine = "postgres"

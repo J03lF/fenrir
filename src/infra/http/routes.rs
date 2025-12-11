@@ -2,14 +2,15 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use axum::body::Body;
 use axum::extract::{OriginalUri, Path as AxumPath, Query, State};
 use axum::http::{
     header::{HeaderName as AxumHeaderName, AUTHORIZATION, HOST},
-    HeaderMap, HeaderValue, Method, StatusCode, Uri,
+    HeaderMap, HeaderValue, Method, Request, StatusCode, Uri,
 };
+use axum::middleware::{self, Next};
 use axum::response::{
     sse::{Event, KeepAlive, Sse},
     Html, IntoResponse, Response,
@@ -44,13 +45,15 @@ use crate::security::auth::{AuthError, ControlPlaneAuthorizer, Role};
 use crate::security::identity::{IdentityProvider, IssueTokenRequest};
 use crate::security::manager::SecurityError;
 use crate::security::service::ServiceScope;
-use crate::security::service_tokens::{DelegatedActor, DelegatedTokenClaims, ServiceTokenError};
+use crate::security::service_tokens::{
+    DelegatedActor, DelegatedToken, DelegatedTokenClaims, ServiceTokenError,
+};
 use crate::services::scheduler::ScheduledJobSnapshot;
 use crate::services::{
     module::{ModuleIngressError, ModuleIngressTarget},
     AppServices, ServiceActionKind, ServiceControlError, ServiceIngressAccess,
-    ServiceIngressMetadata, ServiceIngressProtocol, ServiceRateLimit, ServiceRegistry,
-    ServiceSecurityMetadata, ServiceSnapshot,
+    ServiceIngressMetadata, ServiceIngressProtocol, ServiceMetricSnapshot, ServiceRateLimit,
+    ServiceRegistry, ServiceSecurityMetadata, ServiceSnapshot, ServiceStatus, TokenExchangeError,
 };
 use crate::utils::messages::infra::http::{self as http_messages, ProblemText};
 use crate::utils::{
@@ -59,10 +62,13 @@ use crate::utils::{
 use fenrir_module_kit::{ModuleTokenExchangeRequest, ModuleTokenExchangeResponse};
 
 use super::gateway::{HTTP_GATEWAY_CLIENT, SERVICE_RATE_LIMITER};
+use super::server::HTTP_SERVICE_ID;
 use super::state::{HttpInfo, HttpState};
 
 const SERVICE_RESOURCE_STALE_AFTER_SECS: i64 = 60;
+const SERVICE_HEALTH_STALE_AFTER_SECS: u64 = 180;
 const ALLOWED_MODULE_TOKEN_SCOPES: &[&str] = &["db:write"];
+const MODULE_SERVICE_TOKEN_EXCHANGE_ACTION: &str = "module::service-token-exchange";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GatewayRequestKind {
@@ -105,6 +111,8 @@ struct ServiceStateEvent {
     security: Option<ServiceSecurityView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     ingress: Option<ServiceIngressView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostics: Option<ServiceHealthView>,
 }
 
 #[derive(Clone, Serialize)]
@@ -122,6 +130,8 @@ struct ServiceSummary {
     security: Option<ServiceSecurityView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     ingress: Option<ServiceIngressView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostics: Option<ServiceHealthView>,
 }
 
 #[derive(Clone, Serialize)]
@@ -150,6 +160,15 @@ struct ServiceIngressRateLimitView {
     mode: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     limit_per_second: Option<u32>,
+}
+
+#[derive(Clone, Serialize)]
+struct ServiceHealthView {
+    state: &'static str,
+    last_heartbeat_seconds: Option<u64>,
+    latency_p50_ms: Option<f64>,
+    latency_p95_ms: Option<f64>,
+    error_rate_pct: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -307,6 +326,7 @@ struct SchedulerJobSummary {
     interval_seconds: u64,
     description: String,
     active: bool,
+    paused: bool,
 }
 
 #[derive(Deserialize)]
@@ -501,7 +521,10 @@ impl IntoResponse for ServiceActionProblem {
     }
 }
 
-fn snapshot_to_summary(svc: ServiceSnapshot) -> ServiceSummary {
+fn snapshot_to_summary(
+    svc: ServiceSnapshot,
+    metrics: Option<ServiceMetricSnapshot>,
+) -> ServiceSummary {
     ServiceSummary {
         id: svc.descriptor.id.clone(),
         name: svc.descriptor.name.clone(),
@@ -514,6 +537,7 @@ fn snapshot_to_summary(svc: ServiceSnapshot) -> ServiceSummary {
         tags: svc.descriptor.tags.iter().map(|tag| tag.as_str()).collect(),
         security: svc.descriptor.security.as_ref().map(security_view),
         ingress: svc.descriptor.ingress.as_ref().map(ingress_view),
+        diagnostics: service_health_view(svc.status, metrics),
     }
 }
 
@@ -521,7 +545,48 @@ fn is_module_placeholder(id: &str) -> bool {
     id.starts_with("module:") && !id.contains("::")
 }
 
-fn snapshot_to_state_event(snapshot: ServiceSnapshot) -> ServiceStateEvent {
+fn service_health_view(
+    status: ServiceStatus,
+    metrics: Option<ServiceMetricSnapshot>,
+) -> Option<ServiceHealthView> {
+    metrics.map(|snapshot| ServiceHealthView {
+        state: health_state_label(status, Some(snapshot)),
+        last_heartbeat_seconds: snapshot
+            .last_heartbeat_elapsed()
+            .map(|duration| duration.as_secs()),
+        latency_p50_ms: snapshot.latency_p50_ms,
+        latency_p95_ms: snapshot.latency_p95_ms,
+        error_rate_pct: snapshot.error_rate_pct,
+    })
+}
+
+fn health_state_label(
+    status: ServiceStatus,
+    metrics: Option<ServiceMetricSnapshot>,
+) -> &'static str {
+    if let Some(snapshot) = metrics {
+        if let Some(last) = snapshot.last_heartbeat_elapsed() {
+            if last.as_secs() >= SERVICE_HEALTH_STALE_AFTER_SECS {
+                return "stale";
+            }
+        }
+        if let Some(err) = snapshot.error_rate_pct {
+            if err >= 5.0 {
+                return "degraded";
+            }
+        }
+        return "healthy";
+    }
+    match status {
+        ServiceStatus::Failed | ServiceStatus::Degraded => "degraded",
+        _ => "unknown",
+    }
+}
+
+fn snapshot_to_state_event(
+    snapshot: ServiceSnapshot,
+    metrics: Option<ServiceMetricSnapshot>,
+) -> ServiceStateEvent {
     ServiceStateEvent {
         id: snapshot.descriptor.id.clone(),
         name: snapshot.descriptor.name.clone(),
@@ -542,6 +607,7 @@ fn snapshot_to_state_event(snapshot: ServiceSnapshot) -> ServiceStateEvent {
             .collect(),
         security: snapshot.descriptor.security.as_ref().map(security_view),
         ingress: snapshot.descriptor.ingress.as_ref().map(ingress_view),
+        diagnostics: service_health_view(snapshot.status, metrics),
     }
 }
 
@@ -724,6 +790,9 @@ fn module_runtime_problem(err: ModuleRuntimeError) -> ServiceActionProblem {
         ModuleRuntimeError::InvalidState(_) => (StatusCode::CONFLICT, "module_invalid_state"),
         ModuleRuntimeError::Io(_) => (StatusCode::INTERNAL_SERVER_ERROR, "module_runtime_io"),
         ModuleRuntimeError::Quarantined { .. } => (StatusCode::CONFLICT, "module_quarantined"),
+        ModuleRuntimeError::EnvUnavailable { .. } => {
+            (StatusCode::CONFLICT, "module_env_unavailable")
+        }
     };
     ServiceActionProblem::new(status, code, err.to_string())
 }
@@ -788,6 +857,82 @@ fn token_expires_in_seconds(claims: &DelegatedTokenClaims) -> u64 {
         return 0;
     }
     (claims.expires_at - now).whole_seconds().max(0) as u64
+}
+
+fn audit_module_token_exchange(
+    services: &AppServices,
+    module_id: &ModuleId,
+    requested_scopes: &[String],
+    granted_scopes: Option<&[ServiceScope]>,
+    reason: Option<&str>,
+    expires_in_seconds: u64,
+    outcome: AuditOutcome,
+    error: Option<&str>,
+) {
+    let mut metadata = AuditMetadata::default()
+        .insert("transport", "control-plane")
+        .insert("endpoint", "/modules/runtime/tokens")
+        .insert(
+            "requested_scopes",
+            format_requested_scope_list(requested_scopes),
+        )
+        .insert(
+            "granted_scopes",
+            granted_scopes
+                .map(format_granted_scope_list)
+                .unwrap_or_else(|| "-".to_string()),
+        )
+        .insert("expires_in_seconds", expires_in_seconds.to_string());
+    if let Some(reason) = reason {
+        metadata = metadata.insert("reason", reason);
+    }
+    if let Some(err_msg) = error {
+        metadata = metadata.insert("error", err_msg);
+    }
+    let event = AuditEvent::builder()
+        .actor(AuditActor::System)
+        .action(MODULE_SERVICE_TOKEN_EXCHANGE_ACTION)
+        .target(format!("module:{}", module_id.as_str()))
+        .outcome(outcome)
+        .metadata(metadata)
+        .build();
+    match event {
+        Ok(event) => {
+            if let Err(err) = services.record_audit(event) {
+                warn!(
+                    error = %err,
+                    "module token exchange audit append failed"
+                );
+            }
+        }
+        Err(err) => warn!(
+            error = %err,
+            "module token exchange audit build failed"
+        ),
+    }
+}
+
+fn format_requested_scope_list(scopes: &[String]) -> String {
+    if scopes.is_empty() {
+        return "-".to_string();
+    }
+    scopes
+        .iter()
+        .map(|scope| scope.trim())
+        .filter(|scope| !scope.is_empty())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn format_granted_scope_list(scopes: &[ServiceScope]) -> String {
+    if scopes.is_empty() {
+        return "-".to_string();
+    }
+    scopes
+        .iter()
+        .map(|scope| scope.as_str())
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn decode_service_id(value: &str) -> Result<String, ServiceActionProblem> {
@@ -1190,8 +1335,15 @@ async fn issue_module_service_token(
     headers: HeaderMap,
     Json(payload): Json<ModuleTokenExchangeRequest>,
 ) -> Response {
-    let Some(module_service) = state.services.module_service() else {
+    let Some(_module_service) = state.services.module_service() else {
         return module_service_unavailable().into_response();
+    };
+    let Some(token_exchange) = state.services.token_exchange_service() else {
+        return http_problem(
+            StatusCode::SERVICE_UNAVAILABLE,
+            http_messages::problems::token_exchange_unavailable(),
+        )
+        .into_response();
     };
     let Some(security) = state.services.security_manager() else {
         return http_problem(
@@ -1212,43 +1364,115 @@ async fn issue_module_service_token(
         Ok(id) => id,
         Err(problem) => return problem.into_response(),
     };
-    let scopes = match parse_requested_scopes(&payload.scopes) {
+    let ModuleTokenExchangeRequest {
+        scopes: requested_scopes,
+        reason: request_reason,
+    } = payload;
+
+    let scopes = match parse_requested_scopes(&requested_scopes) {
         Ok(scopes) => scopes,
         Err(problem) => return problem.into_response(),
     };
     let issued = if scopes.is_empty() {
-        match module_service.issue_default_service_token(&module_id) {
+        match token_exchange.issue_default_token(&module_id).await {
             Ok(token) => token,
-            Err(err) => {
+            Err(TokenExchangeError::RateLimited) => {
+                audit_module_token_exchange(
+                    &state.services,
+                    &module_id,
+                    &requested_scopes,
+                    None,
+                    request_reason.as_deref(),
+                    0,
+                    AuditOutcome::Failure,
+                    Some("rate_limited"),
+                );
+                return http_problem(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    http_messages::problems::token_exchange_rate_limited(),
+                )
+                .into_response();
+            }
+            Err(TokenExchangeError::Module(err)) => {
+                let err_text = err.to_string();
+                audit_module_token_exchange(
+                    &state.services,
+                    &module_id,
+                    &requested_scopes,
+                    None,
+                    request_reason.as_deref(),
+                    0,
+                    AuditOutcome::Failure,
+                    Some(err_text.as_str()),
+                );
                 return http_problem(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     http_messages::problems::module_token_issue_failed(&err),
                 )
-                .into_response()
+                .into_response();
             }
         }
     } else {
-        match module_service.issue_scoped_service_token(&module_id, scopes) {
+        match token_exchange.issue_scoped_token(&module_id, scopes).await {
             Ok(token) => token,
-            Err(err) => {
+            Err(TokenExchangeError::RateLimited) => {
+                audit_module_token_exchange(
+                    &state.services,
+                    &module_id,
+                    &requested_scopes,
+                    None,
+                    request_reason.as_deref(),
+                    0,
+                    AuditOutcome::Failure,
+                    Some("rate_limited"),
+                );
+                return http_problem(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    http_messages::problems::token_exchange_rate_limited(),
+                )
+                .into_response();
+            }
+            Err(TokenExchangeError::Module(err)) => {
+                let err_text = err.to_string();
+                audit_module_token_exchange(
+                    &state.services,
+                    &module_id,
+                    &requested_scopes,
+                    None,
+                    request_reason.as_deref(),
+                    0,
+                    AuditOutcome::Failure,
+                    Some(err_text.as_str()),
+                );
                 return http_problem(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     http_messages::problems::module_token_issue_failed(&err),
                 )
-                .into_response()
+                .into_response();
             }
         }
     };
+    let DelegatedToken { token, claims } = issued;
+    let expires_in_seconds = token_expires_in_seconds(&claims);
     let response = ModuleTokenExchangeResponse {
-        token: issued.token,
-        scopes: issued
-            .claims
+        token,
+        scopes: claims
             .scopes
             .iter()
             .map(|scope| scope.as_str().to_string())
             .collect(),
-        expires_in_seconds: token_expires_in_seconds(&issued.claims),
+        expires_in_seconds,
     };
+    audit_module_token_exchange(
+        &state.services,
+        &module_id,
+        &requested_scopes,
+        Some(&claims.scopes),
+        request_reason.as_deref(),
+        expires_in_seconds,
+        AuditOutcome::Success,
+        None,
+    );
     (StatusCode::OK, Json(response)).into_response()
 }
 
@@ -1663,6 +1887,7 @@ async fn gateway_proxy(
 }
 
 pub(super) fn build_router(state: HttpState) -> Router {
+    let middleware_state = state.clone();
     Router::new()
         .route("/", get(index))
         .route("/static/*path", get(serve_static))
@@ -1707,6 +1932,10 @@ pub(super) fn build_router(state: HttpState) -> Router {
             "/gateway/grpc/:service_id/*path",
             any(proxy_module_service_grpc),
         )
+        .layer(middleware::from_fn_with_state(
+            middleware_state,
+            http_metrics_middleware,
+        ))
         .with_state(state)
 }
 
@@ -1731,6 +1960,22 @@ pub fn router_with_dependencies(
         },
     };
     build_router(state)
+}
+
+async fn http_metrics_middleware(
+    State(state): State<HttpState>,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
+    let started_at = Instant::now();
+    let response = next.run(req).await;
+    let success = !response.status().is_server_error();
+    let latency_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+    state
+        .services
+        .diagnostics()
+        .record_probe(HTTP_SERVICE_ID, latency_ms, success);
+    response
 }
 
 pub fn admin_console_html() -> &'static str {
@@ -1821,12 +2066,16 @@ async fn list_services(State(state): State<HttpState>, headers: HeaderMap) -> Re
     if let Some(response) = ensure_viewer_access(&state, &headers) {
         return response;
     }
+    let diagnostics = state.services.service_diagnostics_snapshot();
     let mut services: Vec<ServiceSummary> = state
         .registry
         .snapshot()
         .into_iter()
         .filter(|snapshot| !is_module_placeholder(&snapshot.descriptor.id))
-        .map(snapshot_to_summary)
+        .map(|snapshot| {
+            let metrics = diagnostics.get(&snapshot.descriptor.id).copied();
+            snapshot_to_summary(snapshot, metrics)
+        })
         .collect();
     services.sort_by(|a, b| a.id.cmp(&b.id));
     (StatusCode::OK, Json(ServicesResponse { services })).into_response()
@@ -1847,6 +2096,7 @@ async fn list_scheduler_jobs(State(state): State<HttpState>, headers: HeaderMap)
             interval_seconds: job.interval.as_secs(),
             description: job.description,
             active: job.active,
+            paused: job.paused,
         })
         .collect();
 
@@ -1936,18 +2186,23 @@ async fn audit_events_stream(
     });
 
     let service_receiver = state.registry.subscribe();
-    let service_stream = BroadcastStream::new(service_receiver).filter_map(|result| match result {
-        Ok(snapshot) => match serde_json::to_string(&snapshot_to_state_event(snapshot)) {
-            Ok(json) => Some(Ok::<Event, Infallible>(
-                Event::default().event("service-state").data(json),
-            )),
-            Err(err) => {
-                warn!(error = %err, "failed to encode service event for sse");
-                None
+    let services_handle = Arc::clone(&state.services);
+    let service_stream =
+        BroadcastStream::new(service_receiver).filter_map(move |result| match result {
+            Ok(snapshot) => {
+                let metrics = services_handle.service_diagnostics(&snapshot.descriptor.id);
+                match serde_json::to_string(&snapshot_to_state_event(snapshot, metrics)) {
+                    Ok(json) => Some(Ok::<Event, Infallible>(
+                        Event::default().event("service-state").data(json),
+                    )),
+                    Err(err) => {
+                        warn!(error = %err, "failed to encode service event for sse");
+                        None
+                    }
+                }
             }
-        },
-        Err(BroadcastStreamRecvError::Lagged(_)) => None,
-    });
+            Err(BroadcastStreamRecvError::Lagged(_)) => None,
+        });
 
     let stream = audit_stream.merge(service_stream);
 
@@ -2316,7 +2571,10 @@ async fn service_action(
 
     match outcome {
         Ok(control) => {
-            let snapshot = registry.get(&id).map(snapshot_to_summary);
+            let metrics = services.service_diagnostics(&id);
+            let snapshot = registry
+                .get(&id)
+                .map(|svc| snapshot_to_summary(svc, metrics));
             let mut metadata = base_metadata
                 .clone()
                 .insert("service_outcome", control.as_str());

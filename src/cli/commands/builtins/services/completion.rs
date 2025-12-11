@@ -1,3 +1,4 @@
+use crate::cli::commands::builtins::modules;
 use crate::cli::commands::registry::{CliDependencies, CompletionContext};
 
 const SERVICE_TARGET_GLOBAL_OPTIONS: &[&str] = &["--all", "-a", "all"];
@@ -19,7 +20,7 @@ pub(super) fn complete_action_targets(
         return Vec::new();
     };
 
-    if matches!(resource, "service" | "services") {
+    if resource == "service" {
         let mut suggestions: Vec<String> = SERVICE_TARGET_GLOBAL_OPTIONS
             .iter()
             .map(|value| (*value).to_string())
@@ -34,6 +35,10 @@ pub(super) fn complete_action_targets(
         return suggestions;
     }
 
+    if matches!(resource, "module" | "modules") {
+        return modules::complete_module_ids(deps, ctx);
+    }
+
     Vec::new()
 }
 
@@ -45,7 +50,7 @@ pub(super) fn complete_force_flags(
         return Vec::new();
     };
 
-    if matches!(resource, "service" | "services") {
+    if resource == "service" {
         return SERVICE_FORCE_OPTIONS
             .iter()
             .map(|value| (*value).to_string())

@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::env;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -54,6 +55,7 @@ struct RunningModuleState {
     started_at: SystemTime,
     restart_count: u32,
     log_file: PathBuf,
+    env: Option<Vec<(String, String)>>,
 }
 
 impl ProcessModuleRuntime {
@@ -177,6 +179,7 @@ impl ProcessModuleRuntime {
             started_at,
             restart_count: persisted.restart_count,
             log_file: PathBuf::from(&persisted.log_file),
+            env: None,
         };
 
         let key = module_id.to_string();
@@ -251,6 +254,12 @@ impl ProcessModuleRuntime {
             // On Windows, use different approach
             false
         }
+    }
+
+    fn sanitized_host_env() -> Vec<(String, String)> {
+        env::vars()
+            .filter(|(key, _)| !key.starts_with("FENRIR_"))
+            .collect()
     }
 
     /// Read port from module's config.toml if it exists
@@ -504,15 +513,19 @@ impl ModuleRuntimePort for ProcessModuleRuntime {
             })?
         };
 
+        let mut full_env = Self::sanitized_host_env();
+        full_env.extend(config.env_vars.into_iter());
+
         // Build command
         let mut cmd = Command::new(&binary_path);
         cmd.current_dir(&module_path)
             .stdout(Stdio::from(log_file_handle.try_clone().unwrap()))
             .stderr(Stdio::from(log_file_handle))
-            .stdin(Stdio::null());
+            .stdin(Stdio::null())
+            .env_clear();
 
         // Set environment variables
-        for (key, value) in config.env_vars {
+        for (key, value) in &full_env {
             cmd.env(key, value);
         }
 
@@ -550,6 +563,7 @@ impl ModuleRuntimePort for ProcessModuleRuntime {
             started_at,
             restart_count: 0,
             log_file: log_file.clone(),
+            env: Some(full_env.clone()),
         };
 
         {
@@ -740,6 +754,22 @@ impl ModuleRuntimePort for ProcessModuleRuntime {
         };
 
         Ok(result)
+    }
+
+    async fn env(&self, module_id: &ModuleId) -> Result<Vec<(String, String)>, ModuleRuntimeError> {
+        let modules = self.running_modules.read().await;
+        let module_id_str = module_id.to_string();
+        let state = modules
+            .get(&module_id_str)
+            .ok_or_else(|| ModuleRuntimeError::NotRunning {
+                module_id: module_id_str.clone(),
+            })?;
+        match &state.env {
+            Some(env) => Ok(env.clone()),
+            None => Err(ModuleRuntimeError::EnvUnavailable {
+                module_id: module_id_str,
+            }),
+        }
     }
 }
 

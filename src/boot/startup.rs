@@ -25,7 +25,8 @@ use crate::services::scheduler::install_default_jobs;
 use crate::services::{
     AppServices, DbShellService, ModuleClientSettings, ModuleHealthHttpClient, ModulePortAllocator,
     ModuleService, ModuleServiceInit, ModuleServiceOverrides, SchedulerService, ServiceDescriptor,
-    ServiceKind, ServiceRegistry, ServiceStatus, ServiceTag, SessionService,
+    ServiceDiagnostics, ServiceKind, ServiceRegistry, ServiceStatus, ServiceTag, SessionService,
+    TokenExchangeService,
 };
 use crate::utils::messages::boot::{
     errors as boot_errors, logs as boot_logs, runtime as runtime_messages,
@@ -148,6 +149,44 @@ pub fn boot() -> Result<BootContext, BootError> {
         }),
     );
 
+    registry.register(
+        ServiceDescriptor::new(
+            "token-exchange",
+            service_names::TOKEN_EXCHANGE,
+            service_descriptions::TOKEN_EXCHANGE,
+            ServiceKind::Security,
+        )
+        .with_tags(&[ServiceTag::Core]),
+        ServiceStatus::Standby,
+        Some(service_notes::INITIALIZATION.to_string()),
+    );
+
+    registry.register(
+        ServiceDescriptor::new(
+            "module-lifecycle",
+            service_names::MODULE_LIFECYCLE,
+            service_descriptions::MODULE_LIFECYCLE,
+            ServiceKind::Infrastructure,
+        )
+        .with_tags(&[ServiceTag::Platform]),
+        ServiceStatus::Standby,
+        Some(service_notes::INITIALIZATION.to_string()),
+    );
+
+    registry.register(
+        ServiceDescriptor::new(
+            "jobs-control",
+            service_names::JOBS_CONTROL,
+            service_descriptions::JOBS_CONTROL,
+            ServiceKind::BackgroundJob,
+        )
+        .with_tags(&[ServiceTag::Platform]),
+        ServiceStatus::Standby,
+        Some(service_notes::INITIALIZATION.to_string()),
+    );
+
+    let diagnostics = Arc::new(ServiceDiagnostics::new());
+
     telemetry::attach_service_registry(Arc::clone(&registry));
     telemetry::start_system_metrics_sampler(&cfg);
 
@@ -170,7 +209,12 @@ pub fn boot() -> Result<BootContext, BootError> {
         BootErrorCode::DbShellInit,
         boot_errors::DB_SHELL_INIT_FAILED,
     )?);
-    let scheduler_service = Arc::new(SchedulerService::new(Arc::clone(&registry)));
+    let scheduler_state_dir = runtime_dir.join("scheduler");
+    let scheduler_service = Arc::new(SchedulerService::new(
+        Arc::clone(&registry),
+        Arc::clone(&diagnostics),
+        scheduler_state_dir,
+    ));
     scheduler_service.start();
     info!("{}", boot_logs::SCHEDULER_STARTED);
 
@@ -226,6 +270,7 @@ pub fn boot() -> Result<BootContext, BootError> {
         Arc::clone(&scheduler_service),
         Arc::clone(&registry),
         Arc::clone(&audit_log),
+        Arc::clone(&diagnostics),
     ));
     services.set_logging_handle(logging_handle.clone());
     let audit_sink: Arc<dyn AuditSink> = Arc::clone(&services) as Arc<dyn AuditSink>;
@@ -412,6 +457,7 @@ pub fn boot() -> Result<BootContext, BootError> {
         default_service_scopes,
         control_plane_url,
         service_snapshot_path: Some(runtime_state_dir.join("services.json")),
+        diagnostics: services.diagnostics(),
     });
     services
         .attach_module_service(Arc::clone(&module_service))
@@ -419,6 +465,19 @@ pub fn boot() -> Result<BootContext, BootError> {
             BootError::new(
                 BootErrorCode::ModuleAttach,
                 boot_errors::MODULE_SERVICE_ATTACH_FAILED,
+                anyhow!(err),
+            )
+        })?;
+    let token_exchange_service = Arc::new(TokenExchangeService::new(
+        Arc::clone(&module_service),
+        Arc::clone(&diagnostics),
+    ));
+    services
+        .attach_token_exchange(Arc::clone(&token_exchange_service))
+        .map_err(|err| {
+            BootError::new(
+                BootErrorCode::ModuleAttach,
+                boot_errors::TOKEN_EXCHANGE_ATTACH_FAILED,
                 anyhow!(err),
             )
         })?;
@@ -434,6 +493,11 @@ pub fn boot() -> Result<BootContext, BootError> {
             &scheduler_service,
             Arc::clone(&registry),
             Arc::clone(&db_shell_service),
+            Arc::clone(&diagnostics),
+            Arc::clone(&module_service),
+            Arc::clone(&services),
+            runtime_dir.clone(),
+            Arc::clone(&token_exchange_service),
         ),
         BootErrorCode::SchedulerJobs,
         boot_errors::SCHEDULER_JOBS_INSTALL_FAILED,
@@ -460,20 +524,135 @@ pub fn boot() -> Result<BootContext, BootError> {
         );
     }
     {
+        let registry_for_token_start = Arc::clone(&registry);
+        let registry_for_token_stop = Arc::clone(&registry);
+        services.register_dynamic_service(
+            "token-exchange",
+            move || {
+                let registry = Arc::clone(&registry_for_token_start);
+                Box::pin(async move {
+                    registry.set_status(
+                        "token-exchange",
+                        ServiceStatus::Active,
+                        Some(service_notes::TOKEN_EXCHANGE_READY.to_string()),
+                    );
+                    Ok(true)
+                })
+            },
+            move |_force| {
+                let registry = Arc::clone(&registry_for_token_stop);
+                Box::pin(async move {
+                    registry.set_status(
+                        "token-exchange",
+                        ServiceStatus::Standby,
+                        Some(service_notes::INITIALIZATION.to_string()),
+                    );
+                    Ok(true)
+                })
+            },
+        );
+    }
+    {
+        let registry_for_lifecycle_start = Arc::clone(&registry);
+        let registry_for_lifecycle_stop = Arc::clone(&registry);
+        let module_service_for_lifecycle = Arc::clone(&module_service);
+        services.register_dynamic_service(
+            "module-lifecycle",
+            move || {
+                let registry = Arc::clone(&registry_for_lifecycle_start);
+                let module_service = Arc::clone(&module_service_for_lifecycle);
+                Box::pin(async move {
+                    module_service.ensure_all_running().await;
+                    registry.set_status(
+                        "module-lifecycle",
+                        ServiceStatus::Active,
+                        Some(service_notes::MODULE_LIFECYCLE_READY.to_string()),
+                    );
+                    Ok(true)
+                })
+            },
+            move |_force| {
+                let registry = Arc::clone(&registry_for_lifecycle_stop);
+                Box::pin(async move {
+                    registry.set_status(
+                        "module-lifecycle",
+                        ServiceStatus::Standby,
+                        Some(service_notes::INITIALIZATION.to_string()),
+                    );
+                    Ok(true)
+                })
+            },
+        );
+    }
+    {
+        let registry_for_jobs_control_start = Arc::clone(&registry);
+        let registry_for_jobs_control_stop = Arc::clone(&registry);
+        let scheduler_for_jobs_control = Arc::clone(&scheduler_service);
+        services.register_dynamic_service(
+            "jobs-control",
+            move || {
+                let registry = Arc::clone(&registry_for_jobs_control_start);
+                let scheduler = Arc::clone(&scheduler_for_jobs_control);
+                Box::pin(async move {
+                    if scheduler.is_running() {
+                        registry.set_status(
+                            "jobs-control",
+                            ServiceStatus::Active,
+                            Some(service_notes::JOBS_CONTROL_READY.to_string()),
+                        );
+                        Ok(true)
+                    } else {
+                        Ok(false)
+                    }
+                })
+            },
+            move |_force| {
+                let registry = Arc::clone(&registry_for_jobs_control_stop);
+                Box::pin(async move {
+                    registry.set_status(
+                        "jobs-control",
+                        ServiceStatus::Standby,
+                        Some(service_notes::INITIALIZATION.to_string()),
+                    );
+                    Ok(true)
+                })
+            },
+        );
+    }
+    {
         let scheduler_for_start = Arc::clone(&scheduler_service);
         let scheduler_for_stop = Arc::clone(&scheduler_service);
         let registry_for_jobs = Arc::clone(&registry);
+        let diagnostics_for_jobs = Arc::clone(&diagnostics);
         let db_shell_for_jobs = Arc::clone(&db_shell_service);
+        let module_service_for_jobs = Arc::clone(&module_service);
+        let services_for_jobs = Arc::clone(&services);
+        let runtime_dir_for_jobs = runtime_dir.clone();
+        let token_exchange_for_jobs = Arc::clone(&token_exchange_service);
         services.register_dynamic_service(
             "scheduler",
             move || {
                 let scheduler = Arc::clone(&scheduler_for_start);
                 let registry = Arc::clone(&registry_for_jobs);
                 let db_shell = Arc::clone(&db_shell_for_jobs);
+                let diagnostics = Arc::clone(&diagnostics_for_jobs);
+                let module_service = Arc::clone(&module_service_for_jobs);
+                let services_handle = Arc::clone(&services_for_jobs);
+                let runtime_dir = runtime_dir_for_jobs.clone();
+                let token_exchange = Arc::clone(&token_exchange_for_jobs);
                 Box::pin(async move {
                     if scheduler.start() {
-                        install_default_jobs(&scheduler, registry, db_shell)
-                            .map_err(|err| anyhow!(err))?;
+                        install_default_jobs(
+                            &scheduler,
+                            registry,
+                            db_shell,
+                            diagnostics,
+                            module_service,
+                            services_handle,
+                            runtime_dir,
+                            token_exchange,
+                        )
+                        .map_err(|err| anyhow!(err))?;
                         Ok(true)
                     } else {
                         Ok(false)

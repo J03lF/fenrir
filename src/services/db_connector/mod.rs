@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use once_cell::sync::Lazy;
 use serde_json::Value as JsonValue;
@@ -12,6 +13,7 @@ use crate::security::manager::{SecurityError, SecurityManager};
 use crate::security::service::{ServiceScope, ServiceScopeError};
 use crate::security::service_tokens::{DelegatedActor, DelegatedTokenClaims};
 use crate::services::db_shell::DbShellService;
+use crate::services::ServiceDiagnostics;
 use crate::utils::messages::services::db_connector::{
     errors as db_connector_errors, logs as db_connector_logs,
 };
@@ -68,15 +70,27 @@ impl DbConnectorEndpoint {
 pub struct DbConnectorService {
     db_shell: Arc<DbShellService>,
     security: Arc<SecurityManager>,
+    diagnostics: Arc<ServiceDiagnostics>,
 }
 
 impl DbConnectorService {
-    pub fn new(db_shell: Arc<DbShellService>, security: Arc<SecurityManager>) -> Self {
-        Self { db_shell, security }
+    pub fn new(
+        db_shell: Arc<DbShellService>,
+        security: Arc<SecurityManager>,
+        diagnostics: Arc<ServiceDiagnostics>,
+    ) -> Self {
+        Self {
+            db_shell,
+            security,
+            diagnostics,
+        }
     }
 
     pub async fn execute(&self, request: DbConnectorRequest) -> DbConnectorResponse {
-        match self.process(request).await {
+        let started_at = Instant::now();
+        let result = self.process(request).await;
+        let success = result.is_ok();
+        let response = match result {
             Ok(results) => {
                 info!(
                     tenant = results.tenant_id.as_str(),
@@ -89,7 +103,9 @@ impl DbConnectorService {
                 warn!(error = %err, "{}", db_connector_logs::REQUEST_FAILED);
                 DbConnectorResponse::err(err.to_string())
             }
-        }
+        };
+        self.record_metrics(started_at, success);
+        response
     }
 
     async fn process(
@@ -148,6 +164,13 @@ impl DbConnectorService {
             tenant_id: claims.tenant_id.clone(),
             payload,
         })
+    }
+
+    fn record_metrics(&self, started_at: Instant, success: bool) {
+        let latency_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+        self.diagnostics
+            .record_probe("db-connector", latency_ms, success);
+        self.diagnostics.record_heartbeat("db-connector");
     }
 
     fn claims_have_scope(&self, claims: &DelegatedTokenClaims, required: &str) -> bool {

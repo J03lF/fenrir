@@ -7,7 +7,7 @@ use std::io::Write;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use thrussh::server::{Auth, Handle as SessionHandle, Server, Session};
 use thrussh::{server, ChannelId, CryptoVec};
 use tokio::runtime::Handle as TokioHandle;
@@ -26,7 +26,7 @@ use crate::prompts::{self, PromptContext};
 use crate::security::auth::Role;
 use crate::security::identity::{IdentityError, IdentityUserProfile};
 use crate::services::db_shell::{DbShellSession, DESTRUCTIVE_FORCE_WARNING};
-use crate::services::{AppServices, ServiceStatus};
+use crate::services::{AppServices, ServiceDiagnostics, ServiceStatus};
 use crate::utils::messages::cli::shell::{
     outcome as cli_shell_outcome, runner as cli_shell_runner,
 };
@@ -67,6 +67,36 @@ struct Handler {
     db_executor: Option<Arc<RuntimeExecutor>>,
     cursor: usize,
     pending_confirmation: Option<ConfirmationRequest>,
+}
+
+struct ServiceProbe {
+    diagnostics: Arc<ServiceDiagnostics>,
+    service_id: &'static str,
+    started_at: Instant,
+    success: bool,
+}
+
+impl ServiceProbe {
+    fn new(services: &Arc<AppServices>, service_id: &'static str) -> Self {
+        Self {
+            diagnostics: services.diagnostics(),
+            service_id,
+            started_at: Instant::now(),
+            success: false,
+        }
+    }
+
+    fn mark_success(&mut self) {
+        self.success = true;
+    }
+}
+
+impl Drop for ServiceProbe {
+    fn drop(&mut self) {
+        let latency_ms = self.started_at.elapsed().as_secs_f64() * 1000.0;
+        self.diagnostics
+            .record_probe(self.service_id, latency_ms, self.success);
+    }
 }
 
 impl Handler {
@@ -329,15 +359,17 @@ impl Handler {
         self.buffer.clear();
         self.cursor = 0;
         self.history_index = None;
+        let mut ssh_probe = ServiceProbe::new(&self.services, "ssh-server");
 
         if cmd.is_empty() {
             Handler::send_prompt(session, channel, self.current_prompt());
+            ssh_probe.mark_success();
             return true;
         }
 
         self.record_history(&cmd);
         if matches!(self.mode, ShellMode::DbShell) {
-            return self.process_db_command(cmd, channel, session);
+            return self.process_db_command(cmd, channel, session, &mut ssh_probe);
         }
         let mut parts = cmd.split_whitespace();
         if let Some(name) = parts.next() {
@@ -345,11 +377,12 @@ impl Handler {
             let output = Arc::new(SshCommandOutput::new(session.handle(), channel));
             let deps = self.dependencies.with_output(output);
             let mut writer = SessionWriter::new(session, channel);
-            match self
-                .registry
-                .execute(name, &args, &deps, &mut writer, ShellEnvironment::Ssh)
-            {
+            let result =
+                self.registry
+                    .execute(name, &args, &deps, &mut writer, ShellEnvironment::Ssh);
+            match result {
                 Ok(CommandStatus::Executed(outcome)) => {
+                    ssh_probe.mark_success();
                     self.handle_command_outcome(outcome, channel, session)
                 }
                 Ok(CommandStatus::NotFound) => {
@@ -379,11 +412,15 @@ impl Handler {
         command: String,
         channel: ChannelId,
         session: &mut Session,
+        ssh_probe: &mut ServiceProbe,
     ) -> bool {
         let mut writer = SessionWriter::new(session, channel);
         let trimmed = command.trim();
+        let mut db_probe = ServiceProbe::new(&self.services, "db-shell");
         if trimmed.is_empty() {
             Handler::send_prompt(session, channel, self.current_prompt());
+            db_probe.mark_success();
+            ssh_probe.mark_success();
             return true;
         }
 
@@ -392,6 +429,8 @@ impl Handler {
                 let _ = writeln!(&mut writer, "{}", ssh_messages::db_shell_disabled_return());
                 self.mode = ShellMode::Main;
                 Handler::send_prompt(session, channel, self.current_prompt());
+                db_probe.mark_success();
+                ssh_probe.mark_success();
                 return true;
             }
             self.db_session = Some(self.services.db_shell.create_session());
@@ -430,11 +469,15 @@ impl Handler {
                 self.db_session = None;
                 self.db_executor = None;
                 Handler::send_prompt(session, channel, self.current_prompt());
+                db_probe.mark_success();
+                ssh_probe.mark_success();
                 return true;
             }
             match db_shell::apply_command(db_session, trimmed, executor.as_ref(), &mut writer) {
                 Ok(true) => {
                     Handler::send_prompt(session, channel, self.current_prompt());
+                    db_probe.mark_success();
+                    ssh_probe.mark_success();
                     true
                 }
                 Ok(false) => {
@@ -448,6 +491,8 @@ impl Handler {
                         Some(cli_shell_outcome::DB_SHELL_READY_NOTE.to_string()),
                     );
                     Handler::send_prompt(session, channel, self.current_prompt());
+                    db_probe.mark_success();
+                    ssh_probe.mark_success();
                     true
                 }
                 Err(err) => {
@@ -465,6 +510,8 @@ impl Handler {
         } else {
             let _ = writeln!(&mut writer, "{}", ssh_messages::db_shell_not_initialized());
             Handler::send_prompt(session, channel, self.current_prompt());
+            db_probe.mark_success();
+            ssh_probe.mark_success();
             true
         }
     }

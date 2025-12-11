@@ -3,11 +3,15 @@ use std::fmt;
 pub mod command {
     pub const NAME: &str = "log";
     pub const DESCRIPTION: &str = "Opens a log stream in a new terminal";
-    pub const USAGE: &str = "log [app|db|all|archive <target>|level <level>]";
+    pub const USAGE: &str =
+        "log [app|db|all|modules <module> [--tail N]|env <module>|archive <target>|level <level>]";
     pub const DETAILS: &[&str] = &[
         "log              – streams the current application log file",
         "log db           – streams the database log file",
         "log all          – opens application and database logs side by side",
+        "log module <module> [--tail N] – streams module runtime logs (alias for 'modules log')",
+        "log env <module> – prints the captured module environment with secrets redacted",
+        "log job <id> [--tail N] – filters the scheduler log for a specific job",
         "log archive <target> – shows the most recent archive file (target: app|db)",
         "log level <level> – sets the runtime log level (e.g. trace|debug|info|warn|error)",
     ];
@@ -17,6 +21,9 @@ pub mod command {
     pub const SUB_ALL_DESCRIPTION: &str = "Open application and database logs";
     pub const SUB_LEVEL_DESCRIPTION: &str = "Update the log level at runtime";
     pub const SUB_ARCHIVE_DESCRIPTION: &str = "Show the latest archive file";
+    pub const SUB_MODULE_DESCRIPTION: &str = "Stream module runtime logs";
+    pub const SUB_ENV_DESCRIPTION: &str = "Inspect module runtime environments";
+    pub const SUB_JOB_DESCRIPTION: &str = "Filter log output for scheduler jobs";
 }
 
 pub mod handler {
@@ -26,6 +33,9 @@ pub mod handler {
     pub const DEFAULT_LABEL_DB: &str = "DB";
     pub const ARCHIVE_LABEL_APP: &str = "App archive";
     pub const ARCHIVE_LABEL_DB: &str = "DB archive";
+    pub const MODULE_LOG_USAGE: &str = "Usage: log module <module> [--tail N]";
+    pub const MODULE_ENV_USAGE: &str = "Usage: log env <module>";
+    pub const JOB_LOG_USAGE: &str = "Usage: log job <job-id> [--tail N]";
     pub const MISSING_LEVEL_USAGE: &str =
         "missing value. Usage: log level <trace|debug|info|warn|error>";
     pub const NO_RELOAD_HANDLE: &str =
@@ -44,7 +54,7 @@ pub mod handler {
     }
 
     pub fn unknown_action(action: &str) -> String {
-        format!("unknown target: {action}. Use 'log [app|db|all]', 'log archive [app|db]' or 'log level <level>'.")
+        format!("unknown target: {action}. Use 'log [app|db|all|module|env]', 'log archive [app|db]' or 'log level <level>'.")
     }
 }
 

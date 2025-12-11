@@ -8,6 +8,7 @@ use std::future::Future;
 use std::io::{self, Write};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Instant;
 
 #[async_trait]
 pub trait CommandOutput: Send + Sync + 'static {
@@ -336,11 +337,21 @@ impl CommandRegistry {
         out: &mut dyn Write,
         env: ShellEnvironment,
     ) -> io::Result<CommandStatus> {
-        if let Some(entry) = self.get(name) {
+        let started_at = Instant::now();
+        let result = if let Some(entry) = self.get(name) {
             (entry.handler)(deps, args, self, out, env).map(CommandStatus::Executed)
         } else {
             Ok(CommandStatus::NotFound)
-        }
+        };
+        let success = result
+            .as_ref()
+            .map(|status| matches!(status, CommandStatus::Executed(_)))
+            .unwrap_or(false);
+        let latency_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+        deps.services
+            .diagnostics()
+            .record_probe("cli-shell", latency_ms, success);
+        result
     }
 }
 

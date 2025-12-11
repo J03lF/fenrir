@@ -127,6 +127,12 @@ pub mod runtime_errors {
         format!("invalid state: {details}")
     }
 
+    pub fn env_unavailable(module_id: &str) -> String {
+        format!(
+            "environment for module `{module_id}` is unavailable; restart the module to capture it"
+        )
+    }
+
     pub fn quarantined(module_id: &str, until: &str) -> String {
         format!("module `{module_id}` is quarantined until {until}")
     }

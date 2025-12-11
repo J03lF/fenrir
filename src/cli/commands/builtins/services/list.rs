@@ -1,6 +1,6 @@
+use crate::cli::commands::builtins::jobs::view::render_jobs_table;
 use crate::cli::commands::registry::CliDependencies;
 use crate::cli::commands::table::Table;
-use crate::services::scheduler::ScheduledJobSnapshot;
 use crate::services::ServiceTag;
 use crate::utils;
 use crate::utils::messages::cli::builtins::services::list as list_messages;
@@ -50,24 +50,7 @@ pub(super) fn list_services(deps: &CliDependencies, out: &mut dyn Write) -> io::
 }
 
 pub(super) fn list_jobs(deps: &CliDependencies, out: &mut dyn Write) -> io::Result<()> {
-    let jobs = deps.services.scheduler_service().jobs();
-    if jobs.is_empty() {
-        writeln!(out, "{}", list_messages::NO_JOBS)?;
-        return Ok(());
-    }
-
-    let mut table = Table::new(
-        list_messages::JOB_HEADERS
-            .iter()
-            .map(|value| (*value).to_string())
-            .collect(),
-    );
-
-    for job in jobs {
-        render_job(&mut table, job);
-    }
-
-    table.render(out, "  ")
+    render_jobs_table(deps, out)
 }
 
 fn render_tags(tags: &[ServiceTag]) -> String {
@@ -80,17 +63,4 @@ fn render_tags(tags: &[ServiceTag]) -> String {
 
 fn is_module_placeholder(id: &str) -> bool {
     id.starts_with("module:") && !id.contains("::")
-}
-
-fn render_job(table: &mut Table, job: ScheduledJobSnapshot) {
-    table.add_row(vec![
-        job.id,
-        format!("{}s", job.interval.as_secs()),
-        job.description,
-        if job.active {
-            list_messages::STATUS_ACTIVE.to_string()
-        } else {
-            list_messages::STATUS_INACTIVE.to_string()
-        },
-    ]);
 }

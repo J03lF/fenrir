@@ -2,7 +2,7 @@ use std::{
     env,
     str::FromStr,
     sync::Arc,
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 use crate::domain::module::{
@@ -36,6 +36,7 @@ const MANIFEST_REFRESH_MIN_DELAY_MS: u64 = 500;
 
 impl ModuleService {
     pub async fn ensure_all_running(&self) {
+        self.diagnostics.record_heartbeat("module-lifecycle");
         let modules = match self.list_installed().await {
             Ok(list) => list,
             Err(err) => {
@@ -62,7 +63,14 @@ impl ModuleService {
     pub async fn stop_all_modules(&self) -> Result<(), ModuleRuntimeError> {
         let running = self.runtime.list_running().await?;
         for info in running {
-            if let Err(err) = self.runtime.stop(&info.module_id).await {
+            let started_at = Instant::now();
+            let stop_result = self.runtime.stop(&info.module_id).await;
+            let success = stop_result
+                .as_ref()
+                .map(|_| true)
+                .unwrap_or_else(|err| matches!(err, ModuleRuntimeError::NotRunning { .. }));
+            self.record_lifecycle_metrics(started_at, success);
+            if let Err(err) = stop_result {
                 if !matches!(err, ModuleRuntimeError::NotRunning { .. }) {
                     tracing::warn!(
                         module = %info.module_id,
@@ -79,10 +87,14 @@ impl ModuleService {
     }
 
     pub(super) async fn stop_module_process(&self, module_id: &ModuleId) {
-        match self.runtime.stop(module_id).await {
-            Ok(_) => {}
-            Err(ModuleRuntimeError::NotRunning { .. }) => {}
-            Err(err) => {
+        let started_at = Instant::now();
+        let stop_result = self.runtime.stop(module_id).await;
+        let success = stop_result
+            .as_ref()
+            .map(|_| true)
+            .unwrap_or_else(|err| matches!(err, ModuleRuntimeError::NotRunning { .. }));
+        if let Err(err) = stop_result {
+            if !matches!(err, ModuleRuntimeError::NotRunning { .. }) {
                 tracing::warn!(
                     module = %module_id,
                     error = %err,
@@ -91,12 +103,15 @@ impl ModuleService {
                 );
             }
         }
+        self.record_lifecycle_metrics(started_at, success);
         self.revoke_service_token_if_any(module_id, "module-stop")
             .await;
         self.clear_reported_services(module_id).await;
     }
 
     pub async fn ensure_running(&self, module_id: &ModuleId) -> Result<(), ModuleRuntimeError> {
+        self.diagnostics.record_heartbeat("module-lifecycle");
+        self.diagnostics.record_heartbeat("module-runtime");
         let installed = match self.storage.load(module_id).await {
             Ok(Some(installed)) => installed,
             Ok(None) => return Ok(()),
@@ -248,7 +263,10 @@ impl ModuleService {
 
         let manifest = installed.manifest.clone();
         let module_id_clone = config.module_id.clone();
+        let runtime_started_at = Instant::now();
         let runtime_result = self.runtime.start(config).await;
+        let runtime_success = runtime_result.is_ok();
+        self.record_lifecycle_metrics(runtime_started_at, runtime_success);
         let runtime_info = match runtime_result {
             Ok(info) => {
                 self.clear_health(&info.module_id);
@@ -282,7 +300,7 @@ impl ModuleService {
         };
 
         if let Some(token) = issued_token {
-            self.remember_service_token(&runtime_info.module_id, token.token)
+            self.record_service_token(&runtime_info.module_id, &token)
                 .await;
         }
 
@@ -334,7 +352,11 @@ impl ModuleService {
             return Ok(());
         }
 
-        self.runtime.stop(module_id).await?;
+        let stop_started_at = Instant::now();
+        let stop_result = self.runtime.stop(module_id).await;
+        let stop_success = stop_result.is_ok();
+        self.record_lifecycle_metrics(stop_started_at, stop_success);
+        stop_result?;
 
         tracing::info!(module_id = %module_id, "{}", runtime_logs::MODULE_STOPPED);
 
@@ -448,6 +470,13 @@ impl ModuleService {
         tail: Option<usize>,
     ) -> Result<Vec<String>, ModuleRuntimeError> {
         self.runtime.logs(module_id, tail).await
+    }
+
+    pub async fn runtime_env(
+        &self,
+        module_id: &ModuleId,
+    ) -> Result<Vec<(String, String)>, ModuleRuntimeError> {
+        self.runtime.env(module_id).await
     }
 
     pub(crate) fn inject_runtime_env(

@@ -904,6 +904,7 @@ body {
 /* Chart Cards */
 .chart-card {
   animation: cardFadeIn 0.2s ease-out backwards;
+  overflow: hidden;
 }
 
 .chart-card:nth-child(1) { animation-delay: 0.02s; }
@@ -924,7 +925,7 @@ body {
 
 .chart-card .card-header {
   padding-bottom: var(--space-md);
-  border-bottom: 1px solid var(--border-subtle);
+  border-bottom: none;
   margin-bottom: 0;
 }
 
@@ -946,10 +947,11 @@ body {
 }
 
 .chart-canvas-wrap {
-  height: 180px;
+  height: 200px;
   position: relative;
-  background: linear-gradient(180deg, rgba(17, 26, 36, 0.5) 0%, rgba(12, 18, 24, 0.8) 100%);
+  background: transparent;
   border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+  padding: var(--space-sm);
 }
 
 .chart-canvas-wrap canvas {
@@ -1927,9 +1929,94 @@ label.series-toggle:hover {
 }
 
 /* ============================================
-   ACTIONS CARD
+   SERVICES TOOLBAR (Compact Design)
    ============================================ */
 
+.services-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-lg);
+  padding: var(--space-md) var(--space-lg);
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  flex-wrap: wrap;
+}
+
+.toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  flex: 1;
+  flex-wrap: wrap;
+}
+
+.toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-lg);
+}
+
+.services-count {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.bulk-actions {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+}
+
+.bulk-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  background: transparent;
+  border: none;
+  transition: all 0.15s ease;
+  cursor: pointer;
+}
+
+.bulk-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+.bulk-btn.start {
+  color: var(--color-success);
+}
+
+.bulk-btn.start:hover {
+  background: rgba(34, 197, 94, 0.2);
+}
+
+.bulk-btn.stop {
+  color: var(--color-danger);
+}
+
+.bulk-btn.stop:hover {
+  background: rgba(239, 68, 68, 0.2);
+}
+
+.bulk-btn.restart {
+  color: var(--color-info);
+}
+
+.bulk-btn.restart:hover {
+  background: rgba(59, 130, 246, 0.2);
+}
+
+/* Legacy action buttons (keep for compatibility) */
 .actions-card .card-header {
   margin-bottom: var(--space-sm);
 }
@@ -1998,13 +2085,13 @@ label.series-toggle:hover {
 
 .services-table-card {
   overflow: hidden;
+  padding: 0;
+  gap: 0;
 }
 
 .services-table-card .table-scroll {
-  max-height: 55vh;
+  max-height: 60vh;
   overflow-y: auto;
-  margin: 0 calc(var(--space-lg) * -1);
-  padding: 0 var(--space-lg);
 }
 
 .services-header {
@@ -2025,6 +2112,27 @@ label.series-toggle:hover {
   justify-content: flex-end;
   gap: var(--space-lg);
   flex: 1;
+}
+
+/* Toolbar search box adjustments */
+.services-toolbar .search-box {
+  min-width: 200px;
+  max-width: 280px;
+}
+
+.services-toolbar .search-box input {
+  padding: 10px 36px 10px 40px;
+  font-size: 0.85rem;
+}
+
+.services-toolbar .filter-chips {
+  padding: 4px;
+  gap: 4px;
+}
+
+.services-toolbar .filter-chips button {
+  padding: 6px 12px;
+  font-size: 0.72rem;
 }
 
 .search-box {
@@ -2154,15 +2262,16 @@ label.series-toggle:hover {
 .services-table {
   min-width: 700px;
   border-collapse: collapse;
+  width: 100%;
 }
 
 .services-table th {
   position: sticky;
   top: 0;
-  background: var(--bg-card);
+  background: var(--bg-secondary);
   z-index: 10;
   padding: 12px 16px;
-  font-size: 0.7rem;
+  font-size: 0.68rem;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -2172,17 +2281,21 @@ label.series-toggle:hover {
 }
 
 .services-table td {
-  padding: 16px;
+  padding: 14px 16px;
   border-bottom: 1px solid var(--border-subtle);
   vertical-align: middle;
 }
 
 .services-table tbody tr {
-  transition: all 0.15s ease;
+  transition: background 0.15s ease;
 }
 
 .services-table tbody tr:hover {
-  background: var(--bg-elevated);
+  background: rgba(90, 122, 154, 0.08);
+}
+
+.services-table tbody tr:last-child td {
+  border-bottom: none;
 }
 
 .service-id {
@@ -2199,6 +2312,13 @@ label.series-toggle:hover {
 
 .status-cell {
   white-space: nowrap;
+}
+
+.heartbeat-cell,
+.metric-cell {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.75rem;
+  color: var(--text-muted);
 }
 
 .tags-cell {
@@ -2233,7 +2353,6 @@ label.series-toggle:hover {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  animation: scaleIn 0.2s ease;
 }
 
 .status-pill::before {
@@ -2381,15 +2500,74 @@ label.series-toggle:hover {
 
 .audit-table-card {
   overflow: hidden;
+  padding: 0;
+  gap: 0;
 }
 
 .audit-table-card .table-scroll {
   max-height: 60vh;
   overflow-y: auto;
-  margin: 0 calc(var(--space-lg) * -1);
-  padding: 0 var(--space-lg);
 }
 
+/* Audit Toolbar - consistent with services */
+.audit-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-lg);
+  padding: var(--space-md) var(--space-lg);
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  flex-wrap: wrap;
+}
+
+.audit-toolbar .toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+}
+
+.audit-toolbar .toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-lg);
+}
+
+.audit-count {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+/* Toolbar button style */
+.toolbar-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-subtle);
+  transition: all 0.15s ease;
+  cursor: pointer;
+  color: var(--text-secondary);
+}
+
+.toolbar-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+.toolbar-btn.refresh:hover {
+  background: rgba(59, 130, 246, 0.2);
+  border-color: var(--color-info);
+  color: var(--color-info);
+}
+
+/* Legacy styles (keep for compatibility) */
 .audit-header {
   flex-wrap: wrap;
   gap: var(--space-lg);
@@ -2429,21 +2607,44 @@ label.series-toggle:hover {
 
 .audit-table {
   min-width: 500px;
+  width: 100%;
 }
 
 .audit-table th {
   position: sticky;
   top: 0;
-  background: var(--bg-card);
-  z-index: 1;
+  background: var(--bg-secondary);
+  z-index: 10;
+  padding: 12px 16px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border-default);
+  text-align: left;
 }
 
 .audit-table td {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border-subtle);
   vertical-align: middle;
   max-width: 200px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.audit-table tbody tr {
+  transition: background 0.15s ease;
+}
+
+.audit-table tbody tr:hover {
+  background: rgba(90, 122, 154, 0.08);
+}
+
+.audit-table tbody tr:last-child td {
+  border-bottom: none;
 }
 
 .audit-table td:hover {
@@ -2691,6 +2892,39 @@ button:disabled {
   .service-id,
   .note-cell {
     max-width: 120px;
+  }
+  
+  .services-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--space-md);
+  }
+  
+  .toolbar-left {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  
+  .toolbar-right {
+    justify-content: space-between;
+  }
+  
+  .services-toolbar .search-box {
+    max-width: none;
+  }
+  
+  .audit-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--space-md);
+  }
+  
+  .audit-toolbar .toolbar-left {
+    justify-content: center;
+  }
+  
+  .audit-toolbar .toolbar-right {
+    justify-content: space-between;
   }
 }
 
@@ -2998,3 +3232,130 @@ button:disabled {
   font-size: 0.8rem;
 }
 
+/* ============================================
+   SERVICE DETAIL MODAL
+   ============================================ */
+
+/* Clickable service rows */
+.service-row {
+  cursor: pointer;
+}
+
+.service-row:hover {
+  background: rgba(90, 122, 154, 0.08);
+}
+
+/* Stop propagation area (actions) */
+.actions-cell {
+  cursor: default;
+}
+
+/* Service detail grid */
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: var(--space-md);
+  margin-bottom: var(--space-xl);
+}
+
+.detail-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--space-md);
+  background: var(--bg-elevated);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+}
+
+.detail-label {
+  font-size: 0.6rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--accent-secondary);
+}
+
+.detail-value {
+  font-size: 0.88rem;
+  color: var(--text-primary);
+}
+
+.detail-value.mono {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.78rem;
+  color: var(--accent-secondary);
+}
+
+.detail-section {
+  margin-bottom: var(--space-lg);
+}
+
+.detail-section h4 {
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
+  margin-bottom: var(--space-md);
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.detail-section h4::before {
+  content: '';
+  width: 3px;
+  height: 12px;
+  background: var(--accent-primary);
+  border-radius: 2px;
+}
+
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: var(--space-sm);
+}
+
+.metric-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: var(--space-md);
+  background: var(--bg-secondary);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  text-align: center;
+}
+
+.metric-label {
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+
+.metric-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.detail-note {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  padding: var(--space-md);
+  background: var(--bg-elevated);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+}
+
+@media (max-width: 480px) {
+  .detail-grid,
+  .metrics-grid {
+    grid-template-columns: 1fr;
+  }
+}

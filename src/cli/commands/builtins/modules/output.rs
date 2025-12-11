@@ -203,6 +203,7 @@ pub(super) fn runtime_error_code(err: &ModuleRuntimeError) -> &'static str {
         ModuleRuntimeError::InvalidState(_) => "invalid_state",
         ModuleRuntimeError::Io(_) => "io_error",
         ModuleRuntimeError::Quarantined { .. } => "quarantined",
+        ModuleRuntimeError::EnvUnavailable { .. } => "env_unavailable",
     }
 }
 
@@ -237,6 +238,9 @@ fn runtime_error_message(err: &ModuleRuntimeError) -> String {
             let until =
                 system_time_to_rfc3339(*resume_at).unwrap_or_else(|| format!("{:?}", resume_at));
             msg_modules::runtime_errors::quarantined(module_id, &until)
+        }
+        ModuleRuntimeError::EnvUnavailable { module_id } => {
+            msg_modules::runtime_errors::env_unavailable(module_id)
         }
     }
 }

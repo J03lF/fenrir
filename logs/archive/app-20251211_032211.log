@@ -1,0 +1,28 @@
+2025-12-11T03:11:38.775261Z  INFO main ThreadId(01) fenrir::infra::logging::init: file logging initialized log_path=logs/app.log
+2025-12-11T03:11:38.775462Z  INFO main ThreadId(01) fenrir::infra::logging::init: db log file prepared log_path=logs/db.log
+2025-12-11T03:11:38.857632Z  INFO main ThreadId(01) fenrir::boot::startup: core services registered in registry
+2025-12-11T03:11:38.859149Z  INFO main ThreadId(01) fenrir::boot::startup: scheduler service started
+2025-12-11T03:11:38.859229Z  INFO tokio-runtime-worker ThreadId(12) fenrir::services::scheduler::service: scheduler heartbeat loop started
+2025-12-11T03:11:38.861663Z  INFO                 main ThreadId(01) fenrir::boot::startup: audit log persistence configured path=/opt/fenrir/development/tmp/runtime/audit/fenrir-audit-history.json capacity=2048 retention_hours=24 persist_seconds=30
+2025-12-11T03:11:38.868556Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: loaded 2 module states from disk
+2025-12-11T03:11:38.868612Z  WARN                 main ThreadId(01) fenrir::infra::modules::runtime::process: module was running but process no longer exists module_id=fenrir-api pid=26550
+2025-12-11T03:11:38.868625Z  WARN                 main ThreadId(01) fenrir::infra::modules::runtime::process: module was running but process no longer exists module_id=notification-hub pid=26551
+2025-12-11T03:11:38.926929Z  INFO                 main ThreadId(01) fenrir::infra::http::server: HTTP control-plane authentication via identity broker with static token fallback
+2025-12-11T03:11:38.926998Z  INFO                 main ThreadId(01) fenrir::boot::startup: boot complete app=fenrir version=0.1.4
+2025-12-11T03:11:38.927466Z  INFO                 main ThreadId(01) fenrir::infra::db::connector: db connector ipc socket ready path=/opt/fenrir/development/tmp/ipc/db-connector.sock
+2025-12-11T03:11:38.927527Z  INFO tokio-runtime-worker ThreadId(15) fenrir::infra::db::connector: db connector task started task="db-connector-ipc"
+2025-12-11T03:11:38.933009Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: module process started module_id=fenrir-api pid=88916 port=Some(41000)
+2025-12-11T03:11:38.933497Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: module started successfully module_id=fenrir-api pid=Some(88916) port=Some(41000)
+2025-12-11T03:11:39.145612Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: module process started module_id=notification-hub pid=88917 port=Some(41001)
+2025-12-11T03:11:39.146016Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: module started successfully module_id=notification-hub pid=Some(88917) port=Some(41001)
+2025-12-11T03:11:39.356312Z  INFO tokio-runtime-worker ThreadId(05) fenrir::boot::transports: ssh server task spawned
+2025-12-11T03:11:39.356301Z  INFO                 main ThreadId(01) fenrir::boot::transports: transport initialisation triggered
+2025-12-11T03:11:39.357013Z  INFO tokio-runtime-worker ThreadId(05) fenrir::infra::ssh::server: starting SSH server host=127.0.0.1 port=2222
+2025-12-11T03:11:39.358339Z  INFO tokio-runtime-worker ThreadId(10) fenrir::infra::http::server: HTTP server task spawned
+2025-12-11T03:11:53.931659Z  WARN tokio-runtime-worker ThreadId(05) fenrir::services::scheduler::service: db ping failed error=db connection error: error connecting to server: Connection refused (os error 61)
+2025-12-11T03:13:53.935921Z  WARN tokio-runtime-worker ThreadId(23) fenrir::services::scheduler::service: db ping failed error=db connection error: error connecting to server: Connection refused (os error 61)
+2025-12-11T03:14:23.439918Z  INFO tokio-runtime-worker ThreadId(17) thrussh::server::encrypted: pty-req: unknown pty code 42
+2025-12-11T03:15:54.042268Z  WARN tokio-runtime-worker ThreadId(23) fenrir::services::scheduler::service: db ping failed error=db connection error: error connecting to server: Connection refused (os error 61)
+2025-12-11T03:17:54.044940Z  WARN tokio-runtime-worker ThreadId(34) fenrir::services::scheduler::service: db ping failed error=invalid input: db-shell service is disabled
+2025-12-11T03:19:54.047821Z  WARN tokio-runtime-worker ThreadId(60) fenrir::services::scheduler::service: db ping failed error=invalid input: db-shell service is disabled
+2025-12-11T03:21:54.051334Z  WARN tokio-runtime-worker ThreadId(10) fenrir::services::scheduler::service: db ping failed error=invalid input: db-shell service is disabled

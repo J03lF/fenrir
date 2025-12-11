@@ -75,6 +75,9 @@ pub trait ModuleRuntimePort: Send + Sync {
         module_id: &ModuleId,
         tail: Option<usize>,
     ) -> Result<Vec<String>, ModuleRuntimeError>;
+
+    /// Inspect the environment variables Fenrir injected into a running module
+    async fn env(&self, module_id: &ModuleId) -> Result<Vec<(String, String)>, ModuleRuntimeError>;
 }
 
 /// Errors that can occur during module runtime operations
@@ -114,6 +117,10 @@ pub enum ModuleRuntimeError {
     Io(String),
 
     InvalidState(String),
+
+    EnvUnavailable {
+        module_id: String,
+    },
 
     Quarantined {
         module_id: String,
@@ -160,6 +167,9 @@ impl std::fmt::Display for ModuleRuntimeError {
             }
             ModuleRuntimeError::InvalidState(message) => {
                 f.write_str(&module_messages::runtime_errors::invalid_state(message))
+            }
+            ModuleRuntimeError::EnvUnavailable { module_id } => {
+                f.write_str(&module_messages::runtime_errors::env_unavailable(module_id))
             }
             ModuleRuntimeError::Quarantined {
                 module_id,

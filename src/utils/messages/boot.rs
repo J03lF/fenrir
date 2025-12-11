@@ -26,6 +26,7 @@ pub mod errors {
     pub const MODULE_STORAGE_INIT_FAILED: &str = "failed to initialize module storage";
     pub const MODULE_VERIFIER_INIT_FAILED: &str = "failed to initialize module verifier";
     pub const MODULE_SERVICE_ATTACH_FAILED: &str = "failed to attach module service";
+    pub const TOKEN_EXCHANGE_ATTACH_FAILED: &str = "failed to attach token exchange service";
     pub const IDENTITY_PROVIDER_INIT_FAILED: &str = "failed to initialize identity provider";
     pub const IDENTITY_SERVICE_ATTACH_FAILED: &str = "failed to attach identity service";
     pub const SECURITY_MANAGER_INIT_FAILED: &str = "failed to initialize security manager";
@@ -64,6 +65,9 @@ pub mod services {
         pub const HTTP: &str = "HTTP Transport";
         pub const IDENTITY: &str = "Identity Broker";
         pub const DB_CONNECTOR: &str = "DB Connector";
+        pub const TOKEN_EXCHANGE: &str = "Token Exchange";
+        pub const MODULE_LIFECYCLE: &str = "Module Lifecycle";
+        pub const JOBS_CONTROL: &str = "Jobs Control";
     }
 
     pub mod descriptions {
@@ -75,6 +79,9 @@ pub mod services {
         pub const HTTP: &str = "REST API, health, and telemetry";
         pub const IDENTITY: &str = "Issues and validates control-plane tokens";
         pub const DB_CONNECTOR: &str = "Proxies module database requests over IPC";
+        pub const TOKEN_EXCHANGE: &str = "Issues delegated tokens for managed modules";
+        pub const MODULE_LIFECYCLE: &str = "Operator-facing module lifecycle orchestrator";
+        pub const JOBS_CONTROL: &str = "Front-door for scheduler actions and job controls";
     }
 
     pub mod notes {
@@ -89,6 +96,9 @@ pub mod services {
         pub const DB_SHELL_DISABLED: &str = "db-shell disabled";
         pub const CLI_READY_FOR_SESSIONS: &str = "ready for new sessions";
         pub const CLI_DISABLED: &str = "cli disabled";
+        pub const TOKEN_EXCHANGE_READY: &str = "token exchange ready";
+        pub const MODULE_LIFECYCLE_READY: &str = "module lifecycle orchestrator active";
+        pub const JOBS_CONTROL_READY: &str = "jobs control surface active";
     }
 }
 

@@ -3,6 +3,7 @@ pub mod attach {
     pub const SECURITY_MANAGER_ALREADY_ATTACHED: &str = "security manager already attached";
     pub const IDENTITY_SERVICE_ALREADY_ATTACHED: &str = "identity service already attached";
     pub const SESSION_SERVICE_ALREADY_ATTACHED: &str = "session service already attached";
+    pub const TOKEN_EXCHANGE_ALREADY_ATTACHED: &str = "token exchange service already attached";
 }
 
 pub mod logs {

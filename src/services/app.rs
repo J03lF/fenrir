@@ -1,5 +1,6 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
 use crate::audit::{AuditError, AuditEvent, AuditLog};
 use crate::infra::logging::ReloadHandle;
@@ -11,25 +12,30 @@ use once_cell::sync::OnceCell;
 use tokio::sync::broadcast;
 
 use super::db_shell::DbShellService;
+use super::diagnostics::{ServiceDiagnostics, ServiceMetricSnapshot};
+use super::jobs::{JobLogError, JobLogSnapshot};
 use super::managed::{
     block_on_managed, ClosureManagedService, ManagedService, ServiceControlError,
     ServiceControlOutcome,
 };
 use super::module::ModuleService;
 use super::registry::ServiceRegistry;
-use super::scheduler::SchedulerService;
-use super::security::SessionService;
+use super::scheduler::{JobControlOutcome, ScheduledJobSnapshot, SchedulerError, SchedulerService};
+use super::security::{InstrumentedIdentityProvider, SessionService};
+use super::token_exchange::TokenExchangeService;
 use super::types::{ServiceActionReport, ServiceTag};
 
 pub struct AppServices {
     pub db_shell: Arc<DbShellService>,
     pub scheduler: Arc<SchedulerService>,
+    diagnostics: Arc<ServiceDiagnostics>,
     registry: Arc<ServiceRegistry>,
     managed: RwLock<BTreeMap<&'static str, Arc<dyn ManagedService>>>,
     logging: RwLock<Option<ReloadHandle>>,
     audit_log: Arc<dyn AuditLog>,
     audit_bus: broadcast::Sender<AuditEvent>,
     module_service: OnceCell<Arc<ModuleService>>,
+    token_exchange: OnceCell<Arc<TokenExchangeService>>,
     security: OnceCell<Arc<SecurityManager>>,
     session: OnceCell<Arc<SessionService>>,
     identity: OnceCell<Arc<dyn IdentityProvider>>,
@@ -41,17 +47,20 @@ impl AppServices {
         scheduler: Arc<SchedulerService>,
         registry: Arc<ServiceRegistry>,
         audit_log: Arc<dyn AuditLog>,
+        diagnostics: Arc<ServiceDiagnostics>,
     ) -> Self {
         let (audit_bus, _) = broadcast::channel(256);
         Self {
             db_shell,
             scheduler,
+            diagnostics,
             registry,
             managed: RwLock::new(BTreeMap::new()),
             logging: RwLock::new(None),
             audit_log,
             audit_bus,
             module_service: OnceCell::new(),
+            token_exchange: OnceCell::new(),
             security: OnceCell::new(),
             session: OnceCell::new(),
             identity: OnceCell::new(),
@@ -68,6 +77,19 @@ impl AppServices {
         self.module_service.get().cloned()
     }
 
+    pub fn attach_token_exchange(
+        &self,
+        service: Arc<TokenExchangeService>,
+    ) -> Result<(), &'static str> {
+        self.token_exchange
+            .set(service)
+            .map_err(|_| attach::TOKEN_EXCHANGE_ALREADY_ATTACHED)
+    }
+
+    pub fn token_exchange_service(&self) -> Option<Arc<TokenExchangeService>> {
+        self.token_exchange.get().cloned()
+    }
+
     pub fn attach_security(&self, manager: Arc<SecurityManager>) -> Result<(), &'static str> {
         self.security
             .set(manager)
@@ -79,8 +101,12 @@ impl AppServices {
     }
 
     pub fn attach_identity(&self, identity: Arc<dyn IdentityProvider>) -> Result<(), &'static str> {
+        let instrumented: Arc<dyn IdentityProvider> = Arc::new(InstrumentedIdentityProvider::new(
+            identity,
+            self.diagnostics(),
+        ));
         self.identity
-            .set(identity)
+            .set(instrumented)
             .map_err(|_| attach::IDENTITY_SERVICE_ALREADY_ATTACHED)
     }
 
@@ -136,6 +162,56 @@ impl AppServices {
 
     pub fn scheduler_service(&self) -> Arc<SchedulerService> {
         Arc::clone(&self.scheduler)
+    }
+
+    pub fn diagnostics(&self) -> Arc<ServiceDiagnostics> {
+        Arc::clone(&self.diagnostics)
+    }
+
+    pub fn service_diagnostics(&self, id: &str) -> Option<ServiceMetricSnapshot> {
+        self.diagnostics.snapshot(id)
+    }
+
+    pub fn service_diagnostics_snapshot(&self) -> HashMap<String, ServiceMetricSnapshot> {
+        self.diagnostics.snapshot_all()
+    }
+
+    pub fn scheduler_jobs(&self) -> Vec<ScheduledJobSnapshot> {
+        self.diagnostics.record_heartbeat("jobs-control");
+        self.scheduler.jobs()
+    }
+
+    pub fn scheduler_job(&self, id: &str) -> Option<ScheduledJobSnapshot> {
+        self.diagnostics.record_heartbeat("jobs-control");
+        self.scheduler.job(id)
+    }
+
+    pub fn restart_job(&self, id: &str) -> Result<JobControlOutcome, SchedulerError> {
+        let started_at = Instant::now();
+        let result = self.scheduler.restart_job(id);
+        self.record_jobs_control_probe(started_at, result.is_ok());
+        result
+    }
+
+    pub fn pause_job(&self, id: &str) -> Result<JobControlOutcome, SchedulerError> {
+        let started_at = Instant::now();
+        let result = self.scheduler.pause_job(id);
+        self.record_jobs_control_probe(started_at, result.is_ok());
+        result
+    }
+
+    pub fn resume_job(&self, id: &str) -> Result<JobControlOutcome, SchedulerError> {
+        let started_at = Instant::now();
+        let result = self.scheduler.resume_job(id);
+        self.record_jobs_control_probe(started_at, result.is_ok());
+        result
+    }
+
+    pub fn job_logs(&self, job_id: &str, tail: usize) -> Result<JobLogSnapshot, JobLogError> {
+        let started_at = Instant::now();
+        let result = crate::services::jobs::collect_job_logs(job_id, tail);
+        self.record_jobs_control_probe(started_at, result.is_ok());
+        result
     }
 
     pub fn register_runtime_service<T>(&self, service: Arc<T>)
@@ -293,5 +369,13 @@ impl AppServices {
 impl AuditSink for AppServices {
     fn record(&self, event: AuditEvent) -> Result<(), AuditError> {
         self.record_audit(event)
+    }
+}
+
+impl AppServices {
+    fn record_jobs_control_probe(&self, started_at: Instant, success: bool) {
+        let latency_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+        self.diagnostics
+            .record_probe("jobs-control", latency_ms, success);
     }
 }

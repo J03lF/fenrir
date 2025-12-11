@@ -221,12 +221,12 @@ impl ModuleStoragePort for FilesystemModuleStorage {
             };
 
             if module_name.starts_with('.') {
-                warn!(
-                    path = %path.display(),
-                    name = module_name,
-                    "{}",
-                    messages::infra::modules::storage::SKIP_HIDDEN_ENTRY
-                );
+                //warn!(
+                //    path = %path.display(),
+                //    name = module_name,
+                //    "{}",
+                //    messages::infra::modules::storage::SKIP_HIDDEN_ENTRY
+                //);
                 continue;
             }
 

@@ -20,6 +20,20 @@ pub mod problems {
         ProblemText::new("module_service_unavailable", "module service unavailable")
     }
 
+    pub fn token_exchange_unavailable() -> ProblemText {
+        ProblemText::new(
+            "token_exchange_unavailable",
+            "token exchange service unavailable",
+        )
+    }
+
+    pub fn token_exchange_rate_limited() -> ProblemText {
+        ProblemText::new(
+            "token_exchange_rate_limited",
+            "token exchange rate limit exceeded",
+        )
+    }
+
     pub fn identity_service_unavailable() -> ProblemText {
         ProblemText::new(
             "identity_service_unavailable",

@@ -9,7 +9,7 @@ pub(super) fn complete_show_targets(
         return Vec::new();
     };
 
-    if matches!(resource, "module" | "modules") {
+    if resource.eq_ignore_ascii_case("module") {
         modules::complete_module_ids(deps, ctx)
     } else {
         Vec::new()

@@ -99,6 +99,7 @@ async fn initialize_db_connector(ctx: &BootContext) -> Result<()> {
     let connector_service = Arc::new(DbConnectorService::new(
         Arc::clone(&ctx.services.db_shell),
         security_manager,
+        ctx.services.diagnostics(),
     ));
     let endpoint = start_connector_server(&runtime_dir, Arc::clone(&connector_service))
         .await

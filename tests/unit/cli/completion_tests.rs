@@ -15,10 +15,11 @@ use crate::domain::db::{
     DbAdminPort, DbEngine, DbExecutionResult, DbResult, DbTable, DbTableSchema, DbValue,
 };
 use crate::services::ServiceRegistry;
-use crate::services::{AppServices, DbShellService, SchedulerService};
+use crate::services::{AppServices, DbShellService, SchedulerService, ServiceDiagnostics};
 use async_trait::async_trait;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+use uuid::Uuid;
 
 struct DummyDbAdapter;
 
@@ -176,7 +177,14 @@ fn test_config() -> Arc<AppConfig> {
 fn test_dependencies() -> CliDependencies {
     let config = test_config();
     let registry = Arc::new(ServiceRegistry::new());
-    let scheduler = Arc::new(SchedulerService::new(Arc::clone(&registry)));
+    let diagnostics = Arc::new(ServiceDiagnostics::new());
+    let scheduler_state_dir =
+        std::env::temp_dir().join(format!("fenrir-cli-scheduler-{}", Uuid::new_v4()));
+    let scheduler = Arc::new(SchedulerService::new(
+        Arc::clone(&registry),
+        Arc::clone(&diagnostics),
+        scheduler_state_dir,
+    ));
 
     let mut adapters: BTreeMap<DbEngine, Arc<dyn DbAdminPort>> = BTreeMap::new();
     adapters.insert(DbEngine::Postgres, Arc::new(DummyDbAdapter));
@@ -189,6 +197,7 @@ fn test_dependencies() -> CliDependencies {
         Arc::clone(&scheduler),
         Arc::clone(&registry),
         audit,
+        diagnostics,
     ));
 
     CliDependencies::new(config, services)

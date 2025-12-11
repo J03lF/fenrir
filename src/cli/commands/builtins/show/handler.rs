@@ -17,18 +17,15 @@ pub(super) fn handle_show(
         return Ok(CommandOutcome::Continue);
     };
 
-    match resource.to_ascii_lowercase().as_str() {
-        "module" | "modules" => {
-            if tail.is_empty() {
-                writeln!(out, "{}", show_handler_messages::USAGE_MODULE)?;
-            } else {
-                return modules::run_module_command(deps, "info", tail, out);
-            }
+    if resource.eq_ignore_ascii_case("module") {
+        if tail.is_empty() {
+            writeln!(out, "{}", show_handler_messages::USAGE_MODULE)?;
+        } else {
+            return modules::run_module_command(deps, "info", tail, out);
         }
-        other => {
-            writeln!(out, "{}", show_handler_messages::unknown_resource(other))?;
-            writeln!(out, "{}", show_handler_messages::VALID_RESOURCES)?;
-        }
+    } else {
+        writeln!(out, "{}", show_handler_messages::unknown_resource(resource))?;
+        writeln!(out, "{}", show_handler_messages::VALID_RESOURCES)?;
     }
 
     Ok(CommandOutcome::Continue)

@@ -11,8 +11,9 @@ pub mod command {
         "release dev-overrides           – releases all modules currently in sync mode",
         "uninstall module <name>         – removes an installed module",
         "check modules                   – checks for available updates",
-        "logs module <name> [--tail N]   – shows logs for a running module",
+        "log module <name> [--tail N]    – shows logs for a running module",
         "modules services [name]         – list module runtime/override services",
+        "modules env module <name>       – show sanitized module environment",
         "modules start <name>            – start module runtime",
         "modules stop <name>             – stop module runtime",
         "modules restart <name>          – restart module runtime",
@@ -76,8 +77,20 @@ pub mod check {
 
 pub mod logs {
     pub const DESCRIPTION: &str = "Show runtime logs for a module";
-    pub const SYNOPSIS: &str = "logs module <name> [--tail N]";
-    pub const DETAILS: &[&str] = &["logs module <name> [--tail N] – show runtime logs"];
+    pub const SYNOPSIS: &str = "log module <name> [--tail N]";
+    pub const DETAILS: &[&str] = &["log module <name> [--tail N] – show runtime logs"];
+}
+
+pub mod env_view {
+    pub const DESCRIPTION: &str = "Inspect the injected module environment";
+    pub const SYNOPSIS: &str = "env module <name>";
+    pub const DETAILS: &[&str] =
+        &["env module <name> – print sanitized runtime environment (Fenrir vars only)"];
+    pub const USAGE: &str = "Use: env module <name>";
+    pub const ERROR_CONTEXT: &str = "Failed to load module environment";
+    pub const TITLE: &str = "Injected environment";
+    pub const REDACTED: &str = "<redacted>";
+    pub const EMPTY_STATE: &str = "No Fenrir-managed environment variables recorded yet.";
 }
 
 pub mod stop_all {
@@ -106,7 +119,8 @@ pub mod subcommands {
         "Release every module that is currently in sync mode";
     pub const UNINSTALL_DESC: &str = "Uninstall a module";
     pub const CHECK_DESC: &str = "Check for available module updates";
-    pub const LOGS_DESC: &str = "Show module logs";
+    pub const LOG_DESC: &str = "Show module logs";
+    pub const ENV_DESC: &str = "Inspect the injected module environment";
     pub const SERVICES_DESC: &str = "List module services";
     pub const START_DESC: &str = "Start a module runtime";
     pub const STOP_DESC: &str = "Stop a module runtime";
@@ -288,7 +302,7 @@ pub mod check_flow {
 }
 
 pub mod logs_flow {
-    pub const USAGE: &str = "Use: logs module <name> [--tail N]";
+    pub const USAGE: &str = "Use: log module <name> [--tail N]";
     pub const TAIL_REQUIRES_VALUE: &str = "--tail requires a value";
     pub fn invalid_tail(value: &str) -> String {
         format!("Invalid tail value: {value}")
@@ -516,6 +530,10 @@ pub mod runtime_errors {
 
     pub fn quarantined(module: &str, until: &str) -> String {
         format!("Module '{module}' is quarantined until {until}")
+    }
+
+    pub fn env_unavailable(module: &str) -> String {
+        format!("Module '{module}' has no captured environment (restart the runtime to refresh it)")
     }
 }
 

@@ -1,5 +1,4 @@
-use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::{fmt, net::SocketAddr, path::PathBuf, str::FromStr};
 
 use thiserror::Error;
 
@@ -144,4 +143,72 @@ pub enum ModuleIngressError {
     InvalidModuleId(String),
     #[error("module runtime error: {0}")]
     Runtime(#[from] ModuleRuntimeError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ModuleScaffoldRuntime {
+    #[default]
+    Rust,
+    Node,
+    Angular,
+}
+
+impl ModuleScaffoldRuntime {
+    pub const fn variants() -> &'static [&'static str] {
+        &["rust", "node", "angular"]
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ModuleScaffoldRuntime::Rust => "rust",
+            ModuleScaffoldRuntime::Node => "node",
+            ModuleScaffoldRuntime::Angular => "angular",
+        }
+    }
+}
+
+impl fmt::Display for ModuleScaffoldRuntime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ModuleScaffoldRuntime {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "rust" => Ok(Self::Rust),
+            "node" | "ts" | "typescript" => Ok(Self::Node),
+            "angular" | "ng" => Ok(Self::Angular),
+            _ => Err(()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ModuleScaffoldOptions {
+    pub runtime: ModuleScaffoldRuntime,
+}
+
+impl ModuleScaffoldOptions {
+    pub const fn new(runtime: ModuleScaffoldRuntime) -> Self {
+        Self { runtime }
+    }
+}
+
+impl Default for ModuleScaffoldOptions {
+    fn default() -> Self {
+        Self {
+            runtime: ModuleScaffoldRuntime::Rust,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ModuleScaffoldSummary {
+    pub module_id: ModuleId,
+    pub runtime: ModuleScaffoldRuntime,
+    pub root: PathBuf,
+    pub files: Vec<PathBuf>,
 }

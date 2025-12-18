@@ -3,6 +3,7 @@
 /target/
 secrets/
 config/certs/
+runtime/
 config/modules/
 /test/
 /benches/
@@ -14,3 +15,4 @@ target/
 # Datasource local storage ignored files
 /dataSources/
 /dataSources.local.xml
+static/control-plane/

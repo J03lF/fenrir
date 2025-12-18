@@ -38,7 +38,7 @@ use crate::audit::{AuditActor, AuditEvent, AuditMetadata, AuditOutcome};
 use crate::domain::module::{
     InstalledModule, ModuleError, ModuleId, ModuleInstallResult, ModuleInstallSource,
     ModuleInstallStatus, ModuleManifest, ModuleRegistryError, ModuleRuntimeError,
-    ModuleSearchQuery, ModuleServiceError, ModuleStorageError, ModuleVersion,
+    ModuleRuntimeKind, ModuleSearchQuery, ModuleServiceError, ModuleStorageError, ModuleVersion,
 };
 use crate::infra::{logging, telemetry};
 use crate::security::auth::{AuthError, ControlPlaneAuthorizer, Role};
@@ -48,6 +48,7 @@ use crate::security::service::ServiceScope;
 use crate::security::service_tokens::{
     DelegatedActor, DelegatedToken, DelegatedTokenClaims, ServiceTokenError,
 };
+use crate::services::module::token_audit::{record_module_token_exchange, ModuleTokenAuditContext};
 use crate::services::scheduler::ScheduledJobSnapshot;
 use crate::services::{
     module::{ModuleIngressError, ModuleIngressTarget},
@@ -68,7 +69,7 @@ use super::state::{HttpInfo, HttpState};
 const SERVICE_RESOURCE_STALE_AFTER_SECS: i64 = 60;
 const SERVICE_HEALTH_STALE_AFTER_SECS: u64 = 180;
 const ALLOWED_MODULE_TOKEN_SCOPES: &[&str] = &["db:write"];
-const MODULE_SERVICE_TOKEN_EXCHANGE_ACTION: &str = "module::service-token-exchange";
+const MODULE_TOKEN_ENDPOINT: &str = "/modules/runtime/tokens";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GatewayRequestKind {
@@ -95,6 +96,24 @@ struct HealthResponse {
 #[derive(Serialize)]
 struct ServicesResponse {
     services: Vec<ServiceSummary>,
+}
+
+#[derive(Serialize)]
+struct DbRuntimeStatusResponse {
+    engine: String,
+    running: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    uri: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_health: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    logs: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostics: Option<ServiceHealthView>,
 }
 
 #[derive(Serialize)]
@@ -859,82 +878,6 @@ fn token_expires_in_seconds(claims: &DelegatedTokenClaims) -> u64 {
     (claims.expires_at - now).whole_seconds().max(0) as u64
 }
 
-fn audit_module_token_exchange(
-    services: &AppServices,
-    module_id: &ModuleId,
-    requested_scopes: &[String],
-    granted_scopes: Option<&[ServiceScope]>,
-    reason: Option<&str>,
-    expires_in_seconds: u64,
-    outcome: AuditOutcome,
-    error: Option<&str>,
-) {
-    let mut metadata = AuditMetadata::default()
-        .insert("transport", "control-plane")
-        .insert("endpoint", "/modules/runtime/tokens")
-        .insert(
-            "requested_scopes",
-            format_requested_scope_list(requested_scopes),
-        )
-        .insert(
-            "granted_scopes",
-            granted_scopes
-                .map(format_granted_scope_list)
-                .unwrap_or_else(|| "-".to_string()),
-        )
-        .insert("expires_in_seconds", expires_in_seconds.to_string());
-    if let Some(reason) = reason {
-        metadata = metadata.insert("reason", reason);
-    }
-    if let Some(err_msg) = error {
-        metadata = metadata.insert("error", err_msg);
-    }
-    let event = AuditEvent::builder()
-        .actor(AuditActor::System)
-        .action(MODULE_SERVICE_TOKEN_EXCHANGE_ACTION)
-        .target(format!("module:{}", module_id.as_str()))
-        .outcome(outcome)
-        .metadata(metadata)
-        .build();
-    match event {
-        Ok(event) => {
-            if let Err(err) = services.record_audit(event) {
-                warn!(
-                    error = %err,
-                    "module token exchange audit append failed"
-                );
-            }
-        }
-        Err(err) => warn!(
-            error = %err,
-            "module token exchange audit build failed"
-        ),
-    }
-}
-
-fn format_requested_scope_list(scopes: &[String]) -> String {
-    if scopes.is_empty() {
-        return "-".to_string();
-    }
-    scopes
-        .iter()
-        .map(|scope| scope.trim())
-        .filter(|scope| !scope.is_empty())
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
-fn format_granted_scope_list(scopes: &[ServiceScope]) -> String {
-    if scopes.is_empty() {
-        return "-".to_string();
-    }
-    scopes
-        .iter()
-        .map(|scope| scope.as_str())
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
 fn decode_service_id(value: &str) -> Result<String, ServiceActionProblem> {
     decode(value)
         .map(|decoded| decoded.into_owned())
@@ -1052,15 +995,28 @@ fn service_route_path(
                     .to_string();
                 if normalized.is_empty() {
                     buffer.push('/');
-                } else {
-                    buffer.push('/');
-                    buffer.push_str(&normalized);
-                }
-                if !tail.is_empty() {
-                    if !buffer.ends_with('/') {
-                        buffer.push('/');
+                    if !tail.is_empty() {
+                        buffer.push_str(tail);
                     }
-                    buffer.push_str(tail);
+                } else {
+                    match tail.strip_prefix(&normalized) {
+                        Some("") => {
+                            buffer.push('/');
+                            buffer.push_str(&normalized);
+                        }
+                        Some(rest) if rest.starts_with('/') => {
+                            buffer.push('/');
+                            buffer.push_str(tail);
+                        }
+                        _ => {
+                            buffer.push('/');
+                            buffer.push_str(&normalized);
+                            if !tail.is_empty() {
+                                buffer.push('/');
+                                buffer.push_str(tail);
+                            }
+                        }
+                    }
                 }
             }
         } else {
@@ -1085,6 +1041,39 @@ fn service_route_path(
         }
     }
     buffer
+}
+
+#[cfg(test)]
+mod service_route_path_tests {
+    use super::service_route_path;
+    use crate::services::ServiceIngressMetadata;
+
+    #[test]
+    fn avoids_duplicate_route_prefix_when_client_preprends_it() {
+        let ingress = ServiceIngressMetadata::public().with_route_prefix("/api/v1");
+        let path = service_route_path(Some(&ingress), "/api/v1/auth/email-code", Some("foo=bar"));
+        assert_eq!(path, "/api/v1/auth/email-code?foo=bar");
+    }
+
+    #[test]
+    fn prepends_route_prefix_when_missing() {
+        let ingress = ServiceIngressMetadata::public().with_route_prefix("/api/v1");
+        let path = service_route_path(Some(&ingress), "/auth/email-code", None);
+        assert_eq!(path, "/api/v1/auth/email-code");
+    }
+
+    #[test]
+    fn handles_root_route_prefix() {
+        let ingress = ServiceIngressMetadata::public().with_route_prefix("/");
+        let path = service_route_path(Some(&ingress), "/status", None);
+        assert_eq!(path, "/status");
+    }
+
+    #[test]
+    fn defaults_without_ingress_metadata() {
+        let path = service_route_path(None, "/status", None);
+        assert_eq!(path, "/status");
+    }
 }
 
 fn build_target_url(target: &ModuleIngressTarget, path: &str) -> String {
@@ -1377,15 +1366,19 @@ async fn issue_module_service_token(
         match token_exchange.issue_default_token(&module_id).await {
             Ok(token) => token,
             Err(TokenExchangeError::RateLimited) => {
-                audit_module_token_exchange(
-                    &state.services,
+                record_module_token_exchange(
+                    state.services.as_ref(),
                     &module_id,
-                    &requested_scopes,
-                    None,
-                    request_reason.as_deref(),
-                    0,
-                    AuditOutcome::Failure,
-                    Some("rate_limited"),
+                    ModuleTokenAuditContext {
+                        transport: "control-plane",
+                        endpoint: Some(MODULE_TOKEN_ENDPOINT),
+                        requested_scopes: &requested_scopes,
+                        granted_scopes: None,
+                        reason: request_reason.as_deref(),
+                        expires_in_seconds: 0,
+                        outcome: AuditOutcome::Failure,
+                        error: Some("rate_limited"),
+                    },
                 );
                 return http_problem(
                     StatusCode::TOO_MANY_REQUESTS,
@@ -1395,15 +1388,19 @@ async fn issue_module_service_token(
             }
             Err(TokenExchangeError::Module(err)) => {
                 let err_text = err.to_string();
-                audit_module_token_exchange(
-                    &state.services,
+                record_module_token_exchange(
+                    state.services.as_ref(),
                     &module_id,
-                    &requested_scopes,
-                    None,
-                    request_reason.as_deref(),
-                    0,
-                    AuditOutcome::Failure,
-                    Some(err_text.as_str()),
+                    ModuleTokenAuditContext {
+                        transport: "control-plane",
+                        endpoint: Some(MODULE_TOKEN_ENDPOINT),
+                        requested_scopes: &requested_scopes,
+                        granted_scopes: None,
+                        reason: request_reason.as_deref(),
+                        expires_in_seconds: 0,
+                        outcome: AuditOutcome::Failure,
+                        error: Some(err_text.as_str()),
+                    },
                 );
                 return http_problem(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -1416,15 +1413,19 @@ async fn issue_module_service_token(
         match token_exchange.issue_scoped_token(&module_id, scopes).await {
             Ok(token) => token,
             Err(TokenExchangeError::RateLimited) => {
-                audit_module_token_exchange(
-                    &state.services,
+                record_module_token_exchange(
+                    state.services.as_ref(),
                     &module_id,
-                    &requested_scopes,
-                    None,
-                    request_reason.as_deref(),
-                    0,
-                    AuditOutcome::Failure,
-                    Some("rate_limited"),
+                    ModuleTokenAuditContext {
+                        transport: "control-plane",
+                        endpoint: Some(MODULE_TOKEN_ENDPOINT),
+                        requested_scopes: &requested_scopes,
+                        granted_scopes: None,
+                        reason: request_reason.as_deref(),
+                        expires_in_seconds: 0,
+                        outcome: AuditOutcome::Failure,
+                        error: Some("rate_limited"),
+                    },
                 );
                 return http_problem(
                     StatusCode::TOO_MANY_REQUESTS,
@@ -1434,15 +1435,19 @@ async fn issue_module_service_token(
             }
             Err(TokenExchangeError::Module(err)) => {
                 let err_text = err.to_string();
-                audit_module_token_exchange(
-                    &state.services,
+                record_module_token_exchange(
+                    state.services.as_ref(),
                     &module_id,
-                    &requested_scopes,
-                    None,
-                    request_reason.as_deref(),
-                    0,
-                    AuditOutcome::Failure,
-                    Some(err_text.as_str()),
+                    ModuleTokenAuditContext {
+                        transport: "control-plane",
+                        endpoint: Some(MODULE_TOKEN_ENDPOINT),
+                        requested_scopes: &requested_scopes,
+                        granted_scopes: None,
+                        reason: request_reason.as_deref(),
+                        expires_in_seconds: 0,
+                        outcome: AuditOutcome::Failure,
+                        error: Some(err_text.as_str()),
+                    },
                 );
                 return http_problem(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -1463,15 +1468,19 @@ async fn issue_module_service_token(
             .collect(),
         expires_in_seconds,
     };
-    audit_module_token_exchange(
-        &state.services,
+    record_module_token_exchange(
+        state.services.as_ref(),
         &module_id,
-        &requested_scopes,
-        Some(&claims.scopes),
-        request_reason.as_deref(),
-        expires_in_seconds,
-        AuditOutcome::Success,
-        None,
+        ModuleTokenAuditContext {
+            transport: "control-plane",
+            endpoint: Some(MODULE_TOKEN_ENDPOINT),
+            requested_scopes: &requested_scopes,
+            granted_scopes: Some(&claims.scopes),
+            reason: request_reason.as_deref(),
+            expires_in_seconds,
+            outcome: AuditOutcome::Success,
+            error: None,
+        },
     );
     (StatusCode::OK, Json(response)).into_response()
 }
@@ -1642,6 +1651,165 @@ async fn proxy_module_service_grpc(
     {
         Ok(resp) => resp,
         Err(problem) => problem.into_response(),
+    }
+}
+
+async fn proxy_static_module_root(
+    State(state): State<HttpState>,
+    AxumPath(module_id_param): AxumPath<String>,
+    method: Method,
+    headers: HeaderMap,
+    OriginalUri(original_uri): OriginalUri,
+    body: Body,
+) -> Response {
+    proxy_static_module_inner(
+        state,
+        module_id_param,
+        String::new(),
+        method,
+        headers,
+        original_uri,
+        body,
+    )
+    .await
+}
+
+async fn proxy_static_module(
+    State(state): State<HttpState>,
+    AxumPath((module_id_param, tail)): AxumPath<(String, String)>,
+    method: Method,
+    headers: HeaderMap,
+    OriginalUri(original_uri): OriginalUri,
+    body: Body,
+) -> Response {
+    proxy_static_module_inner(
+        state,
+        module_id_param,
+        tail,
+        method,
+        headers,
+        original_uri,
+        body,
+    )
+    .await
+}
+
+async fn proxy_static_module_inner(
+    state: HttpState,
+    module_id_param: String,
+    tail: String,
+    method: Method,
+    headers: HeaderMap,
+    original_uri: Uri,
+    body: Body,
+) -> Response {
+    match proxy_static_module_impl(
+        state,
+        module_id_param,
+        tail,
+        method,
+        headers,
+        original_uri,
+        body,
+    )
+    .await
+    {
+        Ok(resp) => resp,
+        Err(problem) => problem.into_response(),
+    }
+}
+
+async fn proxy_static_module_impl(
+    state: HttpState,
+    module_id_param: String,
+    tail: String,
+    method: Method,
+    headers: HeaderMap,
+    original_uri: Uri,
+    body: Body,
+) -> Result<Response, ServiceActionProblem> {
+    let module_id = ModuleId::new(module_id_param.clone()).map_err(|_| {
+        http_problem(
+            StatusCode::BAD_REQUEST,
+            http_messages::problems::static_module_invalid(&module_id_param),
+        )
+    })?;
+
+    let Some(module_service) = state.services.module_service() else {
+        return Err(module_service_unavailable());
+    };
+
+    let runtime_info =
+        module_service
+            .runtime_status(&module_id)
+            .await
+            .map_err(|err| match err {
+                ModuleRuntimeError::NotRunning { .. } => http_problem(
+                    StatusCode::NOT_FOUND,
+                    http_messages::problems::static_module_not_running(module_id.as_str()),
+                ),
+                other => http_problem(
+                    StatusCode::BAD_GATEWAY,
+                    http_messages::problems::service_operation_failed(other),
+                ),
+            })?;
+
+    if runtime_info.kind != ModuleRuntimeKind::StaticSite {
+        return Err(http_problem(
+            StatusCode::BAD_REQUEST,
+            http_messages::problems::static_module_not_static(module_id.as_str()),
+        ));
+    }
+
+    let port = runtime_info.port.ok_or_else(|| {
+        http_problem(
+            StatusCode::BAD_GATEWAY,
+            http_messages::problems::static_module_not_running(module_id.as_str()),
+        )
+    })?;
+
+    let reqwest_method = map_reqwest_method(&method)?;
+    let body_bytes = collect_request_body(body).await?;
+    let mut target = format!("http://127.0.0.1:{}{}", port, normalize_static_path(&tail));
+    if let Some(query) = original_uri.query() {
+        target.push('?');
+        target.push_str(query);
+    }
+
+    let mut builder = HTTP_GATEWAY_CLIENT.request(reqwest_method, target);
+    for (name, value) in headers.iter() {
+        if name == HOST {
+            continue;
+        }
+        if let (Ok(header_name), Ok(header_value)) = (
+            ReqwestHeaderName::from_bytes(name.as_str().as_bytes()),
+            ReqwestHeaderValue::from_bytes(value.as_bytes()),
+        ) {
+            builder = builder.header(header_name, header_value);
+        }
+    }
+
+    let response = builder.body(body_bytes).send().await.map_err(|err| {
+        tracing::warn!(
+            module = %module_id,
+            port,
+            error = %err,
+            "static module upstream request failed"
+        );
+        http_problem(
+            StatusCode::BAD_GATEWAY,
+            http_messages::problems::static_module_unreachable(module_id.as_str()),
+        )
+    })?;
+    convert_upstream_response(response).await
+}
+
+fn normalize_static_path(tail: &str) -> String {
+    let trimmed = tail.trim_start_matches('/');
+    if trimmed.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", trimmed)
     }
 }
 
@@ -1901,6 +2069,8 @@ pub(super) fn build_router(state: HttpState) -> Router {
         .route("/services/actions/start-all", post(start_all_services))
         .route("/services/actions/stop-all", post(stop_all_services))
         .route("/services/actions/restart-all", post(restart_all_services))
+        .route("/services/db-runtime/status", get(db_runtime_status))
+        .route("/services/db-runtime/logs", get(db_runtime_logs))
         .route("/scheduler/jobs", get(list_scheduler_jobs))
         .route("/logging/level", post(update_logging_level))
         .route("/metrics", get(metrics_snapshot))
@@ -1923,6 +2093,8 @@ pub(super) fn build_router(state: HttpState) -> Router {
             "/modules/runtime/release-dev-overrides",
             post(release_dev_overrides),
         )
+        .route("/modules/static/:module_id", any(proxy_static_module_root))
+        .route("/modules/static/:module_id/*path", any(proxy_static_module))
         .route("/modules/runtime/tokens", post(issue_module_service_token))
         .route(
             "/gateway/services/:service_id/*path",
@@ -1983,9 +2155,12 @@ pub fn admin_console_html() -> &'static str {
 }
 
 async fn index() -> impl IntoResponse {
+    if let Ok(content) = tokio::fs::read_to_string("static/control-plane/index.html").await {
+        return Html(content);
+    }
     match tokio::fs::read_to_string("static/index.html").await {
         Ok(content) => Html(content),
-        Err(_) => Html(INDEX_HTML.to_string()), // Fallback to embedded HTML
+        Err(_) => Html(INDEX_HTML.to_string()),
     }
 }
 
@@ -2529,6 +2704,69 @@ async fn restart_all_services(
 ) -> Response {
     let force = payload.map(|body| body.force).unwrap_or(false);
     bulk_service_action(state, BulkServiceActionKind::Restart, force, headers).await
+}
+
+async fn db_runtime_status(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    // viewer role reicht für Status
+    if let Err(problem) = authorize(&state.auth, &state.services, &headers, Role::Viewer) {
+        return problem.into_response();
+    }
+    let tail = params
+        .get("tail")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
+    let Some(status) = state.services.db_runtime_status() else {
+        return (StatusCode::NOT_FOUND, "not found".to_string()).into_response();
+    };
+    let diag = state.services.diagnostics().snapshot("db-runtime");
+    let resp = DbRuntimeStatusResponse {
+        engine: status.engine.as_str().to_string(),
+        running: status.running,
+        uri: status.connector_uri,
+        port: status.port,
+        pid: status.pid,
+        last_health: status
+            .last_health
+            .map(format_offset_datetime),
+        logs: if tail > 0 {
+            Some(state.services.db_runtime_logs(tail))
+        } else {
+            None
+        },
+        diagnostics: diag.map(|d| ServiceHealthView {
+            state: if d.error_rate_pct.unwrap_or(0.0) > 0.0 {
+                "degraded"
+            } else {
+                "healthy"
+            },
+            last_heartbeat_seconds: d.last_heartbeat_elapsed().map(|v| v.as_secs()),
+            latency_p50_ms: d.latency_p50_ms,
+            latency_p95_ms: d.latency_p95_ms,
+            error_rate_pct: d.error_rate_pct,
+        }),
+    };
+    Json(resp).into_response()
+}
+
+async fn db_runtime_logs(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    // viewer role reicht für Logs
+    if let Err(problem) = authorize(&state.auth, &state.services, &headers, Role::Viewer) {
+        return problem.into_response();
+    }
+    let tail = params
+        .get("tail")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(50);
+    let logs = state.services.db_runtime_logs(tail.max(1));
+    Json(logs).into_response()
 }
 
 async fn respond_service_action(

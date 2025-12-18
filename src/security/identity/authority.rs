@@ -2,17 +2,22 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 
+use argon2::password_hash::PasswordHash;
+use argon2::{Argon2, PasswordVerifier};
 use ed25519_dalek::Verifier;
 use time::{Duration, OffsetDateTime};
-use tracing::warn;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::audit::{AuditActor, AuditEvent, AuditMetadata};
-use crate::config::AppConfig;
+use crate::config::{AppConfig, IdentityStorageKind};
 use crate::security::auth::Role;
 use crate::security::manager::AuditSink;
+use crate::services::db_shell::DbShellService;
 use crate::utils::messages::security::identity as identity_messages;
 
+use super::any_store::AnyIdentityStore;
+use super::db_store::DbIdentityStore;
 use super::errors::IdentityError;
 use super::jwt::{encode_jwt, fingerprint_token, parse_jwt, Claims, RawClaims};
 use super::provider::IdentityProvider;
@@ -26,13 +31,14 @@ pub struct IdentityAuthority {
     audience: String,
     app_version: String,
     exp_seconds: u64,
-    store: IdentityStore,
+    store: AnyIdentityStore,
     audit: Arc<dyn AuditSink>,
 }
 
 const MAX_TOKENS_PER_USER: usize = 20;
 
 impl IdentityAuthority {
+    /// Bootstrap identity authority with file-based storage (default)
     pub fn bootstrap(
         cfg: &AppConfig,
         runtime_dir: &Path,
@@ -46,12 +52,76 @@ impl IdentityAuthority {
         let audience = identity_cfg.audience().to_string();
         let exp_seconds = cfg.security.jwt.exp_seconds;
         let store_path = resolve_store_path(runtime_dir, identity_cfg.store_path());
-        let store = IdentityStore::load_or_initialize(
+        let file_store = IdentityStore::load_or_initialize(
             store_path,
             identity_cfg.environment.clone(),
             identity_cfg.instance_id.clone(),
             cfg.app.version.clone(),
         )?;
+        info!("identity store: using file backend");
+        Ok(Self {
+            environment: identity_cfg.environment.clone(),
+            instance_id: identity_cfg.instance_id.clone(),
+            issuer,
+            audience,
+            app_version: cfg.app.version.clone(),
+            exp_seconds,
+            store: AnyIdentityStore::File(file_store),
+            audit,
+        })
+    }
+
+    /// Bootstrap identity authority with storage backend based on config
+    pub fn bootstrap_with_storage(
+        cfg: &AppConfig,
+        runtime_dir: &Path,
+        db_shell: Option<Arc<DbShellService>>,
+        audit: Arc<dyn AuditSink>,
+    ) -> Result<Self, IdentityError> {
+        let identity_cfg = &cfg.security.identity;
+        let storage_kind = identity_cfg.embedded.storage;
+
+        let issuer = format!(
+            "urn:fenrir:{}:{}",
+            identity_cfg.environment, identity_cfg.instance_id
+        );
+        let audience = identity_cfg.audience().to_string();
+        let exp_seconds = cfg.security.jwt.exp_seconds;
+
+        let store = match storage_kind {
+            IdentityStorageKind::File => {
+                let store_path = resolve_store_path(runtime_dir, identity_cfg.store_path());
+                let file_store = IdentityStore::load_or_initialize(
+                    store_path,
+                    identity_cfg.environment.clone(),
+                    identity_cfg.instance_id.clone(),
+                    cfg.app.version.clone(),
+                )?;
+                info!("identity store: using file backend");
+                AnyIdentityStore::File(file_store)
+            }
+            IdentityStorageKind::Db => {
+                let db_shell = db_shell.ok_or_else(|| {
+                    IdentityError::Invalid(
+                        "DB storage requested but DbShellService not available".into(),
+                    )
+                })?;
+                let db_store = DbIdentityStore::new(
+                    db_shell,
+                    identity_cfg.environment.clone(),
+                    identity_cfg.instance_id.clone(),
+                    cfg.app.version.clone(),
+                )?
+                // Set the directory for pending password file (from setup script)
+                // runtime_dir is already the identity directory
+                .with_pending_password_dir(runtime_dir.to_path_buf());
+                // Initialize DB store (create key if needed)
+                db_store.initialize()?;
+                info!("identity store: using database backend");
+                AnyIdentityStore::Db(db_store)
+            }
+        };
+
         Ok(Self {
             environment: identity_cfg.environment.clone(),
             instance_id: identity_cfg.instance_id.clone(),
@@ -305,16 +375,74 @@ impl IdentityProvider for IdentityAuthority {
 
     fn authenticate_user(
         &self,
-        _user_id: &str,
-        _password: &str,
+        user_id: &str,
+        password: &str,
     ) -> Result<IdentityUserProfile, IdentityError> {
-        Err(IdentityError::Unauthorized(
-            identity_messages::password_auth_not_supported_embedded().into(),
-        ))
+        // Get user from store - if not found, treat as first-time setup
+        let user = match self.store.get_user(user_id)? {
+            Some(u) => u,
+            None => {
+                // User doesn't exist yet - trigger first-time setup
+                return Err(IdentityError::PasswordNotSet {
+                    user_id: user_id.to_string(),
+                });
+            }
+        };
+
+        // Check if password is set
+        let hash = user
+            .password_hash
+            .as_ref()
+            .ok_or_else(|| IdentityError::PasswordNotSet {
+                user_id: user_id.to_string(),
+            })?;
+
+        // Verify password with Argon2
+        let parsed_hash = PasswordHash::new(hash)
+            .map_err(|_| IdentityError::Invalid("invalid password hash format".into()))?;
+
+        let argon2 = Argon2::default();
+        if argon2
+            .verify_password(password.as_bytes(), &parsed_hash)
+            .is_err()
+        {
+            return Err(IdentityError::Unauthorized(
+                identity_messages::invalid_credentials().into(),
+            ));
+        }
+
+        // Record successful login
+        let _ = self.store.record_login(user_id);
+
+        Ok(IdentityUserProfile {
+            user_id: user.user_id,
+            display_name: user.display_name,
+            role: user.role,
+            password_updated_at: user.password_updated_at,
+            last_login_at: user.last_login_at,
+        })
+    }
+
+    fn set_user_password(
+        &self,
+        user_id: &str,
+        password_hash: &str,
+        role: Role,
+    ) -> Result<(), IdentityError> {
+        self.store
+            .set_password(user_id, password_hash.to_string(), role)
+    }
+
+    fn is_password_set(&self, user_id: &str) -> Result<bool, IdentityError> {
+        self.store.is_password_set(user_id)
+    }
+
+    fn take_pending_password(&self) -> Option<String> {
+        self.store.take_pending_password()
     }
 }
 
-fn issued_role(store: &IdentityStore, user_id: &str) -> Option<String> {
+fn issued_role(store: &AnyIdentityStore, user_id: &str) -> Option<String> {
     store
         .read(|state| {
             state

@@ -7,6 +7,7 @@ use crate::domain::module::{
     ModuleSignatureDescriptor, SignatureAlgorithm,
 };
 use crate::domain::module::{ModuleStorageError, ModuleStoragePort};
+use crate::services::ServiceDiagnostics;
 use async_trait::async_trait;
 use semver::Version;
 use std::sync::Arc;
@@ -24,7 +25,7 @@ impl ModuleStoragePort for TestStorage {
     }
 
     async fn load(&self, id: &ModuleId) -> Result<Option<InstalledModule>, ModuleStorageError> {
-        if &self.installed.manifest.id == id.as_str() {
+        if self.installed.manifest.id == id.as_str() {
             Ok(Some(self.installed.clone()))
         } else {
             Ok(None)
@@ -94,7 +95,13 @@ async fn load_state_reattaches_running_process() {
     let storage: Arc<dyn ModuleStoragePort> = Arc::new(TestStorage {
         installed: test_manifest(),
     });
-    let runtime = ProcessModuleRuntime::new(Arc::clone(&storage), tmp_dir.clone());
+    let diagnostics = Arc::new(ServiceDiagnostics::new());
+    let runtime = ProcessModuleRuntime::new(
+        Arc::clone(&storage),
+        tmp_dir.clone(),
+        diagnostics,
+        "http://127.0.0.1:4100".to_string(),
+    );
 
     let state = PersistedModuleState {
         module_id: "fenrir-api".into(),

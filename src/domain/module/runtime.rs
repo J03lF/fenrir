@@ -26,12 +26,22 @@ pub enum ModuleRuntimeStatus {
     Stopping,
 }
 
+/// Kind of runtime Fenrir attached to a module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ModuleRuntimeKind {
+    #[default]
+    Process,
+    StaticSite,
+}
+
 /// Information about a running module instance
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModuleRuntimeInfo {
     pub module_id: ModuleId,
     pub version: ModuleVersion,
     pub status: ModuleRuntimeStatus,
+    pub kind: ModuleRuntimeKind,
     pub pid: Option<u32>,
     pub port: Option<u16>,
     pub started_at: Option<SystemTime>,

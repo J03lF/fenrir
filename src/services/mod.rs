@@ -1,5 +1,6 @@
 pub mod db_connector;
 pub mod db_shell;
+pub mod db_schema;
 pub mod diagnostics;
 pub mod jobs;
 pub mod module;
@@ -17,7 +18,7 @@ pub use db_connector::{DbConnectorEndpoint, DbConnectorService};
 pub use db_shell::DbShellService;
 pub use diagnostics::{ServiceDiagnostics, ServiceMetricSnapshot};
 pub use jobs::{JobLogError, JobLogSnapshot};
-pub use managed::{ManagedService, ServiceControlError, ServiceControlOutcome};
+pub use managed::{block_on_managed, ManagedService, ServiceControlError, ServiceControlOutcome};
 pub use module::{
     ModuleClientSettings, ModuleHealthHttpClient, ModulePortAllocator, ModuleService,
     ModuleServiceInit, ModuleServiceOverrides, ModuleTokenLease,

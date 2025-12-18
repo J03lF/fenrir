@@ -56,7 +56,7 @@ environment = "prod"
 instance_id = "local"
 
 [security.identity.embedded]
-store_path = "runtime/identity/store.json"
+store_path = "identity/store.json"
 audience = "fenrir-control-plane"
 
 [security.identity.external]
@@ -100,13 +100,18 @@ enabled = true
 enabled = true
 interval_ms = 5000
 
+[telemetry.history]
+retention_days = 1
+persist_interval_seconds = 60
+sample_interval_seconds = 30
+
 [audit]
 enabled = true
 buffer_capacity = 2048
 
 [audit.storage]
 path = "runtime/audit/fenrir-audit-history.json"
-retention_hours = 24
+retention_days = 2
 persist_interval_seconds = 30
 
 [cli]

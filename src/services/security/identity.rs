@@ -65,4 +65,25 @@ impl IdentityProvider for InstrumentedIdentityProvider {
         let result = self.inner.authenticate_user(user_id, password);
         self.record_result(result, started_at)
     }
+
+    fn set_user_password(
+        &self,
+        user_id: &str,
+        password_hash: &str,
+        role: crate::security::auth::Role,
+    ) -> Result<(), IdentityError> {
+        let started_at = Instant::now();
+        let result = self.inner.set_user_password(user_id, password_hash, role);
+        self.record_result(result, started_at)
+    }
+
+    fn is_password_set(&self, user_id: &str) -> Result<bool, IdentityError> {
+        let started_at = Instant::now();
+        let result = self.inner.is_password_set(user_id);
+        self.record_result(result, started_at)
+    }
+
+    fn take_pending_password(&self) -> Option<String> {
+        self.inner.take_pending_password()
+    }
 }

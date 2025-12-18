@@ -17,6 +17,10 @@ pub mod notes {
         format!("running (PID {pid})")
     }
 
+    pub fn running_static(port: impl fmt::Display) -> String {
+        format!("serving static assets on 127.0.0.1:{port}")
+    }
+
     pub const RUNNING: &str = "running";
     pub const STOPPED: &str = "stopped";
 }

@@ -10,6 +10,14 @@ struct Args {
     #[arg(long)]
     check_config: bool,
 
+    /// Run database migrations and exit
+    #[arg(long)]
+    migrate: bool,
+
+    /// Check if password is set for a user and exit (0=set, 1=not set)
+    #[arg(long, value_name = "USER_ID")]
+    password_status: Option<String>,
+
     /// Start interactive CLI shell
     #[arg(long)]
     cli: bool,
@@ -23,20 +31,37 @@ struct Args {
     dev_agent_config: Option<PathBuf>,
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let args = Args::parse_from(normalize_args());
 
+    // Handle quick-exit commands before starting tokio runtime
+    if args.check_config {
+        handle_check_config();
+    }
+
+    if args.migrate {
+        handle_migrate();
+    }
+
+    if let Some(ref user_id) = args.password_status {
+        handle_password_status(user_id);
+    }
+
+    // Start the async runtime for the main application
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to create tokio runtime")
+        .block_on(async_main(args));
+}
+
+async fn async_main(args: Args) {
     if let Some(config_path) = args.dev_agent_config {
         if let Err(err) = fenrir::dev_agent::run(config_path).await {
             eprintln!("dev agent failed: {err}");
             std::process::exit(1);
         }
         return;
-    }
-
-    if args.check_config {
-        handle_check_config();
     }
 
     // Boot sequence (logging/telemetry)
@@ -118,6 +143,193 @@ fn handle_check_config() {
             let code = config_error_code(&err);
             eprintln!("{code}: {err}");
             std::process::exit(1);
+        }
+    }
+}
+
+fn handle_migrate() {
+    use fenrir::config::{DbRuntimeMode, EmbeddedEngineKind};
+    use fenrir::domain::db::DbEngine;
+    use fenrir::infra::db;
+    use fenrir::services::db_shell::DbShellService;
+    use fenrir::services::ManagedService;
+    use tokio::runtime::Runtime;
+
+    let cfg = match fenrir::config::load() {
+        Ok(c) => Arc::new(c),
+        Err(err) => {
+            eprintln!("CFG-ERROR: {err}");
+            std::process::exit(2);
+        }
+    };
+
+    let rt = Runtime::new().expect("Failed to create tokio runtime");
+    // Use config-based runtime paths
+    let migrations_dir = cfg.runtime.migrations_path();
+    let db_dir = cfg.runtime.db_path();
+
+    // Start DB runtime if embedded
+    let db_runtime = if cfg.db.runtime.mode == DbRuntimeMode::Embedded {
+        println!("MIGRATE: starting embedded database...");
+        let embedded = &cfg.db.runtime.embedded;
+        let supervisor = db::runtime::DbRuntimeSupervisor::new_early(
+            cfg.db.runtime.mode,
+            embedded.engine,
+            embedded.postgres.port_range,
+            embedded.postgres.binary_path.clone(),
+            db_dir,
+        );
+        match rt.block_on(supervisor.clone().start()) {
+            Ok(_) => Some(supervisor),
+            Err(e) => {
+                eprintln!("MIGRATE-DB-START: failed to start database ({e})");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
+
+    // Get connector URI for adapters and build override
+    let embedded_engine = cfg.db.runtime.embedded.engine;
+    let runtime_override = db_runtime.as_ref().and_then(|r| {
+        r.connector_uri().map(|uri| {
+            let engine = match embedded_engine {
+                EmbeddedEngineKind::Sqlite => DbEngine::Sqlite,
+                EmbeddedEngineKind::Postgres => DbEngine::Postgres,
+            };
+            db::manager::RuntimeDbOverride { engine, uri }
+        })
+    });
+
+    // Create DB adapters
+    let adapters = match db::manager::build_adapters(&cfg, runtime_override) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("MIGRATE-DB-ADAPTERS: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    // Determine effective engine
+    let effective_engine: DbEngine = if cfg.db.runtime.mode == DbRuntimeMode::Embedded {
+        match cfg.db.runtime.embedded.engine {
+            EmbeddedEngineKind::Sqlite => DbEngine::Sqlite,
+            EmbeddedEngineKind::Postgres => DbEngine::Postgres,
+        }
+    } else {
+        match cfg.db.default_engine.parse::<DbEngine>() {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("MIGRATE-DB-ENGINE: invalid default engine ({e})");
+                std::process::exit(1);
+            }
+        }
+    };
+
+    // Create DB shell service
+    let db_shell = match DbShellService::new(effective_engine, adapters) {
+        Ok(s) => Arc::new(s),
+        Err(e) => {
+            eprintln!("MIGRATE-DB-SHELL: failed to create db shell ({e})");
+            std::process::exit(1);
+        }
+    };
+
+    // Run migrations
+    println!("MIGRATE: applying pending migrations...");
+    match rt.block_on(db::migrations::apply_pending_migrations(
+        migrations_dir,
+        db_shell,
+        effective_engine,
+    )) {
+        Ok(report) => {
+            let applied = report.applied();
+            if applied.is_empty() {
+                println!("MIGRATE-OK: database already up to date");
+            } else {
+                println!(
+                    "MIGRATE-OK: applied {} migration(s): {}",
+                    applied.len(),
+                    applied.join(", ")
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!("MIGRATE-ERROR: {e}");
+            std::process::exit(1);
+        }
+    }
+
+    // Stop DB runtime if we started it
+    if let Some(supervisor) = db_runtime {
+        let _ = rt.block_on(supervisor.stop(false));
+    }
+
+    std::process::exit(0);
+}
+
+fn handle_password_status(user_id: &str) {
+    use fenrir::config::IdentityStorageKind;
+
+    let cfg = match fenrir::config::load() {
+        Ok(c) => c,
+        Err(err) => {
+            eprintln!("CFG-ERROR: {err}");
+            std::process::exit(2);
+        }
+    };
+
+    // Use config-based runtime paths
+    let identity_dir = cfg.runtime.identity_path();
+
+    let storage_kind = cfg.security.identity.embedded.storage;
+
+    // Check for pending password file first (works for both modes)
+    let pending_path = identity_dir.join(".pending-password");
+    if pending_path.exists() {
+        // Pending password exists - will be set on first boot
+        println!("PWD-PENDING password pending for '{}'", user_id);
+        std::process::exit(0);
+    }
+
+    match storage_kind {
+        IdentityStorageKind::File => {
+            // Check JSON file
+            let store_path = identity_dir.join("store.json");
+            if !store_path.exists() {
+                println!("PWD-NOT-SET no password for '{}'", user_id);
+                std::process::exit(1);
+            }
+            match std::fs::read_to_string(&store_path) {
+                Ok(content) => {
+                    if content.contains("password_hash") {
+                        println!("PWD-SET password configured for '{}'", user_id);
+                        std::process::exit(0);
+                    } else {
+                        println!("PWD-NOT-SET no password for '{}'", user_id);
+                        std::process::exit(1);
+                    }
+                }
+                Err(_) => {
+                    println!("PWD-NOT-SET no password for '{}'", user_id);
+                    std::process::exit(1);
+                }
+            }
+        }
+        IdentityStorageKind::Db => {
+            // For DB mode, we need to check the database
+            // This is a lightweight check - we just verify the identity_users table has a password
+            // We can't do a full DB query without starting the DB adapter,
+            // so we use a marker file approach
+            let db_marker = identity_dir.join(".db-password-set");
+            if db_marker.exists() {
+                println!("PWD-SET password configured for '{}' (db)", user_id);
+                std::process::exit(0);
+            } else {
+                println!("PWD-NOT-SET no password for '{}' (db)", user_id);
+                std::process::exit(1);
+            }
         }
     }
 }

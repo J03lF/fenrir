@@ -1,0 +1,33 @@
+2025-12-18T10:18:10.712347Z  INFO main ThreadId(01) fenrir::infra::logging::init: file logging initialized log_path=logs/app.log
+2025-12-18T10:18:10.712382Z  INFO main ThreadId(01) fenrir::infra::logging::init: db log file prepared log_path=logs/db.log
+2025-12-18T10:18:10.916009Z  INFO main ThreadId(01) fenrir::infra::db::runtime: db runtime supervisor started (stub) mode=Embedded engine=Postgres dir=/opt/fenrir/development/tmp/runtime/db
+2025-12-18T10:18:10.916332Z  INFO main ThreadId(01) fenrir::boot::startup: core services registered in registry
+2025-12-18T10:18:10.932226Z  INFO main ThreadId(01) fenrir::boot::startup: database migrations up to date engine=postgres
+2025-12-18T10:18:10.932292Z  INFO main ThreadId(01) fenrir::boot::startup: scheduler service started
+2025-12-18T10:18:10.932341Z  INFO tokio-runtime-worker ThreadId(14) fenrir::services::scheduler::service: scheduler heartbeat loop started
+2025-12-18T10:18:10.932559Z  INFO                 main ThreadId(01) fenrir::boot::startup: audit log persistence configured path=/opt/fenrir/development/tmp/runtime/audit/fenrir-audit-history.json capacity=2048 retention_hours=24 persist_seconds=30
+2025-12-18T10:18:10.935552Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: loaded 0 module states from disk
+2025-12-18T10:18:10.939789Z  INFO                 main ThreadId(01) fenrir::security::identity::authority: identity store: using database backend
+2025-12-18T10:18:10.939946Z  INFO                 main ThreadId(01) fenrir::infra::http::server: HTTP control-plane authentication via identity broker with static token fallback
+2025-12-18T10:18:10.939968Z  INFO                 main ThreadId(01) fenrir::boot::startup: boot complete app=fenrir version=0.1.4
+2025-12-18T10:18:10.940210Z  INFO                 main ThreadId(01) fenrir::infra::db::connector: db connector ipc socket ready path=/opt/fenrir/development/tmp/runtime/ipc/db-connector.sock
+2025-12-18T10:18:10.940215Z  INFO tokio-runtime-worker ThreadId(08) fenrir::infra::db::connector: db connector task started task="db-connector-ipc"
+2025-12-18T10:18:10.942147Z  INFO                 main ThreadId(01) fenrir::services::module::gateway: runtime gateway started module=fenrir-api endpoint=http://127.0.0.1:56502/call
+2025-12-18T10:18:10.949291Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: module process started module_id=fenrir-api pid=44084 port=Some(41002)
+2025-12-18T10:18:10.949635Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: module started successfully module_id=fenrir-api pid=Some(44084) port=Some(41002)
+2025-12-18T10:18:11.162856Z  INFO                 main ThreadId(01) fenrir::services::module::gateway: runtime gateway started module=fenrir-web endpoint=http://127.0.0.1:56507/call
+2025-12-18T10:18:11.165853Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: module static server started module_id=fenrir-web port=41000 root=/Users/jfurocket/Documents/personal/modules/fenrir-web/dist/browser
+2025-12-18T10:18:11.166287Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: module started successfully module_id=fenrir-web pid=None port=Some(41000)
+2025-12-18T10:18:11.167993Z  INFO                 main ThreadId(01) fenrir::services::module::gateway: runtime gateway started module=notification-hub endpoint=http://127.0.0.1:56509/call
+2025-12-18T10:18:11.174331Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: module process started module_id=notification-hub pid=44086 port=Some(41001)
+2025-12-18T10:18:11.174804Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: module started successfully module_id=notification-hub pid=Some(44086) port=Some(41001)
+2025-12-18T10:18:11.385648Z  INFO                 main ThreadId(01) fenrir::boot::transports: transport initialisation triggered
+2025-12-18T10:18:11.385696Z  INFO tokio-runtime-worker ThreadId(08) fenrir::boot::transports: ssh server task spawned
+2025-12-18T10:18:11.386226Z  INFO tokio-runtime-worker ThreadId(07) fenrir::infra::http::server: HTTP server task spawned
+2025-12-18T10:18:11.386573Z  INFO tokio-runtime-worker ThreadId(08) fenrir::infra::ssh::server: starting SSH server host=127.0.0.1 port=2222
+2025-12-18T10:18:14.770092Z  INFO tokio-runtime-worker ThreadId(07) thrussh::server::encrypted: pty-req: unknown pty code 42
+2025-12-18T10:18:23.498959Z  INFO tokio-runtime-worker ThreadId(14) fenrir::services::db_connector: db connector request processed tenant="default"
+2025-12-18T10:18:32.014878Z  INFO tokio-runtime-worker ThreadId(14) fenrir::infra::modules::runtime::process: module stopped module_id=fenrir-api pid=44084
+2025-12-18T10:18:32.118733Z  INFO tokio-runtime-worker ThreadId(14) fenrir::infra::modules::runtime::process: module stopped module_id=notification-hub pid=44086
+2025-12-18T10:18:32.120994Z  INFO tokio-runtime-worker ThreadId(07) fenrir::infra::modules::runtime::process: module static server stopped module_id=fenrir-web
+2025-12-18T10:18:32.124147Z  INFO tokio-runtime-worker ThreadId(14) fenrir::infra::db::runtime: db runtime supervisor stopped (stub) mode=Embedded engine=Postgres dir=/opt/fenrir/development/tmp/runtime/db

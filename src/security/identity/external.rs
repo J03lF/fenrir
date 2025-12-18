@@ -446,6 +446,28 @@ impl IdentityProvider for ExternalIdentityProvider {
     ) -> Result<IdentityUserProfile, IdentityError> {
         self.authenticate_internal(user_id, password)
     }
+
+    fn set_user_password(
+        &self,
+        _user_id: &str,
+        _password_hash: &str,
+        _role: crate::security::auth::Role,
+    ) -> Result<(), IdentityError> {
+        // External identity provider manages passwords externally
+        Err(IdentityError::Invalid(
+            "password management not supported for external identity provider".into(),
+        ))
+    }
+
+    fn is_password_set(&self, _user_id: &str) -> Result<bool, IdentityError> {
+        // External provider always assumes password is set (managed externally)
+        Ok(true)
+    }
+
+    fn take_pending_password(&self) -> Option<String> {
+        // External provider doesn't support pending passwords
+        None
+    }
 }
 
 #[derive(Serialize)]

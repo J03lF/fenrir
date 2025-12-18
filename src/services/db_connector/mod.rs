@@ -298,11 +298,41 @@ impl DbConnectorService {
                     ))
                 }
             }
-            JsonValue::String(text) => Ok(DbValue::Text(text)),
+            JsonValue::String(text) => {
+                // Try to detect ISO 8601 timestamps (e.g., "2024-01-01T12:00:00Z" or with timezone)
+                if Self::looks_like_timestamp(&text) {
+                    // Try to parse as RFC 3339 timestamp
+                    if let Ok(ts) = time::OffsetDateTime::parse(
+                        &text,
+                        &time::format_description::well_known::Rfc3339,
+                    ) {
+                        return Ok(DbValue::Timestamp(ts));
+                    }
+                    // Fall back to timestamp string for Postgres to parse
+                    return Ok(DbValue::TimestampStr(text));
+                }
+                Ok(DbValue::Text(text))
+            }
             other => serde_json::to_string(&other)
                 .map(DbValue::Json)
                 .map_err(|err| DbConnectorError::InvalidRequest(err.to_string())),
         }
+    }
+
+    /// Heuristic to detect if a string looks like an ISO 8601 timestamp
+    fn looks_like_timestamp(s: &str) -> bool {
+        // Must be at least "YYYY-MM-DDTHH:MM:SS" (19 chars)
+        if s.len() < 19 {
+            return false;
+        }
+        // Check for typical ISO 8601 patterns
+        let bytes = s.as_bytes();
+        // YYYY-MM-DDTHH:MM:SS
+        bytes[4] == b'-'
+            && bytes[7] == b'-'
+            && (bytes[10] == b'T' || bytes[10] == b' ')
+            && bytes[13] == b':'
+            && bytes[16] == b':'
     }
 }
 

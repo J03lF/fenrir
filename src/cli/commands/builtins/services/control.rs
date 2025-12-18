@@ -50,13 +50,19 @@ fn apply_service_action(
         return Ok(());
     }
 
-    let Some(id) = parsed.target() else {
+    let Some(raw_id) = parsed.target() else {
         writeln!(
             out,
             "{}",
             control_messages::missing_service_id(metadata_for_action(action).usage())
         )?;
         return Ok(());
+    };
+
+    // Verb-first aliases: "start db" → "start service db-runtime"
+    let id = match raw_id {
+        "db" | "database" => "db-runtime",
+        other => other,
     };
 
     let result = dispatch_single(action, deps, id, force);

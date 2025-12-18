@@ -4,7 +4,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use super::error::ConfigError;
-use super::model::AppConfig;
+use super::model::{AppConfig, DbRuntimeMode};
 use super::validation::{
     validate_grpc_tls, validate_http_tls, validate_module_registry_tls, validate_ssh_tls,
 };
@@ -15,6 +15,7 @@ pub(super) const ENV_ENV: &str = "FENRIR_ENV";
 pub(super) const ENV_FILE: &str = "secrets/.env";
 pub(super) const ENV_FILE_OVERRIDE: &str = "FENRIR_ENV_FILE";
 pub(super) const LOCAL_OVERRIDE_FILE: &str = "config/local.toml";
+pub(super) const PROFILE_FILE: &str = "bin/.fenrir-profile";
 
 pub fn load() -> Result<AppConfig, ConfigError> {
     load_env_file_overrides()?;
@@ -41,13 +42,54 @@ pub fn load() -> Result<AppConfig, ConfigError> {
 
     builder = builder.add_source(config::Environment::with_prefix("FENRIR").separator("__"));
 
-    let cfg: AppConfig = builder
+    let mut cfg: AppConfig = builder
         .build()
         .map_err(|e| ConfigError::Anyhow(e.into()))?
         .try_deserialize()
         .map_err(|e| ConfigError::Anyhow(e.into()))?;
+
+    // Apply profile-specific ENV overrides (FENRIR_* without double underscore)
+    apply_profile_overrides(&mut cfg);
+
     validate(&cfg)?;
     Ok(cfg)
+}
+
+/// Apply ENV overrides from .fenrir-profile that use simple FENRIR_* names
+fn apply_profile_overrides(cfg: &mut AppConfig) {
+    // App section overrides
+    if let Ok(value) = env::var("FENRIR_DISTRIBUTION") {
+        if !value.trim().is_empty() {
+            cfg.app.distribution = Some(value);
+        }
+    }
+    if let Ok(value) = env::var("FENRIR_PROFILE") {
+        if !value.trim().is_empty() {
+            cfg.app.profile = Some(value);
+        }
+    }
+    if let Ok(value) = env::var("FENRIR_DEBUG") {
+        cfg.app.debug = matches!(value.to_lowercase().as_str(), "true" | "1" | "yes");
+    }
+
+    // SSH user override
+    if let Ok(value) = env::var("FENRIR_USER") {
+        if !value.trim().is_empty() {
+            cfg.server.ssh.user = value;
+        }
+    }
+
+    // Module paths overrides
+    if let Ok(value) = env::var("FENRIR_DEV_MODULE_PATH") {
+        if !value.trim().is_empty() {
+            cfg.modules.dev_sources.base_path = Some(value);
+        }
+    }
+    if let Ok(value) = env::var("FENRIR_MODULE_INSTALL_DIR") {
+        if !value.trim().is_empty() {
+            cfg.modules.storage.install_dir = value;
+        }
+    }
 }
 
 pub fn validate(cfg: &AppConfig) -> Result<(), ConfigError> {
@@ -59,6 +101,10 @@ pub fn validate(cfg: &AppConfig) -> Result<(), ConfigError> {
     cfg.modules.validate_services()?;
     cfg.audit.validate()?;
 
+    cfg.db
+        .runtime
+        .validate(cfg.db.default_engine.as_str())?;
+
     if !matches!(
         cfg.db.default_engine.as_str(),
         "postgres" | "mysql" | "sqlite" | "mongodb"
@@ -69,47 +115,83 @@ pub fn validate(cfg: &AppConfig) -> Result<(), ConfigError> {
     }
 
     let connections = &cfg.db.connections;
-    let default_key = match cfg.db.default_engine.as_str() {
-        "postgres" => {
+    let runtime_mode = cfg.db.runtime.mode;
+    let default_settings = match (runtime_mode, cfg.db.default_engine.as_str()) {
+        (DbRuntimeMode::External, "postgres") => {
             let settings = connections.postgres.as_ref().ok_or(ConfigError::Invalid(
                 "db.connections.postgres.uri must be set when postgres is default",
             ))?;
             settings.resolve_uri("db.connections.postgres.uri")?;
-            settings
+            Some(settings)
         }
-        "mysql" => {
+        (DbRuntimeMode::External, "mysql") => {
             let settings = connections.mysql.as_ref().ok_or(ConfigError::Invalid(
                 "db.connections.mysql.uri must be set when mysql is default",
             ))?;
             settings.resolve_uri("db.connections.mysql.uri")?;
-            settings
+            Some(settings)
         }
-        "sqlite" => {
+        (DbRuntimeMode::External, "sqlite") => {
             let settings = connections.sqlite.as_ref().ok_or(ConfigError::Invalid(
                 "db.connections.sqlite.uri must be set when sqlite is default",
             ))?;
             settings.resolve_uri("db.connections.sqlite.uri")?;
-            settings
+            Some(settings)
         }
-        "mongodb" => {
+        (DbRuntimeMode::External, "mongodb") => {
             let settings = connections.mongodb.as_ref().ok_or(ConfigError::Invalid(
                 "db.connections.mongodb.uri must be set when mongodb is default",
             ))?;
             settings.resolve_uri("db.connections.mongodb.uri")?;
-            settings
+            Some(settings)
+        }
+        // Embedded: allow URIs to be optional, but validate if provided for the default engine.
+        (DbRuntimeMode::Embedded, "postgres") => {
+            if let Some(settings) = connections.postgres.as_ref() {
+                settings.resolve_uri("db.connections.postgres.uri")?;
+                Some(settings)
+            } else {
+                None
+            }
+        }
+        (DbRuntimeMode::Embedded, "mysql") => {
+            if let Some(settings) = connections.mysql.as_ref() {
+                settings.resolve_uri("db.connections.mysql.uri")?;
+                Some(settings)
+            } else {
+                None
+            }
+        }
+        (DbRuntimeMode::Embedded, "sqlite") => {
+            if let Some(settings) = connections.sqlite.as_ref() {
+                settings.resolve_uri("db.connections.sqlite.uri")?;
+                Some(settings)
+            } else {
+                None
+            }
+        }
+        (DbRuntimeMode::Embedded, "mongodb") => {
+            if let Some(settings) = connections.mongodb.as_ref() {
+                settings.resolve_uri("db.connections.mongodb.uri")?;
+                Some(settings)
+            } else {
+                None
+            }
         }
         _ => unreachable!(),
     };
 
-    if matches!(default_key.pool.max, Some(0)) {
-        return Err(ConfigError::Invalid(
-            "db pool max must be greater than zero",
-        ));
-    }
-    if matches!(default_key.pool.timeout_ms, Some(0)) {
-        return Err(ConfigError::Invalid(
-            "db pool timeout must be greater than zero",
-        ));
+    if let Some(default_key) = default_settings {
+        if matches!(default_key.pool.max, Some(0)) {
+            return Err(ConfigError::Invalid(
+                "db pool max must be greater than zero",
+            ));
+        }
+        if matches!(default_key.pool.timeout_ms, Some(0)) {
+            return Err(ConfigError::Invalid(
+                "db pool timeout must be greater than zero",
+            ));
+        }
     }
 
     if cfg.server.http.port == 0 || cfg.server.ssh.port == 0 {
@@ -188,6 +270,13 @@ pub fn validate(cfg: &AppConfig) -> Result<(), ConfigError> {
 }
 
 fn load_env_file_overrides() -> Result<(), ConfigError> {
+    // 1. Load bin/.fenrir-profile first (if exists)
+    let profile_path = PathBuf::from(PROFILE_FILE);
+    if profile_path.exists() {
+        load_env_file(&profile_path)?;
+    }
+
+    // 2. Then load secrets/.env or FENRIR_ENV_FILE override
     let override_path = env::var(ENV_FILE_OVERRIDE)
         .ok()
         .filter(|value| !value.trim().is_empty())

@@ -33,6 +33,13 @@ const MODULE_LOG_TAIL_ARGUMENT: CommandArgument = CommandArgument {
     completion: CompletionKind::Static(&["--tail"]),
 };
 
+const MODULE_RUNTIME_ARGUMENT: CommandArgument = CommandArgument {
+    name: "--runtime",
+    optional: true,
+    variadic: false,
+    completion: CompletionKind::Static(&["--runtime"]),
+};
+
 const MODULE_RESOURCE_SINGULAR_OPTIONS: &[&str] = &["module"];
 const MODULE_RESOURCE_PLURAL_OPTIONS: &[&str] = &["modules"];
 const MODULE_RESOURCE_SINGULAR_ARGUMENT: CommandArgument = CommandArgument::required("resource")
@@ -69,6 +76,13 @@ const SYNCHRONIZE_SHAPE: CommandShape =
 const RELEASE_ARGUMENTS: &[CommandArgument] =
     &[MODULE_RESOURCE_SINGULAR_ARGUMENT, MODULE_ID_ARGUMENT];
 const RELEASE_SHAPE: CommandShape = CommandShape::new("release", &[], RELEASE_ARGUMENTS, &[]);
+
+const SCAFFOLD_ARGUMENTS: &[CommandArgument] = &[
+    MODULE_RESOURCE_SINGULAR_ARGUMENT,
+    MODULE_ID_ARGUMENT,
+    MODULE_RUNTIME_ARGUMENT,
+];
+const SCAFFOLD_SHAPE: CommandShape = CommandShape::new("scaffold", &[], SCAFFOLD_ARGUMENTS, &[]);
 
 pub fn search_command() -> CommandEntry {
     CommandEntry::with_shape(
@@ -111,6 +125,17 @@ pub fn release_command() -> CommandEntry {
         msg_modules::release::DETAILS,
         handlers::handle_release_command,
         RELEASE_SHAPE,
+    )
+}
+
+pub fn scaffold_command() -> CommandEntry {
+    CommandEntry::with_shape(
+        "scaffold",
+        msg_modules::scaffold::DESCRIPTION,
+        msg_modules::scaffold::SYNOPSIS,
+        msg_modules::scaffold::DETAILS,
+        handlers::handle_scaffold_command,
+        SCAFFOLD_SHAPE,
     )
 }
 
@@ -211,6 +236,12 @@ const MODULE_SUBCOMMANDS: &[CommandSubcommand] = &[
         &[],
         &[MODULE_ID_ARGUMENT],
         msg_modules::subcommands::RELEASE_DESC,
+    ),
+    CommandSubcommand::new(
+        "scaffold",
+        &[],
+        &[MODULE_ID_ARGUMENT, MODULE_RUNTIME_ARGUMENT],
+        msg_modules::subcommands::SCAFFOLD_DESC,
     ),
     CommandSubcommand::new(
         "release-dev-overrides",

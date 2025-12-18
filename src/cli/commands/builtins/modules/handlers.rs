@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -11,7 +12,10 @@ use crate::cli::commands::registry::{
 };
 use crate::cli::commands::table::Table;
 use crate::domain::module::{ModuleId, ModuleInstallSource, ModuleRuntimeInfo, ModuleVersion};
-use crate::services::module::{DistributionAction, ModuleService, ModuleSyncOutcome};
+use crate::services::module::{
+    DistributionAction, ModuleScaffoldOptions, ModuleScaffoldRuntime, ModuleService,
+    ModuleSyncOutcome,
+};
 use crate::services::{ServiceSnapshot, ServiceStatus};
 use crate::utils;
 use crate::utils::messages::cli::builtins::modules as msg_modules;
@@ -20,7 +24,7 @@ use super::ctx::{dev_services_metadata, module_error_metadata, ModulesCommandCtx
 use super::entries::{available_subcommands, resolve_module_subcommand};
 use super::output::{
     module_error_code, render_distribution_plan, render_manifest, render_runtime_error,
-    render_service_error, runtime_error_code,
+    render_scaffold_summary, render_service_error, runtime_error_code,
 };
 use super::tasks::{run_release_task, run_synchronize_task, InstallDistributionConfirmation};
 
@@ -102,6 +106,16 @@ pub(super) fn handle_release_command(
     run_scoped_module_command(deps, args, out, &RELEASE_SPEC)
 }
 
+pub(super) fn handle_scaffold_command(
+    deps: &CliDependencies,
+    args: &[&str],
+    _registry: &CommandRegistry,
+    out: &mut dyn Write,
+    _env: ShellEnvironment,
+) -> io::Result<CommandOutcome> {
+    run_scoped_module_command(deps, args, out, &SCAFFOLD_SPEC)
+}
+
 pub(super) fn handle_uninstall_command(
     deps: &CliDependencies,
     args: &[&str],
@@ -148,6 +162,7 @@ fn dispatch_module(
         "install-distribution" => handle_install_distribution(ctx, out, args),
         "synchronize" => handle_synchronize(ctx, out, args),
         "release" => handle_release(ctx, out, args),
+        "scaffold" => handle_scaffold(ctx, out, args),
         "release-dev-overrides" => handle_release_dev_overrides(ctx, out, args),
         "uninstall" => handle_uninstall(ctx, out, args),
         "check-updates" => handle_check_updates(ctx, out, args),
@@ -728,6 +743,36 @@ fn handle_release(
     Ok(CommandOutcome::Continue)
 }
 
+fn handle_scaffold(
+    ctx: &ModulesCommandCtx,
+    out: &mut dyn Write,
+    args: &[&str],
+) -> io::Result<CommandOutcome> {
+    let parsed = match parse_scaffold_args(args) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            writeln!(out, "{err}")?;
+            return Ok(CommandOutcome::Continue);
+        }
+    };
+
+    let (module_id, runtime) = parsed;
+    let module_id_for_call = module_id.clone();
+    let options = ModuleScaffoldOptions::new(runtime);
+    let summary = match ctx.module_call(move |service| async move {
+        service.scaffold_module(&module_id_for_call, options).await
+    }) {
+        Ok(summary) => summary,
+        Err(err) => {
+            render_service_error(out, msg_modules::scaffold_view::ERROR_CONTEXT, &err)?;
+            return Ok(CommandOutcome::Continue);
+        }
+    };
+
+    render_scaffold_summary(out, &summary)?;
+    Ok(CommandOutcome::Continue)
+}
+
 fn handle_release_dev_overrides(
     ctx: &ModulesCommandCtx,
     out: &mut dyn Write,
@@ -1226,6 +1271,49 @@ fn handle_restart(
     Ok(CommandOutcome::Continue)
 }
 
+fn parse_scaffold_args(args: &[&str]) -> Result<(ModuleId, ModuleScaffoldRuntime), String> {
+    let mut module_id: Option<ModuleId> = None;
+    let mut runtime = ModuleScaffoldRuntime::default();
+    let mut idx = 0;
+
+    while idx < args.len() {
+        let current = args[idx];
+        if current.eq_ignore_ascii_case("module") {
+            idx += 1;
+            continue;
+        }
+        if current.starts_with("--runtime") {
+            let value = if let Some((_, tail)) = current.split_once('=') {
+                tail
+            } else {
+                idx += 1;
+                args.get(idx)
+                    .copied()
+                    .ok_or_else(|| msg_modules::scaffold_flow::MISSING_RUNTIME_VALUE.to_string())?
+            };
+            runtime = ModuleScaffoldRuntime::from_str(value).map_err(|_| {
+                msg_modules::scaffold_flow::unknown_runtime(
+                    value,
+                    &ModuleScaffoldRuntime::variants().join(", "),
+                )
+            })?;
+        } else if module_id.is_none() {
+            module_id =
+                Some(ModuleId::new(current).map_err(|err| {
+                    msg_modules::parser::invalid_id_value(current, &err.to_string())
+                })?);
+        } else {
+            return Err(msg_modules::scaffold_flow::extra_arguments(current));
+        }
+
+        idx += 1;
+    }
+
+    let module_id =
+        module_id.ok_or_else(|| msg_modules::scaffold_flow::MISSING_MODULE.to_string())?;
+    Ok((module_id, runtime))
+}
+
 fn parse_module_id(out: &mut dyn Write, raw: &str) -> io::Result<Option<ModuleId>> {
     match ModuleId::new(raw) {
         Ok(id) => Ok(Some(id)),
@@ -1374,6 +1462,7 @@ fn render_module_service_table(
 fn runtime_success_metadata(info: &ModuleRuntimeInfo) -> AuditMetadata {
     let mut metadata = AuditMetadata::default()
         .insert("status", format!("{:?}", info.status))
+        .insert("kind", format!("{:?}", info.kind))
         .insert("restart_count", info.restart_count.to_string());
     if let Some(pid) = info.pid {
         metadata = metadata.insert("pid", pid.to_string());
@@ -1553,6 +1642,11 @@ const SYNCHRONIZE_SPEC: ModuleCommandSpec = ModuleCommandSpec::new(
 const RELEASE_SPEC: ModuleCommandSpec = ModuleCommandSpec::new(
     "release",
     "release module <name>",
+    ModuleResourceKind::ModuleSingular,
+);
+const SCAFFOLD_SPEC: ModuleCommandSpec = ModuleCommandSpec::new(
+    "scaffold",
+    "scaffold module <name> [--runtime rust|node|angular]",
     ModuleResourceKind::ModuleSingular,
 );
 const UNINSTALL_SPEC: ModuleCommandSpec = ModuleCommandSpec::new(

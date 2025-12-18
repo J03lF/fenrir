@@ -3,9 +3,22 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
     <title>Fenrir Control Plane</title>
+    
+    <!-- Performance: Preconnect to external resources -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    
+    <!-- Performance: Preload critical resources -->
+    <link rel="preload" href="/static/css/app.css" as="style" />
+    <link rel="preload" href="/static/js/dashboard.js" as="script" />
+    <link rel="preload" href="/static/img/fenrir-transparent.png" as="image" />
+    
+    <!-- DNS prefetch for API calls -->
+    <link rel="dns-prefetch" href="//localhost" />
+    
+    <!-- Stylesheets -->
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Sora:wght@300;400;500;600;700&display=swap" />
     <link rel="stylesheet" href="/static/css/reset.css" />
     <link rel="stylesheet" href="/static/css/app.css" />
@@ -558,7 +571,7 @@
         <div class="modal-overlay" data-service-modal data-visible="false">
           <div class="modal-container">
             <header class="modal-header">
-              <h3 data-service-modal-title>Service Details</h3>
+              <h3>Service Details</h3>
               <button type="button" class="modal-close" data-service-modal-close aria-label="Schließen">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <line x1="18" y1="6" x2="6" y2="18"/>

@@ -151,6 +151,8 @@ impl PostgresAdapter {
                 DbValue::Float(num) => PreparedParamBinding::Float(*num),
                 DbValue::Bool(flag) => PreparedParamBinding::Bool(*flag),
                 DbValue::Json(json) => PreparedParamBinding::Json(json.clone()),
+                DbValue::Timestamp(dt) => PreparedParamBinding::Timestamp(*dt),
+                DbValue::TimestampStr(s) => PreparedParamBinding::TimestampStr(s.clone()),
             })
             .collect()
     }
@@ -204,6 +206,9 @@ enum PreparedParamBinding {
     Float(f64),
     Bool(bool),
     Json(String),
+    Timestamp(::time::OffsetDateTime),
+    /// Timestamp as string - will be cast to TIMESTAMPTZ by Postgres
+    TimestampStr(String),
 }
 
 impl PreparedParamBinding {
@@ -215,6 +220,9 @@ impl PreparedParamBinding {
             PreparedParamBinding::Float(value) => value,
             PreparedParamBinding::Bool(value) => value,
             PreparedParamBinding::Json(value) => value,
+            PreparedParamBinding::Timestamp(value) => value,
+            // For TimestampStr, we bind as text - the query should cast it
+            PreparedParamBinding::TimestampStr(value) => value,
         }
     }
 }

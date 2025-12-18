@@ -36,9 +36,13 @@ jobs:
         run: cargo build --workspace --release
       - name: Bundle distribution
         run: |
-          mkdir -p dist/config
+          mkdir -p dist/config dist/bin dist/docs dist/scripts
           cp target/release/fenrir dist/
           cp config/*.toml dist/config/
+          cp bin/.fenrir-profile dist/bin/
+          cp scripts/*.sh dist/scripts/
+          chmod +x dist/scripts/*.sh
+          cp docs/*.md dist/docs/ 2>/dev/null || true
           tar -czf fenrir-${{ inputs.version }}.tar.gz -C dist .
       - name: Upload staged artifact
         uses: actions/upload-artifact@v4

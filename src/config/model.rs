@@ -18,12 +18,137 @@ pub struct AppConfig {
     pub audit: AuditSection,
     pub cli: CliSection,
     pub modules: ModulesSection,
+    #[serde(default)]
+    pub runtime: RuntimeSection,
+}
+
+/// Runtime paths configuration
+#[derive(Debug, Deserialize, Clone)]
+pub struct RuntimeSection {
+    /// Base directory for all runtime data (identity, db, migrations, etc.)
+    /// Can be absolute or relative to the working directory.
+    /// Defaults to "runtime" or FENRIR_RUNTIME_DIR env var.
+    #[serde(default = "default_runtime_base_path")]
+    pub base_path: String,
+
+    /// Directory for identity store (relative to base_path if not absolute)
+    #[serde(default = "default_runtime_identity_dir")]
+    pub identity_dir: String,
+
+    /// Directory for database files (relative to base_path if not absolute)
+    #[serde(default = "default_runtime_db_dir")]
+    pub db_dir: String,
+
+    /// Directory for migration state (relative to base_path if not absolute)
+    #[serde(default = "default_runtime_migrations_dir")]
+    pub migrations_dir: String,
+
+    /// Directory for IPC sockets (relative to base_path if not absolute)
+    #[serde(default = "default_runtime_ipc_dir")]
+    pub ipc_dir: String,
+
+    /// Directory for scheduler state (relative to base_path if not absolute)
+    #[serde(default = "default_runtime_scheduler_dir")]
+    pub scheduler_dir: String,
+}
+
+impl Default for RuntimeSection {
+    fn default() -> Self {
+        Self {
+            base_path: default_runtime_base_path(),
+            identity_dir: default_runtime_identity_dir(),
+            db_dir: default_runtime_db_dir(),
+            migrations_dir: default_runtime_migrations_dir(),
+            ipc_dir: default_runtime_ipc_dir(),
+            scheduler_dir: default_runtime_scheduler_dir(),
+        }
+    }
+}
+
+impl RuntimeSection {
+    /// Resolve the base path, considering FENRIR_RUNTIME_DIR env var
+    pub fn resolve_base_path(&self) -> std::path::PathBuf {
+        // Env var takes precedence
+        if let Ok(env_dir) = std::env::var("FENRIR_RUNTIME_DIR") {
+            return std::path::PathBuf::from(env_dir);
+        }
+        std::path::PathBuf::from(&self.base_path)
+    }
+
+    /// Resolve a subdirectory path (absolute or relative to base_path)
+    pub fn resolve_path(&self, subdir: &str) -> std::path::PathBuf {
+        let base = self.resolve_base_path();
+        let path = std::path::PathBuf::from(subdir);
+        if path.is_absolute() {
+            path
+        } else {
+            base.join(path)
+        }
+    }
+
+    /// Get resolved identity directory
+    pub fn identity_path(&self) -> std::path::PathBuf {
+        self.resolve_path(&self.identity_dir)
+    }
+
+    /// Get resolved database directory
+    pub fn db_path(&self) -> std::path::PathBuf {
+        self.resolve_path(&self.db_dir)
+    }
+
+    /// Get resolved migrations directory
+    pub fn migrations_path(&self) -> std::path::PathBuf {
+        self.resolve_path(&self.migrations_dir)
+    }
+
+    /// Get resolved IPC directory
+    pub fn ipc_path(&self) -> std::path::PathBuf {
+        self.resolve_path(&self.ipc_dir)
+    }
+
+    /// Get resolved scheduler directory
+    pub fn scheduler_path(&self) -> std::path::PathBuf {
+        self.resolve_path(&self.scheduler_dir)
+    }
+}
+
+fn default_runtime_base_path() -> String {
+    "runtime".to_string()
+}
+
+fn default_runtime_identity_dir() -> String {
+    "identity".to_string()
+}
+
+fn default_runtime_db_dir() -> String {
+    "db".to_string()
+}
+
+fn default_runtime_migrations_dir() -> String {
+    "migrations".to_string()
+}
+
+fn default_runtime_ipc_dir() -> String {
+    "ipc".to_string()
+}
+
+fn default_runtime_scheduler_dir() -> String {
+    "scheduler".to_string()
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct AppSection {
     pub name: String,
     pub version: String,
+    /// Distribution identifier (e.g. "1.4.0") - can be set via FENRIR_DISTRIBUTION
+    #[serde(default)]
+    pub distribution: Option<String>,
+    /// Profile name (e.g. "LOCAL_DEV", "STAGING") - can be set via FENRIR_PROFILE  
+    #[serde(default)]
+    pub profile: Option<String>,
+    /// Debug mode flag - can be set via FENRIR_DEBUG
+    #[serde(default)]
+    pub debug: bool,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -105,6 +230,60 @@ pub struct SecuritySection {
     pub service_tokens: ServiceTokenSection,
     #[serde(default)]
     pub identity: IdentitySection,
+    #[serde(default)]
+    pub password_policy: PasswordPolicyConfig,
+}
+
+/// Password policy configuration for first-time setup
+#[derive(Debug, Deserialize, Clone)]
+pub struct PasswordPolicyConfig {
+    /// Minimum password length (default: 12 for prod, 4 for dev)
+    #[serde(default = "default_password_min_length")]
+    pub min_length: usize,
+    /// Maximum password length (default: 128)
+    #[serde(default = "default_password_max_length")]
+    pub max_length: usize,
+    /// Require at least one uppercase letter
+    #[serde(default)]
+    pub require_uppercase: bool,
+    /// Require at least one lowercase letter
+    #[serde(default)]
+    pub require_lowercase: bool,
+    /// Require at least one digit
+    #[serde(default)]
+    pub require_digit: bool,
+    /// Require at least one special character
+    #[serde(default)]
+    pub require_special: bool,
+    /// Check against common password list
+    #[serde(default = "default_true")]
+    pub check_common_passwords: bool,
+}
+
+impl Default for PasswordPolicyConfig {
+    fn default() -> Self {
+        Self {
+            min_length: default_password_min_length(),
+            max_length: default_password_max_length(),
+            require_uppercase: false,
+            require_lowercase: false,
+            require_digit: false,
+            require_special: false,
+            check_common_passwords: true,
+        }
+    }
+}
+
+fn default_password_min_length() -> usize {
+    4
+}
+
+fn default_password_max_length() -> usize {
+    128
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -151,8 +330,23 @@ pub struct IdentitySection {
     pub external: IdentityExternalSection,
 }
 
+/// Storage backend for embedded identity provider
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityStorageKind {
+    /// Store identity data in JSON file (default for dev)
+    #[default]
+    File,
+    /// Store identity data in database
+    Db,
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct IdentityEmbeddedSection {
+    /// Storage backend: "file" (default) or "db"
+    #[serde(default)]
+    pub storage: IdentityStorageKind,
+    /// Path to JSON file store (only used when storage = "file")
     #[serde(default = "default_identity_store_path")]
     pub store_path: String,
     #[serde(default = "default_identity_audience")]
@@ -215,6 +409,7 @@ impl Default for IdentitySection {
 impl Default for IdentityEmbeddedSection {
     fn default() -> Self {
         Self {
+            storage: IdentityStorageKind::default(),
             store_path: default_identity_store_path(),
             audience: default_identity_audience(),
         }
@@ -232,6 +427,33 @@ pub struct DbSection {
     pub default_engine: String,
     #[serde(default)]
     pub connections: DbConnections,
+    #[serde(default)]
+    pub runtime: DbRuntimeSection,
+    #[serde(default)]
+    pub schema: DbSchemaSection,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct DbSchemaSection {
+    /// Directory for exported StarUML schemas
+    #[serde(default = "default_schema_export_dir")]
+    pub export_dir: String,
+    /// Create backup before import
+    #[serde(default = "default_true")]
+    pub backup_before_import: bool,
+}
+
+impl Default for DbSchemaSection {
+    fn default() -> Self {
+        Self {
+            export_dir: default_schema_export_dir(),
+            backup_before_import: true,
+        }
+    }
+}
+
+fn default_schema_export_dir() -> String {
+    "runtime/schemas".to_string()
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -255,6 +477,132 @@ pub struct DbPoolSettings {
     pub timeout_ms: Option<u64>,
 }
 
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DbRuntimeMode {
+    External,
+    Embedded,
+}
+
+impl Default for DbRuntimeMode {
+    fn default() -> Self {
+        Self::External
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbeddedEngineKind {
+    Sqlite,
+    Postgres,
+}
+
+impl EmbeddedEngineKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EmbeddedEngineKind::Sqlite => "sqlite",
+            EmbeddedEngineKind::Postgres => "postgres",
+        }
+    }
+}
+
+impl Default for EmbeddedEngineKind {
+    fn default() -> Self {
+        Self::Sqlite
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct DbRuntimeSection {
+    #[serde(default)]
+    pub mode: DbRuntimeMode,
+    #[serde(default)]
+    pub embedded: DbEmbeddedSection,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct DbEmbeddedSection {
+    #[serde(default)]
+    pub engine: EmbeddedEngineKind,
+    #[serde(default)]
+    pub sqlite: DbEmbeddedSqlite,
+    #[serde(default)]
+    pub postgres: DbEmbeddedPostgres,
+}
+
+impl Default for DbEmbeddedSection {
+    fn default() -> Self {
+        Self {
+            engine: EmbeddedEngineKind::Sqlite,
+            sqlite: DbEmbeddedSqlite::default(),
+            postgres: DbEmbeddedPostgres::default(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct DbEmbeddedSqlite {
+    /// Path to the sqlite database file when running embedded
+    #[serde(default = "default_embedded_sqlite_path")]
+    pub file_path: String,
+    /// Optional maintenance vacuum interval in seconds
+    #[serde(default)]
+    pub vacuum_interval_seconds: Option<u64>,
+}
+
+impl Default for DbEmbeddedSqlite {
+    fn default() -> Self {
+        Self {
+            file_path: default_embedded_sqlite_path(),
+            vacuum_interval_seconds: None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct DbEmbeddedPostgres {
+    /// Data directory for embedded Postgres
+    #[serde(default = "default_embedded_pg_data_dir")]
+    pub data_dir: String,
+    /// Path to the postgres binary (can be just "postgres" if on PATH)
+    #[serde(default = "default_embedded_pg_binary")]
+    pub binary_path: String,
+    #[serde(default = "default_embedded_pg_port_range")]
+    pub port_range: DbEmbeddedPortRange,
+}
+
+impl Default for DbEmbeddedPostgres {
+    fn default() -> Self {
+        Self {
+            data_dir: default_embedded_pg_data_dir(),
+            binary_path: default_embedded_pg_binary(),
+            port_range: default_embedded_pg_port_range(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Copy)]
+pub struct DbEmbeddedPortRange {
+    pub min: u16,
+    pub max: u16,
+}
+
+fn default_embedded_sqlite_path() -> String {
+    "runtime/db/fenrir.db".to_string()
+}
+
+fn default_embedded_pg_data_dir() -> String {
+    "runtime/db/postgres".to_string()
+}
+
+fn default_embedded_pg_binary() -> String {
+    "postgres".to_string()
+}
+
+fn default_embedded_pg_port_range() -> DbEmbeddedPortRange {
+    DbEmbeddedPortRange { min: 55432, max: 55442 }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct TelemetrySection {
     pub tracing: TelemetryTracingSection,
@@ -264,6 +612,8 @@ pub struct TelemetrySection {
     pub health: TelemetryHealthSection,
     #[serde(default)]
     pub system: TelemetrySystemSection,
+    #[serde(default)]
+    pub history: TelemetryHistorySection,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -316,6 +666,40 @@ impl Default for TelemetrySystemSection {
     }
 }
 
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct TelemetryHistorySection {
+    #[serde(default)]
+    pub retention_days: Option<u64>,
+    #[serde(default)]
+    pub retention_hours: Option<u64>,
+    #[serde(default)]
+    pub persist_interval_seconds: Option<u64>,
+    #[serde(default)]
+    pub sample_interval_seconds: Option<u64>,
+}
+
+impl TelemetryHistorySection {
+    pub fn retention_hours(&self) -> Option<u64> {
+        if let Some(days) = self.retention_days {
+            return days.checked_mul(24);
+        }
+        self.retention_hours
+    }
+
+    pub fn retention_seconds(&self) -> Option<u64> {
+        self.retention_hours()
+            .map(|hours| hours.saturating_mul(3600))
+    }
+
+    pub fn persist_interval_seconds(&self) -> Option<u64> {
+        self.persist_interval_seconds
+    }
+
+    pub fn sample_interval_seconds(&self) -> Option<u64> {
+        self.sample_interval_seconds
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct AuditSection {
     pub enabled: bool,
@@ -330,6 +714,8 @@ pub struct AuditStorageSection {
     pub path: Option<String>,
     #[serde(default)]
     pub retention_hours: Option<u64>,
+    #[serde(default)]
+    pub retention_days: Option<u64>,
     #[serde(default)]
     pub persist_interval_seconds: Option<u64>,
 }
@@ -591,10 +977,6 @@ pub struct ServiceTokenSection {
 }
 
 fn default_require_signature() -> bool {
-    true
-}
-
-fn default_true() -> bool {
     true
 }
 
@@ -1140,6 +1522,13 @@ impl AuditStorageSection {
                 ));
             }
         }
+        if let Some(days) = self.retention_days {
+            if days == 0 {
+                return Err(ConfigError::Invalid(
+                    "audit.storage.retention_days must be > 0 when set",
+                ));
+            }
+        }
         if let Some(interval) = self.persist_interval_seconds {
             if interval == 0 {
                 return Err(ConfigError::Invalid(
@@ -1170,6 +1559,9 @@ impl AuditStorageSection {
     }
 
     pub fn retention_hours(&self) -> Option<u64> {
+        if let Some(days) = self.retention_days {
+            return days.checked_mul(24);
+        }
         self.retention_hours
     }
 
@@ -1196,6 +1588,34 @@ impl TelemetrySection {
             if interval == 0 {
                 return Err(ConfigError::Invalid(
                     "telemetry.system.interval_ms must be > 0",
+                ));
+            }
+        }
+        if let Some(days) = self.history.retention_days {
+            if days == 0 {
+                return Err(ConfigError::Invalid(
+                    "telemetry.history.retention_days must be > 0 when set",
+                ));
+            }
+        }
+        if let Some(hours) = self.history.retention_hours {
+            if hours == 0 {
+                return Err(ConfigError::Invalid(
+                    "telemetry.history.retention_hours must be > 0 when set",
+                ));
+            }
+        }
+        if let Some(interval) = self.history.persist_interval_seconds {
+            if interval == 0 {
+                return Err(ConfigError::Invalid(
+                    "telemetry.history.persist_interval_seconds must be > 0 when set",
+                ));
+            }
+        }
+        if let Some(interval) = self.history.sample_interval_seconds {
+            if interval == 0 {
+                return Err(ConfigError::Invalid(
+                    "telemetry.history.sample_interval_seconds must be > 0 when set",
                 ));
             }
         }
@@ -1232,6 +1652,80 @@ impl DbConnectionSettings {
 
     pub fn pool_timeout(&self) -> Option<u64> {
         self.pool.timeout_ms
+    }
+}
+
+impl DbRuntimeSection {
+    pub fn validate(&self, default_engine: &str) -> Result<(), ConfigError> {
+        match self.mode {
+            DbRuntimeMode::External => Ok(()),
+            DbRuntimeMode::Embedded => self.embedded.validate(default_engine),
+        }
+    }
+}
+
+impl DbEmbeddedSection {
+    fn validate(&self, default_engine: &str) -> Result<(), ConfigError> {
+        if default_engine != self.engine.as_str() {
+            return Err(ConfigError::Invalid(
+                "db.runtime.embedded.engine must match db.default_engine when mode = embedded",
+            ));
+        }
+        match self.engine {
+            EmbeddedEngineKind::Sqlite => self.sqlite.validate(),
+            EmbeddedEngineKind::Postgres => self.postgres.validate(),
+        }
+    }
+}
+
+impl DbEmbeddedSqlite {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.file_path.trim().is_empty() {
+            return Err(ConfigError::Invalid(
+                "db.runtime.embedded.sqlite.file_path must not be empty",
+            ));
+        }
+        if let Some(interval) = self.vacuum_interval_seconds {
+            if interval == 0 {
+                return Err(ConfigError::Invalid(
+                    "db.runtime.embedded.sqlite.vacuum_interval_seconds must be > 0 when set",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl DbEmbeddedPostgres {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.data_dir.trim().is_empty() {
+            return Err(ConfigError::Invalid(
+                "db.runtime.embedded.postgres.data_dir must not be empty",
+            ));
+        }
+        if self.binary_path.trim().is_empty() {
+            return Err(ConfigError::Invalid(
+                "db.runtime.embedded.postgres.binary_path must not be empty",
+            ));
+        }
+        self.port_range.validate()?;
+        Ok(())
+    }
+}
+
+impl DbEmbeddedPortRange {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.min == 0 || self.max == 0 {
+            return Err(ConfigError::Invalid(
+                "db.runtime.embedded.postgres.port_range min/max must be > 0",
+            ));
+        }
+        if self.min > self.max {
+            return Err(ConfigError::Invalid(
+                "db.runtime.embedded.postgres.port_range.min must be <= max",
+            ));
+        }
+        Ok(())
     }
 }
 

@@ -29,21 +29,35 @@ pub fn process_command(
     if trimmed.eq_ignore_ascii_case("help") {
         return Ok(CommandResult::Message(help_lines(session)));
     }
-    if trimmed.eq_ignore_ascii_case("/ping") {
+    if trimmed.eq_ignore_ascii_case("/ping") || trimmed.eq_ignore_ascii_case(r"\ping") {
         executor.run(session.ping())?;
         return Ok(CommandResult::Message(vec![
             db_shell_process_messages::PING_OK.to_string(),
         ]));
     }
-    if trimmed.starts_with("/c") {
+    // \refresh is handled in shell.rs, but return a hint if it reaches here
+    if trimmed.eq_ignore_ascii_case("/refresh") || trimmed.eq_ignore_ascii_case(r"\refresh") {
+        return Ok(CommandResult::Message(vec![
+            "Use \\refresh at start of line (not after other input)".to_string(),
+        ]));
+    }
+    if trimmed.starts_with("/c") || trimmed.starts_with(r"\c") {
         return handle_switch_command(session, trimmed, executor);
     }
-    if trimmed == "/d" {
+    if trimmed == "/d" || trimmed == r"\d" {
         let tables = executor.run(session.list_tables())?;
         return Ok(CommandResult::Tables(tables));
     }
-    if let Some(stripped) = trimmed.strip_prefix("/d ") {
-        let table = stripped.trim();
+    // Describe table: /d <table> or \d <table>
+    let describe_prefix = if trimmed.starts_with("/d ") {
+        Some("/d ")
+    } else if trimmed.starts_with(r"\d ") {
+        Some(r"\d ")
+    } else {
+        None
+    };
+    if let Some(prefix) = describe_prefix {
+        let table = trimmed.strip_prefix(prefix).unwrap_or("").trim();
         if table.is_empty() {
             return Ok(CommandResult::Message(vec![
                 db_shell_process_messages::TABLE_NAME_HINT.to_string(),
@@ -104,6 +118,7 @@ fn help_lines(session: &DbShellSession) -> Vec<String> {
         db_shell_process_messages::META_SWITCH.to_string(),
         db_shell_process_messages::META_TABLES.to_string(),
         db_shell_process_messages::META_PING.to_string(),
+        db_shell_process_messages::META_REFRESH.to_string(),
         db_shell_process_messages::META_EXIT.to_string(),
         String::new(),
         db_shell_process_messages::meta_engine_line(

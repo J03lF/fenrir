@@ -3,10 +3,13 @@ mod config;
 mod dev;
 mod dev_agent;
 mod dev_env;
+mod gateway;
 mod ports;
 mod reported;
 mod runtime;
+mod scaffold;
 mod service;
+pub mod token_audit;
 mod types;
 
 pub use clients::{ModuleClientSettings, ModuleHealthHttpClient};
@@ -18,6 +21,6 @@ pub use ports::ModulePortAllocator;
 pub use service::{ModuleService, ModuleServiceInit, ModuleTokenLease};
 pub use types::{
     DistributionAction, DistributionPlanEntry, ModuleDevServices, ModuleIngressError,
-    ModuleIngressTarget, ModuleSyncOutcome, ModuleSyncPackage, ModuleUpdateInfo,
-    RegisteredDevService,
+    ModuleIngressTarget, ModuleScaffoldOptions, ModuleScaffoldRuntime, ModuleScaffoldSummary,
+    ModuleSyncOutcome, ModuleSyncPackage, ModuleUpdateInfo, RegisteredDevService,
 };

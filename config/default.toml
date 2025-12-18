@@ -1,5 +1,16 @@
 app = { name = "fenrir", version = "0.1.4" }
 
+# Runtime paths configuration
+# All paths are relative to base_path unless absolute
+# FENRIR_RUNTIME_DIR env var overrides base_path
+[runtime]
+base_path = "runtime"           # Base directory for all runtime data
+identity_dir = "identity"       # Identity store location
+db_dir = "db"                   # Embedded database files
+migrations_dir = "migrations"   # Migration state files
+ipc_dir = "ipc"                 # IPC sockets
+scheduler_dir = "scheduler"     # Scheduler state
+
 [server]
 enable_http = true
 enable_grpc = true
@@ -60,7 +71,7 @@ environment = "development"
 instance_id = "local"
 
 [security.identity.embedded]
-store_path = "runtime/identity/store.json"
+store_path = "identity/store.json"
 audience = "fenrir-control-plane"
 
 [security.identity.external]
@@ -69,6 +80,16 @@ jwks_url = "http://127.0.0.1:8081/jwks.json"
 auth_token = "env:FENRIR_IDENTITY_TOKEN"
 jwks_refresh_seconds = 300
 audience = "fenrir-control-plane"
+
+# Password policy for first-time setup (strict defaults for production)
+[security.password_policy]
+min_length = 12
+max_length = 128
+require_uppercase = true
+require_lowercase = true
+require_digit = true
+require_special = false
+check_common_passwords = true
 
 [security.session]
 lifetime_seconds = 3600
@@ -83,12 +104,35 @@ cleanup_interval_seconds = 60
 [db]
 default_engine = "postgres"
 
+[db.runtime]
+mode = "embedded" # external | embedded
+
+[db.runtime.embedded]
+engine = "postgres" # sqlite | postgres
+
+[db.runtime.embedded.sqlite]
+file_path = "runtime/db/fenrir.db"
+# vacuum_interval_seconds = 0
+
+[db.runtime.embedded.postgres]
+data_dir = "/opt/fenrir/tmp/runtime/db/postgres"
+binary_path = "postgres"
+
+[db.runtime.embedded.postgres.port_range]
+min = 55432
+max = 55442
+
 [db.connections.postgres]
 uri = "env:FENRIR_DB_POSTGRES_URI"
 
 [db.connections.postgres.pool]
 max = 16
 timeout_ms = 5000
+
+[db.schema]
+export_dir = "/opt/fenrir/development/tmp/schemas"
+import_dir = "/opt/fenrir/development/tmp/schemas"
+auto_backup = true  # Vor Import automatisch Backup machen
 
 [telemetry.tracing]
 level = "info"
@@ -103,13 +147,18 @@ enabled = true
 enabled = true
 interval_ms = 5000
 
+[telemetry.history]
+retention_days = 1
+persist_interval_seconds = 120
+sample_interval_seconds = 30
+
 [audit]
 enabled = true
 buffer_capacity = 2048
 
 [audit.storage]
 path = "runtime/audit/fenrir-audit-history.json"
-retention_hours = 24
+retention_days = 2
 persist_interval_seconds = 30
 
 [cli]

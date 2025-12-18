@@ -2092,6 +2092,8 @@ label.series-toggle:hover {
 .services-table-card .table-scroll {
   max-height: 60vh;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  scroll-behavior: smooth;
 }
 
 .services-header {
@@ -2507,6 +2509,8 @@ label.series-toggle:hover {
 .audit-table-card .table-scroll {
   max-height: 60vh;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  scroll-behavior: smooth;
 }
 
 /* Audit Toolbar - consistent with services */
@@ -3054,6 +3058,138 @@ button:disabled {
   overflow-y: auto;
 }
 
+/* Clickable table rows */
+.service-row.clickable {
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.service-row.clickable:hover {
+  background-color: rgba(99, 102, 241, 0.05);
+}
+
+.service-row.clickable td:not(.actions-cell) {
+  position: relative;
+}
+
+/* Service Detail Modal Specifics */
+.service-detail-grid {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xl);
+}
+
+.service-detail-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-bottom: var(--space-lg);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.service-detail-header h4 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.service-detail-id {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.service-detail-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.service-detail-section h5 {
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--accent-secondary);
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.service-detail-section h5::before {
+  content: '';
+  width: 3px;
+  height: 12px;
+  background: var(--accent-primary);
+  border-radius: 2px;
+}
+
+.service-detail-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--space-sm) 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.service-detail-row:last-child {
+  border-bottom: none;
+}
+
+.service-detail-label {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.service-detail-value {
+  font-size: 0.85rem;
+  color: var(--text-primary);
+}
+
+.service-detail-value.mono {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.8rem;
+  color: var(--accent-secondary);
+}
+
+.service-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-md);
+}
+
+.metric-box {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: var(--space-md);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: center;
+}
+
+.metric-box .metric-label {
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+
+.metric-box .metric-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--accent-secondary);
+}
+
+.metric-box .metric-value.error {
+  color: var(--status-error);
+}
+
 /* Audit Detail Modal Specifics */
 .audit-detail-grid {
   display: flex;
@@ -3230,132 +3366,4 @@ button:disabled {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 0.8rem;
-}
-
-/* ============================================
-   SERVICE DETAIL MODAL
-   ============================================ */
-
-/* Clickable service rows */
-.service-row {
-  cursor: pointer;
-}
-
-.service-row:hover {
-  background: rgba(90, 122, 154, 0.08);
-}
-
-/* Stop propagation area (actions) */
-.actions-cell {
-  cursor: default;
-}
-
-/* Service detail grid */
-.detail-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: var(--space-md);
-  margin-bottom: var(--space-xl);
-}
-
-.detail-item {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: var(--space-md);
-  background: var(--bg-elevated);
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border-subtle);
-}
-
-.detail-label {
-  font-size: 0.6rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
-  color: var(--accent-secondary);
-}
-
-.detail-value {
-  font-size: 0.88rem;
-  color: var(--text-primary);
-}
-
-.detail-value.mono {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 0.78rem;
-  color: var(--accent-secondary);
-}
-
-.detail-section {
-  margin-bottom: var(--space-lg);
-}
-
-.detail-section h4 {
-  font-size: 0.7rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-  color: var(--text-muted);
-  margin-bottom: var(--space-md);
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm);
-}
-
-.detail-section h4::before {
-  content: '';
-  width: 3px;
-  height: 12px;
-  background: var(--accent-primary);
-  border-radius: 2px;
-}
-
-.metrics-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: var(--space-sm);
-}
-
-.metric-item {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: var(--space-md);
-  background: var(--bg-secondary);
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border-subtle);
-  text-align: center;
-}
-
-.metric-label {
-  font-size: 0.65rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--text-muted);
-}
-
-.metric-value {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 1rem;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-.detail-note {
-  font-size: 0.85rem;
-  color: var(--text-secondary);
-  line-height: 1.5;
-  padding: var(--space-md);
-  background: var(--bg-elevated);
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border-subtle);
-}
-
-@media (max-width: 480px) {
-  .detail-grid,
-  .metrics-grid {
-    grid-template-columns: 1fr;
-  }
 }

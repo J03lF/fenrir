@@ -456,16 +456,29 @@ impl SchedulerService {
         }
     }
 }
+pub struct SchedulerJobContext {
+    pub registry: Arc<ServiceRegistry>,
+    pub db_shell: Arc<DbShellService>,
+    pub diagnostics: Arc<ServiceDiagnostics>,
+    pub module_service: Arc<ModuleService>,
+    pub services: Arc<AppServices>,
+    pub runtime_dir: PathBuf,
+    pub token_exchange: Arc<TokenExchangeService>,
+}
+
 pub fn install_default_jobs(
     scheduler: &SchedulerService,
-    registry: Arc<ServiceRegistry>,
-    db_shell: Arc<DbShellService>,
-    diagnostics: Arc<ServiceDiagnostics>,
-    module_service: Arc<ModuleService>,
-    services: Arc<AppServices>,
-    runtime_dir: PathBuf,
-    token_exchange: Arc<TokenExchangeService>,
+    ctx: SchedulerJobContext,
 ) -> Result<(), SchedulerError> {
+    let SchedulerJobContext {
+        registry,
+        db_shell,
+        diagnostics,
+        module_service,
+        services,
+        runtime_dir,
+        token_exchange,
+    } = ctx;
     let registry_for_uptime = Arc::clone(&registry);
     scheduler.schedule_fixed_rate(
         ScheduledJobSpec {

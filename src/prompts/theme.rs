@@ -14,15 +14,26 @@ pub fn banner() -> String {
 }
 
 pub fn welcome_line(config: &AppConfig) -> String {
+    let version_info = build_version_info(config);
     prompt_messages::welcome_line(
         COLOR_DIM,
         COLOR_ACCENT,
         &config.server.ssh.server_name,
         COLOR_PRIMARY,
         &config.app.name,
-        &config.app.version,
+        &version_info,
         COLOR_RESET,
     )
+}
+
+fn build_version_info(config: &AppConfig) -> String {
+    // Use distribution as version if set, otherwise fallback to app.version
+    if let Some(dist) = &config.app.distribution {
+        if !dist.is_empty() {
+            return dist.clone();
+        }
+    }
+    config.app.version.clone()
 }
 
 pub fn help_hint() -> String {

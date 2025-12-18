@@ -10,7 +10,7 @@ use tokio::task;
 use tracing::{info, warn};
 
 use crate::audit::{AuditLog, InMemoryAuditLog};
-use crate::config::{self, ModuleRuntimeEngine};
+use crate::config::{self, DbRuntimeMode, ModuleRuntimeEngine};
 use crate::domain::db::DbEngine;
 use crate::infra::http::{HttpServer, HTTP_SERVICE_ID};
 use crate::infra::modules::{
@@ -18,15 +18,16 @@ use crate::infra::modules::{
     InProcessModuleRuntime, LocalModuleRegistry, ProcessModuleRuntime,
 };
 use crate::infra::{db, logging, telemetry};
-use crate::security::identity::build_identity_provider;
+use crate::infra::db::runtime::DbRuntimeSupervisor;
+use crate::security::identity::build_identity_provider_with_db;
 use crate::security::manager::{AuditSink, SecurityManager};
 use crate::security::service::ServiceScope;
-use crate::services::scheduler::install_default_jobs;
+use crate::services::scheduler::{install_default_jobs, SchedulerJobContext};
 use crate::services::{
-    AppServices, DbShellService, ModuleClientSettings, ModuleHealthHttpClient, ModulePortAllocator,
-    ModuleService, ModuleServiceInit, ModuleServiceOverrides, SchedulerService, ServiceDescriptor,
-    ServiceDiagnostics, ServiceKind, ServiceRegistry, ServiceStatus, ServiceTag, SessionService,
-    TokenExchangeService,
+    block_on_managed, AppServices, DbShellService, ManagedService, ModuleClientSettings,
+    ModuleHealthHttpClient, ModulePortAllocator, ModuleService, ModuleServiceInit,
+    ModuleServiceOverrides, SchedulerService, ServiceDescriptor, ServiceDiagnostics,
+    ServiceKind, ServiceRegistry, ServiceStatus, ServiceTag, SessionService, TokenExchangeService,
 };
 use crate::utils::messages::boot::{
     errors as boot_errors, logs as boot_logs, runtime as runtime_messages,
@@ -37,12 +38,17 @@ use crate::utils::messages::boot::{
 
 use super::context::BootContext;
 use super::error::{wrap_boot, BootError, BootErrorCode};
-use super::helpers::{resolve_runtime_dir, resolve_storage_path};
+use super::helpers::resolve_storage_path;
 use super::registry::register_registry_toggle_service;
 
 pub fn boot() -> Result<BootContext, BootError> {
     let cfg = config::load().map_err(BootError::from_config)?;
-    let runtime_dir = resolve_runtime_dir();
+    // Use config-based runtime paths (FENRIR_RUNTIME_DIR still takes precedence)
+    let runtime_dir = cfg.runtime.resolve_base_path();
+    // Ensure runtime directory exists
+    if let Err(e) = std::fs::create_dir_all(&runtime_dir) {
+        tracing::warn!(error = %e, path = %runtime_dir.display(), "failed to create runtime directory");
+    }
     env::set_var(
         "FENRIR_RUNTIME_DIR",
         runtime_dir.to_string_lossy().into_owned(),
@@ -58,8 +64,48 @@ pub fn boot() -> Result<BootContext, BootError> {
         boot_errors::TELEMETRY_INIT_FAILED,
     )?;
 
+    // Early supervisor creation for embedded postgres (needs to start before adapters are built).
+    let early_db_runtime: Option<Arc<DbRuntimeSupervisor>> =
+        if cfg.db.runtime.mode == DbRuntimeMode::Embedded {
+            let db_dir = cfg.runtime.db_path();
+            let sup = DbRuntimeSupervisor::new_early(
+                cfg.db.runtime.mode,
+                cfg.db.runtime.embedded.engine,
+                cfg.db.runtime.embedded.postgres.port_range,
+                cfg.db.runtime.embedded.postgres.binary_path.clone(),
+                db_dir,
+            );
+            // Start the supervisor (blocking) to get connector URI before building adapters.
+            let sup_clone = Arc::clone(&sup);
+            let start_result = block_on_managed(async move {
+                sup_clone.start().await
+            });
+            if let Err(err) = start_result {
+                return Err(BootError::new(
+                    BootErrorCode::DbRuntimeStart,
+                    boot_errors::DB_RUNTIME_START_FAILED,
+                    err,
+                ));
+            }
+            Some(sup)
+        } else {
+            None
+        };
+
+    // Build runtime override from early supervisor if available.
+    let runtime_override = early_db_runtime.as_ref().and_then(|sup| {
+        sup.connector_uri().map(|uri| {
+            use crate::config::EmbeddedEngineKind;
+            let engine = match cfg.db.runtime.embedded.engine {
+                EmbeddedEngineKind::Sqlite => DbEngine::Sqlite,
+                EmbeddedEngineKind::Postgres => DbEngine::Postgres,
+            };
+            db::manager::RuntimeDbOverride { engine, uri }
+        })
+    });
+
     let adapters = wrap_boot(
-        db::manager::build_adapters(&cfg),
+        db::manager::build_adapters(&cfg, runtime_override),
         BootErrorCode::DbAdapters,
         boot_errors::DB_ADAPTERS_FAILED,
     )?;
@@ -184,6 +230,19 @@ pub fn boot() -> Result<BootContext, BootError> {
         ServiceStatus::Standby,
         Some(service_notes::INITIALIZATION.to_string()),
     );
+    if cfg.db.runtime.mode == DbRuntimeMode::Embedded {
+        registry.register(
+            ServiceDescriptor::new(
+                "db-runtime",
+                service_names::DB_RUNTIME,
+                service_descriptions::DB_RUNTIME,
+                ServiceKind::Infrastructure,
+            )
+            .with_tags(&[ServiceTag::Platform]),
+            ServiceStatus::Standby,
+            Some(service_notes::INITIALIZATION.to_string()),
+        );
+    }
 
     let diagnostics = Arc::new(ServiceDiagnostics::new());
 
@@ -204,12 +263,43 @@ pub fn boot() -> Result<BootContext, BootError> {
         boot_errors::TELEMETRY_PROBE_FAILED,
     )?;
 
+    // When in embedded mode, override default_engine to match the embedded engine.
+    let effective_default_engine = if cfg.db.runtime.mode == DbRuntimeMode::Embedded {
+        use crate::config::EmbeddedEngineKind;
+        match cfg.db.runtime.embedded.engine {
+            EmbeddedEngineKind::Sqlite => DbEngine::Sqlite,
+            EmbeddedEngineKind::Postgres => DbEngine::Postgres,
+        }
+    } else {
+        default_engine
+    };
+
     let db_shell_service = Arc::new(wrap_boot(
-        DbShellService::new(default_engine, adapters),
+        DbShellService::new(effective_default_engine, adapters),
         BootErrorCode::DbShellInit,
         boot_errors::DB_SHELL_INIT_FAILED,
     )?);
-    let scheduler_state_dir = runtime_dir.join("scheduler");
+    let migrations_dir = cfg.runtime.migrations_path();
+    let migration_report = wrap_boot(
+        block_on_managed(db::migrations::apply_pending_migrations(
+            migrations_dir,
+            Arc::clone(&db_shell_service),
+            effective_default_engine,
+        )),
+        BootErrorCode::DbMigrations,
+        boot_errors::DB_MIGRATIONS_FAILED,
+    )?;
+    if migration_report.applied_count() > 0 {
+        info!(
+            engine = %effective_default_engine,
+            applied = migration_report.applied_count(),
+            files = ?migration_report.applied(),
+            "database migrations applied"
+        );
+    } else {
+        info!(engine = %effective_default_engine, "database migrations up to date");
+    }
+    let scheduler_state_dir = cfg.runtime.scheduler_path();
     let scheduler_service = Arc::new(SchedulerService::new(
         Arc::clone(&registry),
         Arc::clone(&diagnostics),
@@ -239,7 +329,7 @@ pub fn boot() -> Result<BootContext, BootError> {
                 boot_errors::AUDIT_DIR_PREP_FAILED,
             )?;
         }
-        let retention_hours = cfg.audit.storage.retention_hours().unwrap_or(24);
+        let retention_hours = cfg.audit.storage.retention_hours().unwrap_or(48);
         let retention_seconds = retention_hours.saturating_mul(3600);
         let persist_seconds = cfg.audit.storage.persist_interval_seconds().unwrap_or(30);
         let log_path = resolved_path.clone();
@@ -312,9 +402,12 @@ pub fn boot() -> Result<BootContext, BootError> {
     let module_runtime: Arc<dyn crate::domain::module::ModuleRuntimePort> =
         match cfg.modules.runtime.engine {
             ModuleRuntimeEngine::Process => {
+                let control_plane_base = control_plane_base_url(&cfg.server.http);
                 let runtime = Arc::new(ProcessModuleRuntime::new(
                     Arc::clone(&module_storage),
                     runtime_state_dir.clone(),
+                    Arc::clone(&diagnostics),
+                    control_plane_base,
                 ));
 
                 if let Ok(handle) = Handle::try_current() {
@@ -354,8 +447,14 @@ pub fn boot() -> Result<BootContext, BootError> {
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
     // defer module_service creation until after security manager is ready
+    let identity_dir = cfg.runtime.identity_path();
     let identity_service = wrap_boot(
-        build_identity_provider(&cfg, runtime_dir.as_path(), Arc::clone(&audit_sink)),
+        build_identity_provider_with_db(
+            &cfg,
+            identity_dir.as_path(),
+            Some(Arc::clone(&db_shell_service)),
+            Arc::clone(&audit_sink),
+        ),
         BootErrorCode::IdentityInit,
         boot_errors::IDENTITY_PROVIDER_INIT_FAILED,
     )?;
@@ -403,6 +502,29 @@ pub fn boot() -> Result<BootContext, BootError> {
                 anyhow!(err),
             )
         })?;
+
+    // Process pending password from setup script (if any)
+    if let Some(pending_password) = identity_service.take_pending_password() {
+        let configured_user = &cfg.server.ssh.user;
+        info!(user = %configured_user, "processing pending password from setup script");
+
+        match security_manager.hash_password(pending_password.as_bytes()) {
+            Ok(hash) => {
+                if let Err(err) = identity_service.set_user_password(
+                    configured_user,
+                    &hash,
+                    crate::security::auth::Role::Admin,
+                ) {
+                    warn!(error = %err, "failed to set pending password");
+                } else {
+                    info!(user = %configured_user, "password configured successfully");
+                }
+            }
+            Err(err) => {
+                warn!(error = %err, "failed to hash pending password");
+            }
+        }
+    }
 
     let default_service_scopes = wrap_boot(
         cfg.modules
@@ -458,6 +580,7 @@ pub fn boot() -> Result<BootContext, BootError> {
         control_plane_url,
         service_snapshot_path: Some(runtime_state_dir.join("services.json")),
         diagnostics: services.diagnostics(),
+        services: Arc::downgrade(&services),
     });
     services
         .attach_module_service(Arc::clone(&module_service))
@@ -487,17 +610,33 @@ pub fn boot() -> Result<BootContext, BootError> {
         ServiceStatus::Active,
         Some(service_notes::MODULE_READY.to_string()),
     );
+    // Attach security/diagnostics to early db runtime supervisor and register it.
+    if let Some(db_runtime) = early_db_runtime {
+        db_runtime.attach_security(Arc::clone(&security_manager));
+        db_runtime.attach_diagnostics(Arc::clone(&diagnostics));
+        // Attach to OnceCell so CLI can query status/logs
+        let _ = services.attach_db_runtime(Arc::clone(&db_runtime));
+        // Register for ManagedService start/stop
+        services.register_runtime_service(db_runtime);
+        registry.set_status(
+            "db-runtime",
+            ServiceStatus::Active,
+            Some(service_notes::DB_RUNTIME_READY.to_string()),
+        );
+    }
 
     wrap_boot(
         install_default_jobs(
             &scheduler_service,
-            Arc::clone(&registry),
-            Arc::clone(&db_shell_service),
-            Arc::clone(&diagnostics),
-            Arc::clone(&module_service),
-            Arc::clone(&services),
-            runtime_dir.clone(),
-            Arc::clone(&token_exchange_service),
+            SchedulerJobContext {
+                registry: Arc::clone(&registry),
+                db_shell: Arc::clone(&db_shell_service),
+                diagnostics: Arc::clone(&diagnostics),
+                module_service: Arc::clone(&module_service),
+                services: Arc::clone(&services),
+                runtime_dir: runtime_dir.clone(),
+                token_exchange: Arc::clone(&token_exchange_service),
+            },
         ),
         BootErrorCode::SchedulerJobs,
         boot_errors::SCHEDULER_JOBS_INSTALL_FAILED,
@@ -644,13 +783,15 @@ pub fn boot() -> Result<BootContext, BootError> {
                     if scheduler.start() {
                         install_default_jobs(
                             &scheduler,
-                            registry,
-                            db_shell,
-                            diagnostics,
-                            module_service,
-                            services_handle,
-                            runtime_dir,
-                            token_exchange,
+                            SchedulerJobContext {
+                                registry,
+                                db_shell,
+                                diagnostics,
+                                module_service,
+                                services: services_handle,
+                                runtime_dir,
+                                token_exchange,
+                            },
                         )
                         .map_err(|err| anyhow!(err))?;
                         Ok(true)
@@ -732,4 +873,18 @@ pub fn boot() -> Result<BootContext, BootError> {
         http_server,
         logging: logging_handle,
     })
+}
+
+fn control_plane_base_url(http_cfg: &crate::config::HttpConfig) -> String {
+    let scheme = if http_cfg.tls.enabled {
+        "https"
+    } else {
+        "http"
+    };
+    let host = match http_cfg.host.as_str() {
+        "0.0.0.0" => "127.0.0.1",
+        "::" => "127.0.0.1",
+        other => other,
+    };
+    format!("{}://{}:{}", scheme, host, http_cfg.port)
 }

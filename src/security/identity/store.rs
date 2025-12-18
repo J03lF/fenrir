@@ -42,6 +42,16 @@ impl IdentityKeyMaterial {
         }
     }
 
+    /// Create from parts (used by DbIdentityStore)
+    pub fn from_parts(
+        key_id: String,
+        secret_key: [u8; 32],
+        public_key: [u8; 32],
+        created_at: OffsetDateTime,
+    ) -> Self {
+        Self::new(key_id, secret_key, public_key, created_at)
+    }
+
     pub fn keypair(&self) -> Result<Keypair, IdentityError> {
         let mut bytes = [0u8; 64];
         bytes[..32].copy_from_slice(&self.secret_key);
@@ -212,6 +222,92 @@ impl IdentityStore {
         }
         fs::rename(tmp_path, &self.path)?;
         Ok(())
+    }
+
+    /// Check if a user exists and has a password set
+    pub fn is_password_set(&self, user_id: &str) -> Result<bool, IdentityError> {
+        self.read(|state| {
+            state
+                .users
+                .get(user_id)
+                .map(|user| user.password_hash.is_some())
+                .unwrap_or(false)
+        })
+    }
+
+    /// Get user record if exists
+    pub fn get_user(&self, user_id: &str) -> Result<Option<IdentityUserRecord>, IdentityError> {
+        self.read(|state| state.users.get(user_id).cloned())
+    }
+
+    /// Set or update password for a user (creates user if not exists)
+    pub fn set_password(
+        &self,
+        user_id: &str,
+        password_hash: String,
+        role: Role,
+    ) -> Result<(), IdentityError> {
+        self.write(|state| {
+            let now = OffsetDateTime::now_utc();
+            if let Some(user) = state.users.get_mut(user_id) {
+                user.password_hash = Some(password_hash);
+                user.password_updated_at = Some(now);
+            } else {
+                let user = IdentityUserRecord {
+                    user_id: user_id.to_string(),
+                    display_name: Some(user_id.to_string()),
+                    role,
+                    created_at: now,
+                    last_issued_at: None,
+                    token_count: 0,
+                    last_token_fingerprint: None,
+                    tokens: Vec::new(),
+                    password_hash: Some(password_hash),
+                    password_updated_at: Some(now),
+                    last_login_at: None,
+                };
+                state.users.insert(user_id.to_string(), user);
+            }
+            Ok(())
+        })
+    }
+
+    /// Update last login timestamp
+    pub fn record_login(&self, user_id: &str) -> Result<(), IdentityError> {
+        self.write(|state| {
+            if let Some(user) = state.users.get_mut(user_id) {
+                user.last_login_at = Some(OffsetDateTime::now_utc());
+            }
+            Ok(())
+        })
+    }
+
+    /// Check for and process pending password from setup script
+    /// Returns Some(password) if a pending password exists, None otherwise
+    pub fn take_pending_password(&self) -> Option<String> {
+        let pending_path = self.path.parent()?.join(".pending-password");
+
+        if !pending_path.exists() {
+            return None;
+        }
+
+        // Read and delete the pending password file
+        match fs::read_to_string(&pending_path) {
+            Ok(password) => {
+                // Delete the file immediately for security
+                let _ = fs::remove_file(&pending_path);
+                let trimmed = password.trim().to_string();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                }
+            }
+            Err(_) => {
+                let _ = fs::remove_file(&pending_path);
+                None
+            }
+        }
     }
 }
 

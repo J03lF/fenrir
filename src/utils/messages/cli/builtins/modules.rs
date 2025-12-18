@@ -13,6 +13,7 @@ pub mod command {
         "check modules                   – checks for available updates",
         "log module <name> [--tail N]    – shows logs for a running module",
         "modules services [name]         – list module runtime/override services",
+        "modules scaffold <name> [opts]  – generate a dev-ready module skeleton",
         "modules env module <name>       – show sanitized module environment",
         "modules start <name>            – start module runtime",
         "modules stop <name>             – stop module runtime",
@@ -48,6 +49,16 @@ pub mod release {
     pub const DESCRIPTION: &str = "Revert local module changes";
     pub const SYNOPSIS: &str = "release module <name>";
     pub const DETAILS: &[&str] = &["release module <name> – restore the distribution build"];
+}
+
+pub mod scaffold {
+    pub const DESCRIPTION: &str = "Bootstrap a local module workspace";
+    pub const SYNOPSIS: &str = "scaffold module <name> [--runtime rust|node|angular]";
+    pub const DETAILS: &[&str] = &[
+        "scaffold module <name> – create a module skeleton under modules.dev_sources",
+        "--runtime angular      – produce the control-plane Angular workspace stub",
+        "--runtime node         – produce a TypeScript service worker stub (default runtime: rust)",
+    ];
 }
 
 pub mod release_dev_overrides {
@@ -93,6 +104,28 @@ pub mod env_view {
     pub const EMPTY_STATE: &str = "No Fenrir-managed environment variables recorded yet.";
 }
 
+pub mod scaffold_flow {
+    pub const USAGE: &str = "Use: modules scaffold <name> [--runtime rust|node|angular]";
+    pub const MISSING_MODULE: &str = "Please provide a module id (lowercase, digits, '-' or '_').";
+    pub const MISSING_RUNTIME_VALUE: &str =
+        "--runtime expects a value (rust, node, angular). Default is rust.";
+    pub fn unknown_runtime(value: &str, supported: &str) -> String {
+        format!("Unknown runtime '{value}'. Supported values: {supported}.")
+    }
+    pub fn extra_arguments(arg: &str) -> String {
+        format!("Unexpected argument '{arg}'. Provide a single module id plus flags.")
+    }
+}
+
+pub mod scaffold_view {
+    pub const ERROR_CONTEXT: &str = "Scaffolding failed";
+    pub const FILES_HEADER: &str = "Generated files:";
+    pub const FILE_PREFIX: &str = "  • ";
+    pub fn created(module: &str, runtime: &str, root: &str) -> String {
+        format!("Scaffolded module '{module}' ({runtime}) at {root}")
+    }
+}
+
 pub mod stop_all {
     pub const DESCRIPTION: &str = "Stop all running modules";
     pub const SYNOPSIS: &str = "stop-all modules";
@@ -126,6 +159,7 @@ pub mod subcommands {
     pub const STOP_DESC: &str = "Stop a module runtime";
     pub const RESTART_DESC: &str = "Restart a module runtime";
     pub const STOP_ALL_DESC: &str = "Stop all module runtimes";
+    pub const SCAFFOLD_DESC: &str = "Generate a module scaffold";
 }
 
 pub mod routing {
@@ -267,7 +301,6 @@ pub mod synchronize_flow {
             ),
         }
     }
-
     pub const DEV_AGENT_NOT_CONFIGURED: &str =
         "   • No [dev.run] section found – start your module manually (see env exports).";
 }

@@ -51,6 +51,14 @@ pub fn password_auth_not_supported_embedded() -> &'static str {
     "password authentication not supported for embedded identity provider"
 }
 
+pub fn user_not_found(user_id: &str) -> String {
+    format!("user '{}' not found", user_id)
+}
+
+pub fn invalid_credentials() -> &'static str {
+    "invalid credentials"
+}
+
 // Audit + logging
 pub fn audit_append_failed() -> &'static str {
     "failed to append identity audit event"

@@ -1,0 +1,77 @@
+{
+  "_type": "UMLModel",
+  "_id": "0869a354-e719-4557-80f5-fb6df38672d8",
+  "name": "db-postgres",
+  "ownedElements": [
+    {
+      "_type": "UMLClass",
+      "_id": "1380c623-b38c-494b-b08c-4632ff299b78",
+      "name": "verification_codes",
+      "stereotypes": [
+        "table"
+      ],
+      "attributes": [
+        {
+          "_type": "UMLAttribute",
+          "_id": "6710c356-c5ed-4d88-bbd2-d62f5483defb",
+          "name": "id",
+          "type": "text",
+          "stereotypes": [
+            "pk"
+          ]
+        },
+        {
+          "_type": "UMLAttribute",
+          "_id": "7d963572-ac78-4288-9510-c056d8fdf4f1",
+          "name": "email",
+          "type": "text",
+          "stereotypes": [
+            "not_null"
+          ]
+        },
+        {
+          "_type": "UMLAttribute",
+          "_id": "c7e0f23b-f524-4d41-bb6f-ba241b70f2c8",
+          "name": "pin_hash",
+          "type": "text",
+          "stereotypes": [
+            "not_null"
+          ]
+        },
+        {
+          "_type": "UMLAttribute",
+          "_id": "98c6e265-d487-4967-9a75-09fdb43fafcb",
+          "name": "issued_at",
+          "type": "timestamp with time zone",
+          "stereotypes": [
+            "not_null"
+          ]
+        },
+        {
+          "_type": "UMLAttribute",
+          "_id": "bd43bbfa-083d-457e-8588-0623a16b279c",
+          "name": "expires_at",
+          "type": "timestamp with time zone"
+        },
+        {
+          "_type": "UMLAttribute",
+          "_id": "a77b7841-d95b-4cf2-b0ab-30613aa9c962",
+          "name": "consumed_at",
+          "type": "timestamp with time zone"
+        },
+        {
+          "_type": "UMLAttribute",
+          "_id": "ee7e9d92-ed87-439c-b88d-5473492a2786",
+          "name": "status",
+          "type": "text"
+        },
+        {
+          "_type": "UMLAttribute",
+          "_id": "71108998-2408-48c8-af52-6bdb9b9722b4",
+          "name": "test",
+          "type": "text"
+        }
+      ]
+    }
+  ]
+}

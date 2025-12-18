@@ -59,8 +59,19 @@ provider = "embedded"
 environment = "development"
 instance_id = "local"
 
+# Password policy for first-time setup (relaxed for local dev)
+[security.password_policy]
+min_length = 4
+max_length = 128
+require_uppercase = false
+require_lowercase = false
+require_digit = false
+require_special = false
+check_common_passwords = false
+
 [security.identity.embedded]
-store_path = "runtime/identity/store.json"
+storage = "db"  # oder "file" (default)
+store_path = "/opt/fenrir/development/tmp/identity/store.json"
 audience = "fenrir-control-plane"
 
 [security.identity.external]
@@ -83,12 +94,35 @@ cleanup_interval_seconds = 50
 [db]
 default_engine = "postgres"
 
+[db.runtime]
+mode = "embedded" # external | embedded
+
+[db.runtime.embedded]
+engine = "postgres" # sqlite | postgres
+
+[db.runtime.embedded.sqlite]
+file_path = "/opt/fenrir/development/tmp/runtime/db/fenrir.db"
+# vacuum_interval_seconds = 0
+
+[db.runtime.embedded.postgres]
+data_dir = "runtime/db/postgres"
+binary_path = "/opt/homebrew/opt/postgresql@16/bin/postgres"
+
+[db.runtime.embedded.postgres.port_range]
+min = 55432
+max = 55442
+
 [db.connections.postgres]
 uri = "env:FENRIR_DB_POSTGRES_URI"
 
 [db.connections.postgres.pool]
 max = 16
 timeout_ms = 5000
+
+[db.schema]
+export_dir = "/opt/fenrir/development/tmp/schemas"
+import_dir = "/opt/fenrir/development/tmp/schemas"
+auto_backup = true  # Vor Import automatisch Backup machen
 
 [telemetry.tracing]
 level = "info"
@@ -103,13 +137,18 @@ enabled = true
 enabled = true
 interval_ms = 5000
 
+[telemetry.history]
+retention_days = 1
+persist_interval_seconds = 120
+sample_interval_seconds = 30
+
 [audit]
 enabled = true
 buffer_capacity = 2048
 
 [audit.storage]
-path = "runtime/audit/fenrir-audit-history.json"
-retention_hours = 24
+path = "/opt/fenrir/development/tmp/runtime/audit/fenrir-audit-history.json"
+retention_days = 1
 persist_interval_seconds = 30
 
 [cli]

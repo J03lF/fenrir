@@ -113,60 +113,64 @@ impl ModuleService {
         self.stop_module_process(module_id).await;
         self.stop_dev_agent_if_any(module_id).await;
 
-        if let Some(dev_info) = self.locate_dev_source(module_id)? {
-            if !dev_info.services.is_empty() {
-                tracing::info!(
-                    module = %module_id,
-                    services = dev_info.services.len(),
-                    "{}",
-                    module_dev_logs::ACTIVATING_DEV_OVERRIDE
-                );
-                let mut dev_services = self
-                    .activate_dev_services(module_id, &installed, dev_info.services)
-                    .await?;
-                if let Some(run) = dev_info.run {
-                    if run.auto_start {
-                        match self.start_dev_agent(module_id, &dev_services, run).await {
-                            Ok((agent_state, expires_at)) => {
-                                dev_services.run = Some(agent_state);
-                                self.register_dev_agent_rotation(module_id, expires_at)
-                                    .await;
-                            }
-                            Err(err) => {
-                                self.clear_dev_services_if_any(module_id).await;
-                                return Err(err);
-                            }
-                        }
-                    } else {
-                        let command = run.command.display.clone();
-                        let workdir = run
-                            .workdir
-                            .clone()
-                            .or_else(|| self.dev_module_root(module_id))
-                            .unwrap_or_else(|| PathBuf::from("."));
-                        dev_services.run = Some(ModuleDevRunState {
-                            command,
-                            workdir,
-                            auto_restart: run.auto_restart,
-                            auto_start: false,
-                            log_path: None,
-                        });
-                    }
-                }
-                return Ok(ModuleSyncOutcome::ExternalServices(dev_services));
-            }
+        let DevSourceInfo {
+            package_source,
+            services,
+            run,
+        } = self.locate_dev_source(module_id)?;
 
-            if let Some(source) = dev_info.package_source {
-                tracing::info!(
-                    module = %module_id,
-                    path = %source.display(),
-                    "{}",
-                    module_dev_logs::PACKAGING_FROM_DEV_SOURCES
-                );
-                return self
-                    .install_from_directory(module_id, &installed, source)
-                    .await;
+        if !services.is_empty() {
+            tracing::info!(
+                module = %module_id,
+                services = services.len(),
+                "{}",
+                module_dev_logs::ACTIVATING_DEV_OVERRIDE
+            );
+            let mut dev_services = self
+                .activate_dev_services(module_id, &installed, services)
+                .await?;
+            if let Some(run) = run {
+                if run.auto_start {
+                    match self.start_dev_agent(module_id, &dev_services, run).await {
+                        Ok((agent_state, expires_at)) => {
+                            dev_services.run = Some(agent_state);
+                            self.register_dev_agent_rotation(module_id, expires_at)
+                                .await;
+                        }
+                        Err(err) => {
+                            self.clear_dev_services_if_any(module_id).await;
+                            return Err(err);
+                        }
+                    }
+                } else {
+                    let command = run.command.display.clone();
+                    let workdir = run
+                        .workdir
+                        .clone()
+                        .or_else(|| self.dev_module_root(module_id))
+                        .unwrap_or_else(|| PathBuf::from("."));
+                    dev_services.run = Some(ModuleDevRunState {
+                        command,
+                        workdir,
+                        auto_restart: run.auto_restart,
+                        auto_start: false,
+                        log_path: None,
+                    });
+                }
             }
+            return Ok(ModuleSyncOutcome::ExternalServices(dev_services));
+        }
+
+        if let Some(source) = package_source {
+            tracing::info!(
+                module = %module_id,
+                path = %source.display(),
+                "{}",
+                module_dev_logs::PACKAGING_FROM_DEV_SOURCES
+            );
+            return self
+                .install_from_directory(module_id, &installed, source)
+                .await;
         }
 
         let module_dir = PathBuf::from(&installed.path);
@@ -489,14 +493,21 @@ impl ModuleService {
         }
     }
 
-    fn locate_dev_source(&self, module_id: &ModuleId) -> ModuleResult<Option<DevSourceInfo>> {
+    fn locate_dev_source(&self, module_id: &ModuleId) -> ModuleResult<DevSourceInfo> {
         let Some(config) = &self.dev_sources else {
-            return Ok(None);
+            return Err(ModuleServiceError::Storage(
+                ModuleStorageError::InvalidState(module_dev_errors::dev_sources_disabled()),
+            ));
         };
 
         let module_root = config.module_root(module_id);
         if !module_root.exists() {
-            return Ok(None);
+            return Err(ModuleServiceError::Storage(
+                ModuleStorageError::InvalidState(module_dev_errors::dev_root_missing(
+                    module_root.display(),
+                    module_id,
+                )),
+            ));
         }
         if !module_root.is_dir() {
             return Err(ModuleServiceError::Storage(
@@ -526,11 +537,11 @@ impl ModuleService {
             ));
         }
 
-        Ok(Some(DevSourceInfo {
+        Ok(DevSourceInfo {
             package_source,
             services,
             run: override_definition.run,
-        }))
+        })
     }
 }
 

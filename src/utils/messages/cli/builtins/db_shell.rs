@@ -34,6 +34,8 @@ pub mod shell {
     }
 
     pub const HELP_HINT: &str = "Use 'help' for a command overview.";
+    pub const MULTILINE_HINT: &str = "Multi-line: end SQL with ';' to execute. Ctrl+C to cancel.";
+    pub const BUFFER_CLEARED: &str = "(buffer cleared)";
     pub const EXIT_MESSAGE: &str = "DB shell exited";
     pub const INPUT_ERROR_PREFIX: &str = "Input error: ";
     pub const ERROR_PREFIX: &str = "Error: ";
@@ -63,9 +65,10 @@ pub mod process {
     pub const META_HEADER: &str = "Meta commands:";
     pub const SQL_HEADER: &str = "SQL commands:";
     pub const META_SWITCH: &str = "  \\c <engine>    – switch engines";
-    pub const META_TABLES: &str = "  \\d [table]    – list tables or show schema";
-    pub const META_PING: &str = "  \\ping         – test the connection";
-    pub const META_EXIT: &str = "  exit / \\q    – leave the DB shell";
+    pub const META_TABLES: &str = "  \\d [table]     – list tables or show schema";
+    pub const META_PING: &str = "  \\ping          – test the connection";
+    pub const META_REFRESH: &str = "  \\refresh       – reload table completion";
+    pub const META_EXIT: &str = "  exit / \\q      – leave the DB shell";
 
     pub fn meta_engine_line(engine: &str, options: &str) -> String {
         format!("Current engine: {engine} (available: {options})")

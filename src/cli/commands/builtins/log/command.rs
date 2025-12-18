@@ -36,7 +36,12 @@ const LOG_JOB_TAIL_ARGUMENT: CommandArgument = LOG_MODULE_TAIL_ARGUMENT;
 
 const LOG_SUBCOMMANDS: &[CommandSubcommand] = &[
     CommandSubcommand::new("app", &[], &[], log_command_messages::SUB_APP_DESCRIPTION),
-    CommandSubcommand::new("db", &[], &[], log_command_messages::SUB_DB_DESCRIPTION),
+    CommandSubcommand::new(
+        "db",
+        &["database"],
+        &[LOG_MODULE_TAIL_ARGUMENT],
+        "Tail embedded db-runtime logs",
+    ),
     CommandSubcommand::new("all", &[], &[], log_command_messages::SUB_ALL_DESCRIPTION),
     CommandSubcommand::new(
         "level",
@@ -103,18 +108,33 @@ fn handle(
     let mut iter = args.iter().copied();
     let action = iter.next().unwrap_or("app");
     match action {
-        "app" | "db" => {
-            let kind = parse_target(action).unwrap();
+        "app" => {
             info!(command = "log", target = action, "log command invoked");
-            let path = match kind {
-                LogKind::App => logging::log_file_path(),
-                LogKind::Db => logging::db_log_file_path(),
+            display_log_result(out, log_handler_messages::DEFAULT_LABEL_APP, logging::log_file_path())?;
+        }
+        "db" | "database" | "db-runtime" => {
+            // Verb-first: "log db" shows embedded db-runtime logs
+            let tail_args: Vec<_> = iter.collect();
+            let tail = match parse_tail_flag(&tail_args) {
+                Ok(value) => value,
+                Err(msg) => {
+                    writeln!(out, "{msg}")?;
+                    return Ok(CommandOutcome::Continue);
+                }
             };
-            let label = match kind {
-                LogKind::App => log_handler_messages::DEFAULT_LABEL_APP,
-                LogKind::Db => log_handler_messages::DEFAULT_LABEL_DB,
-            };
-            display_log_result(out, label, path)?;
+            let logs = deps.services.db_runtime_logs(tail.max(1));
+            if logs.is_empty() {
+                writeln!(out, "No db-runtime logs available (mode != embedded?)")?;
+            } else {
+                for line in logs {
+                    writeln!(out, "{line}")?;
+                }
+            }
+        }
+        "db-log" => {
+            // Access the db.log file (old behavior)
+            info!(command = "log", target = "db-log", "log command invoked");
+            display_log_result(out, log_handler_messages::DEFAULT_LABEL_DB, logging::db_log_file_path())?;
         }
         "all" => {
             info!(command = "log", target = "all", "log command invoked");

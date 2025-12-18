@@ -6,7 +6,7 @@ use crate::domain::module::{
     ModuleManifest, ModuleRegistryError, ModuleRuntimeError, ModuleServiceError,
     ModuleStorageError, ModuleVerificationError,
 };
-use crate::services::module::{DistributionAction, DistributionPlanEntry};
+use crate::services::module::{DistributionAction, DistributionPlanEntry, ModuleScaffoldSummary};
 use crate::utils::messages::cli::builtins::modules as msg_modules;
 use crate::utils::system_time_to_rfc3339;
 
@@ -173,6 +173,37 @@ fn module_error_message(err: &ModuleServiceError) -> String {
             }
         },
     }
+}
+
+pub(super) fn render_scaffold_summary(
+    out: &mut dyn Write,
+    summary: &ModuleScaffoldSummary,
+) -> io::Result<()> {
+    let root = summary.root.display().to_string();
+    writeln!(
+        out,
+        "{}",
+        msg_modules::scaffold_view::created(
+            summary.module_id.as_str(),
+            summary.runtime.as_str(),
+            &root
+        )
+    )?;
+    if summary.files.is_empty() {
+        return Ok(());
+    }
+    writeln!(out, "{}", msg_modules::scaffold_view::FILES_HEADER)?;
+    let mut files = summary.files.clone();
+    files.sort();
+    for file in files {
+        writeln!(
+            out,
+            "{}{}",
+            msg_modules::scaffold_view::FILE_PREFIX,
+            file.display()
+        )?;
+    }
+    Ok(())
 }
 
 pub(super) fn render_runtime_error(

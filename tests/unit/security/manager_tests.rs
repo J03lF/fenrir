@@ -52,6 +52,7 @@ fn security_config() -> SecuritySection {
             cleanup_interval_seconds: 1,
         },
         identity: IdentitySection::default(),
+        password_policy: Default::default(),
     }
 }
 

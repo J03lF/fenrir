@@ -282,6 +282,7 @@ pub enum ShellEnvironment {
 pub struct CommandRegistry {
     commands: BTreeMap<String, CommandEntry>,
     alias_index: BTreeMap<String, String>,
+    order: Vec<String>,
 }
 
 impl Default for CommandRegistry {
@@ -295,6 +296,7 @@ impl CommandRegistry {
         Self {
             commands: BTreeMap::new(),
             alias_index: BTreeMap::new(),
+            order: Vec::new(),
         }
     }
 
@@ -304,7 +306,9 @@ impl CommandRegistry {
             self.alias_index
                 .insert(alias.to_string(), canonical.clone());
         }
-        self.commands.insert(canonical, entry);
+        if self.commands.insert(canonical.clone(), entry).is_none() {
+            self.order.push(canonical);
+        }
     }
 
     pub fn get(&self, name: &str) -> Option<&CommandEntry> {
@@ -322,11 +326,15 @@ impl CommandRegistry {
     }
 
     pub fn command_names(&self) -> Vec<String> {
-        self.commands.keys().cloned().collect()
+        self.order.clone()
     }
 
     pub fn shapes(&self) -> Vec<CommandShape> {
-        self.commands.values().map(|entry| entry.shape).collect()
+        self.order
+            .iter()
+            .filter_map(|name| self.commands.get(name))
+            .map(|entry| entry.shape)
+            .collect()
     }
 
     pub fn execute(

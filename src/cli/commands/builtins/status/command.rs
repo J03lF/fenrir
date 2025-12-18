@@ -14,6 +14,12 @@ const SERVICE_ARGUMENT: CommandArgument = CommandArgument::required("service_id"
 
 const STATUS_SUBCOMMANDS: &[CommandSubcommand] = &[
     CommandSubcommand::new(
+        "db",
+        &["database"],
+        &[],
+        "Show embedded db-runtime status",
+    ),
+    CommandSubcommand::new(
         "service",
         &[],
         &[SERVICE_ARGUMENT],

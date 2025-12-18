@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use tokio::sync::RwLock;
 
 use crate::domain::module::{
-    ModuleId, ModuleRuntimeError, ModuleRuntimeInfo, ModuleRuntimePort, ModuleRuntimeStatus,
-    ModuleStartConfig, ModuleStoragePort, ModuleVersion,
+    ModuleId, ModuleRuntimeError, ModuleRuntimeInfo, ModuleRuntimeKind, ModuleRuntimePort,
+    ModuleRuntimeStatus, ModuleStartConfig, ModuleStoragePort, ModuleVersion,
 };
 use crate::utils::messages;
 
@@ -68,6 +68,7 @@ impl InProcessModuleRuntime {
             module_id: state.module_id.clone(),
             version: state.version.clone(),
             status: state.status.clone(),
+            kind: ModuleRuntimeKind::Process,
             pid: None,
             port: state.port,
             started_at: state.started_at,

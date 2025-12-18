@@ -4,6 +4,7 @@ pub mod attach {
     pub const IDENTITY_SERVICE_ALREADY_ATTACHED: &str = "identity service already attached";
     pub const SESSION_SERVICE_ALREADY_ATTACHED: &str = "session service already attached";
     pub const TOKEN_EXCHANGE_ALREADY_ATTACHED: &str = "token exchange service already attached";
+    pub const DB_RUNTIME_ALREADY_ATTACHED: &str = "db runtime already attached";
 }
 
 pub mod logs {

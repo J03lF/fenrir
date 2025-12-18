@@ -39,6 +39,7 @@ pub struct AppServices {
     security: OnceCell<Arc<SecurityManager>>,
     session: OnceCell<Arc<SessionService>>,
     identity: OnceCell<Arc<dyn IdentityProvider>>,
+    db_runtime: OnceCell<Arc<crate::infra::db::runtime::DbRuntimeSupervisor>>,
 }
 
 impl AppServices {
@@ -64,6 +65,7 @@ impl AppServices {
             security: OnceCell::new(),
             session: OnceCell::new(),
             identity: OnceCell::new(),
+            db_runtime: OnceCell::new(),
         }
     }
 
@@ -120,12 +122,40 @@ impl AppServices {
             .map_err(|_| attach::SESSION_SERVICE_ALREADY_ATTACHED)
     }
 
+    pub fn attach_db_runtime(
+        &self,
+        runtime: Arc<crate::infra::db::runtime::DbRuntimeSupervisor>,
+    ) -> Result<(), &'static str> {
+        self.db_runtime
+            .set(runtime)
+            .map_err(|_| attach::DB_RUNTIME_ALREADY_ATTACHED)
+    }
+
+    pub fn db_runtime(
+        &self,
+    ) -> Option<Arc<crate::infra::db::runtime::DbRuntimeSupervisor>> {
+        self.db_runtime.get().cloned()
+    }
+
     pub fn session_service(&self) -> Option<Arc<SessionService>> {
         self.session.get().cloned()
     }
 
     pub fn registry(&self) -> Arc<ServiceRegistry> {
         Arc::clone(&self.registry)
+    }
+
+    pub fn db_runtime_status(&self) -> Option<crate::infra::db::runtime::RuntimeStatus> {
+        self.db_runtime
+            .get()
+            .and_then(|rt| rt.status_snapshot())
+    }
+
+    pub fn db_runtime_logs(&self, tail: usize) -> Vec<String> {
+        self.db_runtime
+            .get()
+            .map(|rt| rt.logs(tail))
+            .unwrap_or_default()
     }
 
     pub fn set_logging_handle(&self, handle: ReloadHandle) {

@@ -96,33 +96,139 @@ initIntroAnimation();
    END INTRO ANIMATION
    ============================================ */
 
+/* ============================================
+   PERFORMANCE UTILITIES
+   ============================================ */
+
+// Debounce: delays execution until after wait ms of no calls
+const debounce = (fn, wait = 150) => {
+  let timeoutId = null;
+  return (...args) => {
+    if (timeoutId) clearTimeout(timeoutId);
+    timeoutId = setTimeout(() => fn(...args), wait);
+  };
+};
+
+// Throttle: limits execution to once per wait ms
+const throttle = (fn, wait = 100) => {
+  let lastTime = 0;
+  let timeoutId = null;
+  return (...args) => {
+    const now = Date.now();
+    const remaining = wait - (now - lastTime);
+    if (remaining <= 0) {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
+      lastTime = now;
+      fn(...args);
+    } else if (!timeoutId) {
+      timeoutId = setTimeout(() => {
+        lastTime = Date.now();
+        timeoutId = null;
+        fn(...args);
+      }, remaining);
+    }
+  };
+};
+
+// RequestIdleCallback polyfill for non-critical tasks
+const scheduleIdle = window.requestIdleCallback || ((cb) => setTimeout(cb, 1));
+
+// Batch DOM reads/writes to avoid layout thrashing
+const batchDOMUpdate = (fn) => {
+  requestAnimationFrame(() => {
+    requestAnimationFrame(fn);
+  });
+};
+
+// Track page visibility for pausing updates
+let isPageVisible = !document.hidden;
+document.addEventListener('visibilitychange', () => {
+  isPageVisible = !document.hidden;
+  if (isPageVisible && lastRefreshAt && Date.now() - lastRefreshAt > REFRESH_INTERVAL_MS) {
+    // Tab became visible and data is stale - refresh
+    loadAll({ background: true });
+  }
+});
+
+// Track which pages have been loaded (lazy loading)
+const loadedPages = new Set(['overview']); // Overview loads by default
+let currentVisiblePage = 'overview';
+
+// Intersection Observer for lazy loading elements
+const lazyObserver = new IntersectionObserver(
+  (entries) => {
+    entries.forEach((entry) => {
+      if (entry.isIntersecting) {
+        const el = entry.target;
+        if (el.dataset.lazySrc) {
+          el.src = el.dataset.lazySrc;
+          delete el.dataset.lazySrc;
+          lazyObserver.unobserve(el);
+        }
+        if (el.dataset.lazyLoad) {
+          el.classList.add('lazy-loaded');
+          lazyObserver.unobserve(el);
+        }
+      }
+    });
+  },
+  { rootMargin: '50px', threshold: 0.1 }
+);
+
+/* ============================================
+   END PERFORMANCE UTILITIES
+   ============================================ */
+
+/* ============================================
+   CONFIGURATION & CONSTANTS
+   ============================================ */
+
+/** @constant {number} Auto-refresh interval in milliseconds */
 const REFRESH_INTERVAL_MS = 15000;
+
+/** @constant {number} Uptime ticker interval in milliseconds */
 const UPTIME_TICK_MS = 1000;
+
+// Telemetry Chart Configuration
 const CHART_METRIC_KEYS = [
   'process.cpu.usage_percent',
   'process.memory.resident_bytes',
   'process.io.read_bytes_per_sec',
   'process.io.write_bytes_per_sec',
 ];
+
 const PINNED_METRIC_KEYS = [
   'process.cpu.usage_percent',
   'process.memory.resident_bytes',
   'process.io.read_bytes_per_sec',
   'process.io.write_bytes_per_sec',
 ];
+
 const METRIC_LABEL_OVERRIDES = {
   'process.cpu.usage_percent': 'CPU-Auslastung (Prozess)',
   'process.memory.resident_bytes': 'Arbeitsspeicher RSS (Prozess)',
   'process.io.read_bytes_per_sec': 'I/O Lesen pro Sekunde',
   'process.io.write_bytes_per_sec': 'I/O Schreiben pro Sekunde',
 };
+
+// History Range Configuration
 const HISTORY_RANGE_DEFAULT = '1h';
 const HISTORY_RANGES = ['1h', '3h', '24h'];
 const HISTORY_RETENTION_MS = 24 * 60 * 60 * 1000;
+
+// Audit Configuration
 const AUDIT_HISTORY_RANGE_DEFAULT = '1h';
 const AUDIT_HISTORY_RANGES = ['1h', '3h', '24h'];
 const AUDIT_HISTORY_LIMIT = 1000;
 
+/* ============================================
+   DOM ELEMENT REFERENCES
+   ============================================ */
+
+// Core UI Elements
 const metaEl = document.querySelector('[data-meta]');
 const alertEl = document.querySelector('[data-alert]');
 const svcBody = document.querySelector('[data-services]');
@@ -145,7 +251,6 @@ const auditModal = document.querySelector('[data-audit-modal]');
 const auditModalContent = document.querySelector('[data-audit-modal-content]');
 const auditModalClose = document.querySelector('[data-audit-modal-close]');
 const serviceModal = document.querySelector('[data-service-modal]');
-const serviceModalTitle = document.querySelector('[data-service-modal-title]');
 const serviceModalContent = document.querySelector('[data-service-modal-content]');
 const serviceModalClose = document.querySelector('[data-service-modal-close]');
 const telemetryNote = document.querySelector('[data-telemetry-note]');
@@ -241,9 +346,15 @@ const modulesEmptyDefault =
   (modulesEmpty && modulesEmpty.textContent && modulesEmpty.textContent.trim()) ||
   'Keine Module installiert.';
 
+// Storage Keys
 const TOKEN_KEY = 'fenrir-control-plane-token';
 const PAGE_STORAGE_KEY = 'fenrir-control-plane-page';
 
+/* ============================================
+   STATE MANAGEMENT
+   ============================================ */
+
+// Timer & Loading State
 let refreshHandle = null;
 let uptimeHandle = null;
 let uptimeBaseSeconds = null;
@@ -322,13 +433,21 @@ let serviceMetaOverride = null;
 let modulesCache = [];
 let lastRefreshAt = null;
 
-// Cache variables to prevent flickering on refresh
+// DOM Cache - prevents flickering on refresh
 let lastServicesTableHtml = '';
 let lastIncidentsHtml = '';
 let lastModulesHtml = '';
 let lastAuditTableHtml = '';
 let lastAuditPreviewHtml = '';
 
+/* ============================================
+   STORAGE & TOKEN FUNCTIONS
+   ============================================ */
+
+/**
+ * Load authentication token from localStorage
+ * @returns {string} The stored token or empty string
+ */
 const loadToken = () => {
   try {
     return localStorage.getItem(TOKEN_KEY) ?? '';
@@ -360,8 +479,17 @@ const rangeToMillis = (range) => {
   }
 };
 
+/** @returns {string} Current token from input field */
 const currentToken = () => tokenInput.value.trim();
 
+/* ============================================
+   UI STATE FUNCTIONS
+   ============================================ */
+
+/**
+ * Update active state of history range buttons
+ * @param {string} range - Active range ('1h', '3h', '24h')
+ */
 const setHistoryButtonsActive = (range) => {
   historyRangeButtons.forEach((button) => {
     const active = button.dataset.historyRange === range;
@@ -505,6 +633,14 @@ const fetchAuditHistory = async (range, { background = false } = {}) => {
   }
 };
 
+/* ============================================
+   API & AUTHENTICATION
+   ============================================ */
+
+/**
+ * Generate authorization headers for API requests
+ * @returns {Object} Headers object with Authorization if token exists
+ */
 const authHeaders = () => {
   const token = currentToken();
   if (!token) {
@@ -515,6 +651,10 @@ const authHeaders = () => {
   };
 };
 
+/**
+ * Update token input UI state
+ * @param {string} token - Current token value
+ */
 const setTokenUi = (token) => {
   if (!token) {
     tokenStatus.textContent = 'Token nicht gesetzt – Anfragen erfolgen ohne Auth.';
@@ -541,6 +681,10 @@ const updateRefreshNote = () => {
   refreshNote.textContent = `Aktualisiert ${formatRelativeTime(lastRefreshAt)} (${absolute})`;
 };
 
+/**
+ * Show or hide alert message
+ * @param {string} message - Alert message (empty to hide)
+ */
 const showAlert = (message) => {
   if (!message) {
     alertEl.dataset.visible = 'false';
@@ -551,6 +695,15 @@ const showAlert = (message) => {
   alertEl.textContent = message;
 };
 
+/* ============================================
+   FORMATTING UTILITIES
+   ============================================ */
+
+/**
+ * Format seconds as human-readable duration
+ * @param {number} seconds - Duration in seconds
+ * @returns {string} Formatted duration (e.g., "2d 5h", "45m")
+ */
 const formatDuration = (seconds) => {
   if (seconds == null) return '–';
   const days = Math.floor(seconds / 86400);
@@ -692,6 +845,13 @@ const sanitizeSeriesId = (key) => {
   return `series-toggle-${key.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
 };
 
+/* ============================================
+   CHART SERIES CONFIGURATION
+   ============================================ */
+
+/**
+ * Render series toggle checkboxes for chart
+ */
 const renderSeriesToggles = () => {
   if (!seriesToggleContainer || SELECTABLE_SERIES.length === 0) {
     return;
@@ -880,6 +1040,14 @@ function formatRelativeTime(timestampMs) {
   });
 }
 
+/* ============================================
+   SERVICE METRICS RENDERING
+   ============================================ */
+
+/**
+ * Render service resource metrics table
+ * @param {string} [emptyMessage] - Message to show when no data
+ */
 function renderServiceMetrics(emptyMessage) {
   if (!serviceMetricsBody) {
     return;
@@ -1095,6 +1263,14 @@ const updateTelemetrySummary = (counters) => {
   }
 };
 
+/* ============================================
+   CHART RENDERING
+   ============================================ */
+
+/**
+ * Render chart legend with metric entries
+ * @param {Array} entries - Array of metric entries with key, label, color, value
+ */
 const renderMetricLegend = (entries) => {
   if (!metricLegend) {
     return;
@@ -2258,6 +2434,14 @@ const pushServiceMetricsSample = () => {
   renderServiceSummary(counters);
 };
 
+/* ============================================
+   SERVICE RENDERING
+   ============================================ */
+
+/**
+ * Render service status summary counters
+ * @param {Object} counters - Service status counts
+ */
 const renderServiceSummary = (counters = {}) => {
   if (serviceSummaryCounters.size === 0) {
     return;
@@ -2329,6 +2513,10 @@ const renderServiceIncidents = () => {
     serviceIncidentsEmpty.dataset.visible = 'false';
   }
 };
+
+/* ============================================
+   MODULES RENDERING
+   ============================================ */
 
 const showModulesEmpty = (message = modulesEmptyDefault) => {
   if (modulesEmpty) {
@@ -2425,6 +2613,8 @@ const getStoredPage = () => {
 
 const setActivePage = (name, { persist = true } = {}) => {
   const target = pageContainers.has(name) ? name : 'overview';
+  currentVisiblePage = target;
+  
   pageContainers.forEach((element, key) => {
     const isVisible = key === target;
     if (isVisible) {
@@ -2456,14 +2646,24 @@ const setActivePage = (name, { persist = true } = {}) => {
       localStorage.setItem(PAGE_STORAGE_KEY, target);
     } catch (_) {}
   }
+  
+  // Lazy load page-specific data
   if (target === 'telemetry') {
     window.requestAnimationFrame(() => renderMetricChart());
     if (!historyLoaded && !historyLoading) {
       fetchTelemetryHistory(currentHistoryRange, { background: true }).catch(() => {});
     }
+  } else if (target === 'audit') {
+    // Load audit data only when audit page is visited
+    if (!auditHistoryLoaded && !auditHistoryLoading) {
+      fetchAuditHistory(currentAuditRange, { background: true }).catch(() => {});
+    }
   } else {
     hideChartTooltip();
   }
+  
+  // Track loaded pages for future optimization
+  loadedPages.add(target);
 };
 
 resetTelemetrySummary();
@@ -2505,14 +2705,16 @@ if (serviceSortSelect) {
 }
 
 if (serviceFilterInput) {
+  // Debounced filter for better performance
+  const debouncedFilter = debounce((value) => setServiceFilterValue(value), 150);
   serviceFilterInput.addEventListener('input', (event) => {
-    setServiceFilterValue(event.target.value || '');
+    debouncedFilter(event.target.value || '');
   });
   serviceFilterInput.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') {
       event.preventDefault();
       serviceFilterInput.value = '';
-      setServiceFilterValue('');
+      setServiceFilterValue(''); // Immediate clear
     }
   });
 }
@@ -2565,6 +2767,15 @@ if (metricChartCanvas) {
   });
 }
 
+/* ============================================
+   AUDIT RENDERING
+   ============================================ */
+
+/**
+ * Render actor display for audit events
+ * @param {string} actor - Actor identifier
+ * @returns {string} HTML for actor display
+ */
 const renderActor = (actor) => {
   if (!actor || actor.kind === 'system') {
     return '<span class="metadata-chip">system</span>';
@@ -2723,9 +2934,90 @@ const closeAuditModal = () => {
   }
 };
 
+// Service Detail Modal
+const showServiceDetail = (svc) => {
+  if (!serviceModal || !serviceModalContent) return;
+  
+  const status = svc.status ?? 'unknown';
+  const diagnostics = svc.diagnostics || {};
+  const heartbeat = formatHeartbeatMetric(diagnostics.last_heartbeat_seconds);
+  const latencyP50 = formatLatencyMetric(diagnostics.latency_p50_ms);
+  const latencyP95 = formatLatencyMetric(diagnostics.latency_p95_ms);
+  const errorRate = formatErrorRateMetric(diagnostics.error_rate_pct);
+  const health = (diagnostics.state || status).toLowerCase();
+  const tags = (svc.tags ?? []).join(', ') || '–';
+  const note = svc.note ?? '–';
+  
+  serviceModalContent.innerHTML = `
+    <div class="service-detail-grid">
+      <div class="service-detail-header">
+        <h4>${svc.name ?? svc.id}</h4>
+        <span class="service-detail-id">${svc.id}</span>
+      </div>
+      
+      <div class="service-detail-section">
+        <h5>Status</h5>
+        <div class="service-detail-row">
+          <span class="service-detail-label">Status</span>
+          <span class="${statusClass(status)}">${status}</span>
+        </div>
+        <div class="service-detail-row">
+          <span class="service-detail-label">Health</span>
+          <span class="${healthClass(health)}">${health}</span>
+        </div>
+        <div class="service-detail-row">
+          <span class="service-detail-label">Letzter Heartbeat</span>
+          <span class="service-detail-value mono">${heartbeat}</span>
+        </div>
+      </div>
+      
+      <div class="service-detail-section">
+        <h5>Performance</h5>
+        <div class="service-metrics-grid">
+          <div class="metric-box">
+            <span class="metric-label">P50 Latenz</span>
+            <span class="metric-value">${latencyP50}</span>
+          </div>
+          <div class="metric-box">
+            <span class="metric-label">P95 Latenz</span>
+            <span class="metric-value">${latencyP95}</span>
+          </div>
+          <div class="metric-box">
+            <span class="metric-label">Fehlerrate</span>
+            <span class="metric-value ${parseFloat(errorRate) > 1 ? 'error' : ''}">${errorRate}</span>
+          </div>
+        </div>
+      </div>
+      
+      <div class="service-detail-section">
+        <h5>Info</h5>
+        <div class="service-detail-row">
+          <span class="service-detail-label">Tags</span>
+          <span class="service-detail-value">${tags}</span>
+        </div>
+        <div class="service-detail-row">
+          <span class="service-detail-label">Hinweis</span>
+          <span class="service-detail-value">${note}</span>
+        </div>
+      </div>
+    </div>
+  `;
+  
+  serviceModal.dataset.visible = 'true';
+};
+
+const closeServiceModal = () => {
+  if (serviceModal) {
+    serviceModal.dataset.visible = 'false';
+  }
+};
+
 // Modal close handlers
 if (auditModalClose) {
   auditModalClose.addEventListener('click', closeAuditModal);
+}
+if (serviceModalClose) {
+  serviceModalClose.addEventListener('click', closeServiceModal);
 }
 if (auditModal) {
   auditModal.addEventListener('click', (e) => {
@@ -2733,12 +3025,24 @@ if (auditModal) {
       closeAuditModal();
     }
   });
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && auditModal.dataset.visible === 'true') {
-      closeAuditModal();
+}
+if (serviceModal) {
+  serviceModal.addEventListener('click', (e) => {
+    if (e.target === serviceModal) {
+      closeServiceModal();
     }
   });
 }
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    if (auditModal?.dataset.visible === 'true') {
+      closeAuditModal();
+    }
+    if (serviceModal?.dataset.visible === 'true') {
+      closeServiceModal();
+    }
+  }
+});
 
 const renderAuditPreview = () => {
   if (!auditPreviewList) {
@@ -2811,6 +3115,13 @@ const handleAuditPush = (event) => {
   renderAuditCache();
 };
 
+/* ============================================
+   SERVER-SENT EVENTS (SSE)
+   ============================================ */
+
+/**
+ * Connect to the event stream for real-time updates
+ */
 const connectEventStream = () => {
   if (!window.EventSource) {
     return;
@@ -3063,6 +3374,13 @@ const serviceMatchesFilter = (svc) => {
   return parts.some((part) => part.includes(serviceFilterValue));
 };
 
+/* ============================================
+   SERVICES TABLE RENDERING
+   ============================================ */
+
+/**
+ * Render the services table with filtering and sorting
+ */
 function renderServicesTable() {
   if (servicesCache.size === 0) {
     const emptyHtml = `<tr><td colspan="6">${serviceTableEmptyMessage}</td></tr>`;
@@ -3111,13 +3429,13 @@ function renderServicesTable() {
       const note = svc.note ?? '–';
       const tags = renderTags(svc.tags ?? []);
       return `
-        <tr class="service-row" data-service-id="${svc.id}">
+        <tr class="service-row clickable" data-service-id="${svc.id}">
           <td class="service-id">${svc.id}</td>
           <td class="service-name">${svc.name ?? svc.id}</td>
           <td class="status-cell"><span class="${statusClass(status)}" title="${status}">${status}</span></td>
           <td class="tags-cell"><div class="tag-list">${tags}</div></td>
           <td class="note-cell">${note}</td>
-          <td class="actions-cell" onclick="event.stopPropagation()">${renderRowActions(svc)}</td>
+          <td class="actions-cell">${renderRowActions(svc)}</td>
         </tr>
       `;
     })
@@ -3127,108 +3445,23 @@ function renderServicesTable() {
   if (newHtml !== lastServicesTableHtml) {
     svcBody.innerHTML = newHtml;
     lastServicesTableHtml = newHtml;
-    // Add click listeners for service detail modal
-    attachServiceRowListeners();
+    attachServiceRowHandlers();
   }
   renderServiceIncidents();
 }
 
-// Service row click listeners for detail modal
-const attachServiceRowListeners = () => {
-  const rows = document.querySelectorAll('.service-row[data-service-id]');
+function attachServiceRowHandlers() {
+  const rows = svcBody.querySelectorAll('.service-row[data-service-id]');
   rows.forEach((row) => {
-    row.addEventListener('click', () => {
+    row.addEventListener('click', (e) => {
+      // Don't open modal if clicking on action buttons
+      if (e.target.closest('.action-btn') || e.target.closest('button')) return;
       const serviceId = row.dataset.serviceId;
-      const service = servicesCache.get(serviceId);
-      if (service) {
-        showServiceDetail(service);
+      const svc = servicesCache.get(serviceId);
+      if (svc) {
+        showServiceDetail(svc);
       }
     });
-  });
-};
-
-// Show service detail modal
-const showServiceDetail = (svc) => {
-  if (!serviceModal || !serviceModalContent) return;
-  
-  const status = svc.status ?? 'unknown';
-  const diagnostics = svc.diagnostics || {};
-  const heartbeat = formatHeartbeatMetric(diagnostics.last_heartbeat_seconds);
-  const latencyP50 = formatLatencyMetric(diagnostics.latency_p50_ms);
-  const latencyP95 = formatLatencyMetric(diagnostics.latency_p95_ms);
-  const errorRate = formatErrorRateMetric(diagnostics.error_rate_pct);
-  const health = (diagnostics.state || status).toLowerCase();
-  const tags = (svc.tags ?? []).join(', ') || '–';
-  
-  if (serviceModalTitle) {
-    serviceModalTitle.textContent = svc.name ?? svc.id;
-  }
-  
-  serviceModalContent.innerHTML = `
-    <div class="detail-grid">
-      <div class="detail-item">
-        <span class="detail-label">Service ID</span>
-        <span class="detail-value mono">${svc.id}</span>
-      </div>
-      <div class="detail-item">
-        <span class="detail-label">Status</span>
-        <span class="detail-value"><span class="${statusClass(status)}">${status}</span></span>
-      </div>
-      <div class="detail-item">
-        <span class="detail-label">Health</span>
-        <span class="detail-value"><span class="${healthClass(health)}">${health}</span></span>
-      </div>
-      <div class="detail-item">
-        <span class="detail-label">Tags</span>
-        <span class="detail-value">${tags}</span>
-      </div>
-    </div>
-    <div class="detail-section">
-      <h4>Metriken</h4>
-      <div class="metrics-grid">
-        <div class="metric-item">
-          <span class="metric-label">Last Heartbeat</span>
-          <span class="metric-value">${heartbeat}</span>
-        </div>
-        <div class="metric-item">
-          <span class="metric-label">Latenz P50</span>
-          <span class="metric-value">${latencyP50}</span>
-        </div>
-        <div class="metric-item">
-          <span class="metric-label">Latenz P95</span>
-          <span class="metric-value">${latencyP95}</span>
-        </div>
-        <div class="metric-item">
-          <span class="metric-label">Error Rate</span>
-          <span class="metric-value">${errorRate}</span>
-        </div>
-      </div>
-    </div>
-    <div class="detail-section">
-      <h4>Hinweis</h4>
-      <p class="detail-note">${svc.note ?? '–'}</p>
-    </div>
-  `;
-  
-  serviceModal.dataset.visible = 'true';
-};
-
-// Close service modal
-const closeServiceModal = () => {
-  if (serviceModal) {
-    serviceModal.dataset.visible = 'false';
-  }
-};
-
-// Service modal event listeners
-if (serviceModalClose) {
-  serviceModalClose.addEventListener('click', closeServiceModal);
-}
-if (serviceModal) {
-  serviceModal.addEventListener('click', (e) => {
-    if (e.target === serviceModal) {
-      closeServiceModal();
-    }
   });
 }
 
@@ -3294,11 +3527,28 @@ const updateHealth = (live, ready) => {
   }
 };
 
+/* ============================================
+   API FUNCTIONS
+   ============================================ */
+
+/**
+ * Fetch with authentication token
+ * @param {string} url - API endpoint
+ * @param {Object} [options] - Fetch options
+ * @returns {Promise<Response>}
+ */
 const fetchWithToken = (url, options = {}) => {
   const headers = { ...options.headers, ...authHeaders() };
   return fetch(url, { ...options, headers });
 };
 
+/**
+ * Perform action on a single service
+ * @param {string} id - Service ID
+ * @param {string} action - Action type (start, stop, restart)
+ * @param {boolean} [force=false] - Force destructive action
+ * @returns {Promise<Object>}
+ */
 const performServiceAction = async (id, action, force = false) => {
   const url = `/services/${id}/${action}`;
   const options = { method: 'POST' };
@@ -3332,6 +3582,15 @@ const performBulkAction = async (kind, force = false) => {
   return response.json();
 };
 
+/* ============================================
+   DATA LOADING
+   ============================================ */
+
+/**
+ * Load all dashboard data from API
+ * @param {Object} options
+ * @param {boolean} [options.background=false] - If true, suppress error alerts
+ */
 const loadAll = async ({ background = false } = {}) => {
   if (isLoading) {
     return;
@@ -3415,9 +3674,11 @@ const scheduleRefresh = () => {
     window.clearInterval(refreshHandle);
   }
   refreshHandle = window.setInterval(() => {
-    if (document.hidden) {
+    // Skip refresh if tab is hidden
+    if (document.hidden || !isPageVisible) {
       return;
     }
+    // Smart refresh based on visible page
     loadAll({ background: true });
   }, REFRESH_INTERVAL_MS);
 };
@@ -3428,6 +3689,11 @@ const persistToken = () => {
   setTokenUi(token);
 };
 
+/* ============================================
+   EVENT HANDLERS
+   ============================================ */
+
+// Token Input Events
 tokenInput.addEventListener('input', () => {
   persistToken();
 });
@@ -3530,6 +3796,17 @@ svcBody.addEventListener('click', async (event) => {
   }
 });
 
+/* ============================================
+   APPLICATION INITIALIZATION
+   ============================================ */
+
+/**
+ * Initialize the dashboard application
+ * - Load token from storage
+ * - Setup event stream connection
+ * - Load initial data
+ * - Schedule auto-refresh
+ */
 const init = async () => {
   const token = loadToken();
   tokenInput.value = token;
@@ -3538,12 +3815,10 @@ const init = async () => {
   connectEventStream();
   await loadAll();
   scheduleRefresh();
-  document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) {
-      loadAll({ background: true });
-    }
-  });
-  window.addEventListener('focus', () => loadAll({ background: true }));
+  // Note: visibility change handler already set up in performance utilities
+  // Focus handler with throttle to prevent rapid refreshes
+  const throttledRefresh = throttle(() => loadAll({ background: true }), 5000);
+  window.addEventListener('focus', throttledRefresh);
   
   // Re-render chart on resize for proper DPI scaling
   let resizeTimeout;
@@ -3557,4 +3832,9 @@ const init = async () => {
   });
 };
 
+/* ============================================
+   BOOTSTRAP
+   ============================================ */
+
+// Start the application
 init();

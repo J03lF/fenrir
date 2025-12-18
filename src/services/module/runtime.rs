@@ -6,8 +6,8 @@ use std::{
 };
 
 use crate::domain::module::{
-    ModuleId, ModuleManifest, ModuleRuntimeError, ModuleRuntimeInfo, ModuleRuntimeStatus,
-    ModuleStartConfig, ModuleVersion,
+    ModuleId, ModuleManifest, ModuleRuntimeError, ModuleRuntimeInfo, ModuleRuntimeKind,
+    ModuleRuntimeStatus, ModuleStartConfig, ModuleVersion,
 };
 use crate::security::service::{ServiceRole, ServiceScope};
 use crate::security::service_tokens::DelegatedToken;
@@ -82,6 +82,7 @@ impl ModuleService {
             }
             self.revoke_service_token_if_any(&info.module_id, "module-stop-all")
                 .await;
+            self.stop_gateway_if_any(&info.module_id).await;
         }
         Ok(())
     }
@@ -107,6 +108,7 @@ impl ModuleService {
         self.revoke_service_token_if_any(module_id, "module-stop")
             .await;
         self.clear_reported_services(module_id).await;
+        self.stop_gateway_if_any(module_id).await;
     }
 
     pub async fn ensure_running(&self, module_id: &ModuleId) -> Result<(), ModuleRuntimeError> {
@@ -136,15 +138,18 @@ impl ModuleService {
 
         match self.runtime.status(module_id).await {
             Ok(info) if matches!(info.status, ModuleRuntimeStatus::Running) => {
+                if let Err(err) = self.ensure_gateway_endpoint(module_id).await {
+                    tracing::warn!(
+                        module = %module_id,
+                        error = %err,
+                        "failed to ensure runtime gateway"
+                    );
+                }
                 self.update_module_service_status(
                     module_id,
                     &installed.manifest,
                     ServiceStatus::Active,
-                    Some(
-                        info.pid
-                            .map(runtime_notes::running_with_pid)
-                            .unwrap_or_else(|| runtime_notes::RUNNING.to_string()),
-                    ),
+                    Some(Self::runtime_status_note(&info)),
                 );
                 match self
                     .refresh_reported_services(module_id, &installed.manifest, info.port)
@@ -209,6 +214,7 @@ impl ModuleService {
                 module_id: config.module_id.clone(),
                 version: ModuleVersion(installed.manifest.version.clone()),
                 status: ModuleRuntimeStatus::Stopped,
+                kind: ModuleRuntimeKind::Process,
                 pid: None,
                 port: config.port,
                 started_at: None,
@@ -226,6 +232,7 @@ impl ModuleService {
                 module_id: config.module_id.clone(),
                 version: ModuleVersion(installed.manifest.version.clone()),
                 status: ModuleRuntimeStatus::Running,
+                kind: ModuleRuntimeKind::Process,
                 pid: None,
                 port: config.port,
                 started_at: Some(SystemTime::now()),
@@ -247,6 +254,8 @@ impl ModuleService {
 
         self.guard_quarantine(&config.module_id)?;
 
+        let gateway_endpoint = self.ensure_gateway_endpoint(&config.module_id).await?;
+
         let issued_token = self.issue_module_service_token(&config.module_id).await?;
 
         let assigned_port = match config.port {
@@ -260,6 +269,13 @@ impl ModuleService {
             assigned_port,
             issued_token.as_ref(),
         )?;
+        config
+            .env_vars
+            .retain(|(key, _)| key != "FENRIR_GATEWAY_ENDPOINT");
+        config.env_vars.push((
+            "FENRIR_GATEWAY_ENDPOINT".to_string(),
+            gateway_endpoint.clone(),
+        ));
 
         let manifest = installed.manifest.clone();
         let module_id_clone = config.module_id.clone();
@@ -273,6 +289,7 @@ impl ModuleService {
                 info
             }
             Err(err) => {
+                self.stop_gateway_if_any(&module_id_clone).await;
                 let final_err = if let Some(until) = self.record_failure(&module_id_clone) {
                     self.annotate_quarantine(&module_id_clone, &manifest, until);
                     ModuleRuntimeError::Quarantined {
@@ -300,6 +317,7 @@ impl ModuleService {
         };
 
         if let Some(token) = issued_token {
+            self.audit_runtime_token_refresh(&runtime_info.module_id, &token);
             self.record_service_token(&runtime_info.module_id, &token)
                 .await;
         }
@@ -316,12 +334,7 @@ impl ModuleService {
             &runtime_info.module_id,
             &manifest,
             ServiceStatus::Active,
-            Some(
-                runtime_info
-                    .pid
-                    .map(runtime_notes::running_with_pid)
-                    .unwrap_or_else(|| runtime_notes::RUNNING.to_string()),
-            ),
+            Some(Self::runtime_status_note(&runtime_info)),
         );
 
         match self
@@ -378,6 +391,7 @@ impl ModuleService {
             .await;
         self.clear_health(module_id);
         self.clear_reported_services(module_id).await;
+        self.stop_gateway_if_any(module_id).await;
         Ok(())
     }
 
@@ -412,6 +426,7 @@ impl ModuleService {
                 module_id: module_id.clone(),
                 version: ModuleVersion(installed.manifest.version.clone()),
                 status: ModuleRuntimeStatus::Stopped,
+                kind: ModuleRuntimeKind::Process,
                 pid: None,
                 port: None,
                 started_at: None,
@@ -425,6 +440,7 @@ impl ModuleService {
                 module_id: module_id.clone(),
                 version: ModuleVersion(installed.manifest.version.clone()),
                 status: ModuleRuntimeStatus::Running,
+                kind: ModuleRuntimeKind::Process,
                 pid: None,
                 port: None,
                 started_at: None,
@@ -455,11 +471,7 @@ impl ModuleService {
             module_id,
             &installed.manifest,
             ServiceStatus::Active,
-            Some(
-                info.pid
-                    .map(runtime_notes::running_with_pid)
-                    .unwrap_or_else(|| runtime_notes::RUNNING.to_string()),
-            ),
+            Some(Self::runtime_status_note(&info)),
         );
         Ok(info)
     }
@@ -477,6 +489,23 @@ impl ModuleService {
         module_id: &ModuleId,
     ) -> Result<Vec<(String, String)>, ModuleRuntimeError> {
         self.runtime.env(module_id).await
+    }
+
+    pub(super) async fn ensure_gateway_endpoint(
+        &self,
+        module_id: &ModuleId,
+    ) -> Result<String, ModuleRuntimeError> {
+        let host = self.self_ref.clone();
+        self.runtime_gateways.ensure(host, module_id).await
+    }
+
+    pub(super) async fn stop_gateway_if_any(&self, module_id: &ModuleId) {
+        self.runtime_gateways.stop(module_id).await;
+    }
+
+    pub(super) async fn active_service_token_value(&self, module_id: &ModuleId) -> Option<String> {
+        let guard = self.service_tokens.read().await;
+        guard.get(module_id).map(|lease| lease.token().to_string())
     }
 
     pub(crate) fn inject_runtime_env(
@@ -670,6 +699,19 @@ impl ModuleService {
     fn replace_env(&self, env: &mut Vec<(String, String)>, key: &str, value: String) {
         env.retain(|(existing, _)| existing != key);
         env.push((key.to_string(), value));
+    }
+
+    fn runtime_status_note(info: &ModuleRuntimeInfo) -> String {
+        match info.kind {
+            ModuleRuntimeKind::StaticSite => info
+                .port
+                .map(runtime_notes::running_static)
+                .unwrap_or_else(|| runtime_notes::RUNNING.to_string()),
+            ModuleRuntimeKind::Process => info
+                .pid
+                .map(runtime_notes::running_with_pid)
+                .unwrap_or_else(|| runtime_notes::RUNNING.to_string()),
+        }
     }
 
     fn format_timestamp(value: OffsetDateTime) -> Option<String> {

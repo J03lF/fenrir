@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock as SyncRwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::audit::AuditOutcome;
 use crate::dev_agent::config::{DevAgentConfig, DevAgentService};
 use crate::domain::module::{
     ChecksumAlgorithm, DistributionTarget, InstalledModule, ModuleBundle, ModuleId,
@@ -15,6 +16,7 @@ use crate::domain::module::{
 use crate::security::manager::SecurityManager;
 use crate::security::service::{ServiceRole, ServiceScope};
 use crate::security::service_tokens::{DelegatedActor, DelegatedToken, DelegatedTokenRequest};
+use crate::services::AppServices;
 use crate::services::{
     diagnostics::ServiceDiagnostics, DbConnectorEndpoint, ServiceDescriptorOwned,
     ServiceIngressMetadata, ServiceKind, ServiceRegistry, ServiceSecurityMetadata, ServiceStatus,
@@ -22,6 +24,7 @@ use crate::services::{
 };
 use crate::utils::messages::services::module::{
     dev::errors as module_dev_errors,
+    scaffold::errors as module_scaffold_errors,
     service::{
         errors as module_service_errors, logs as module_service_logs, notes as module_service_notes,
     },
@@ -46,10 +49,14 @@ use super::dev::{
 };
 use super::dev_agent::DevAgentHandle;
 use super::dev_env::write_plain_env_file;
+use super::gateway::{GatewaySettings, RuntimeGatewayRegistry};
 use super::ports::ModulePortAllocator;
+use super::scaffold::generate_module_scaffold;
+use super::token_audit::{record_module_token_exchange, ModuleTokenAuditContext};
 use super::types::{
     DistributionAction, DistributionPlanEntry, ModuleIngressError, ModuleIngressTarget,
-    ModuleReleaseOutcome, ModuleUpdateInfo, RegisteredDevService,
+    ModuleReleaseOutcome, ModuleScaffoldOptions, ModuleScaffoldSummary, ModuleUpdateInfo,
+    RegisteredDevService,
 };
 
 const DEFAULT_SERVICE_TENANT: &str = "default";
@@ -57,7 +64,7 @@ const FAILURE_WINDOW_SECS: u64 = 120;
 const FAILURE_THRESHOLD: u32 = 3;
 const QUARANTINE_DURATION_SECS: u64 = 300;
 pub(super) const MODULE_SERVICE_MANIFEST_PATH: &str = "/.fenrir/services";
-pub(super) const RESERVED_ENV_KEYS: [&str; 14] = [
+pub(super) const RESERVED_ENV_KEYS: [&str; 15] = [
     "FENRIR_MODULE_ID",
     "FENRIR_SERVICE_ID",
     "FENRIR_SERVICE_URI",
@@ -72,6 +79,7 @@ pub(super) const RESERVED_ENV_KEYS: [&str; 14] = [
     "FENRIR_DB_CONNECTOR_URI",
     "FENRIR_CONTROL_PLANE_URL",
     "FENRIR_SERVICE_SNAPSHOT_PATH",
+    "FENRIR_GATEWAY_ENDPOINT",
 ];
 const DISTRIBUTION_BACKUP_DIR: &str = ".fenrir-backups";
 const BACKUP_MANIFEST_FILE: &str = "manifest.json";
@@ -154,6 +162,7 @@ pub struct ModuleServiceInit {
     pub control_plane_url: Option<String>,
     pub service_snapshot_path: Option<PathBuf>,
     pub diagnostics: Arc<ServiceDiagnostics>,
+    pub services: Weak<AppServices>,
 }
 
 pub struct ModuleService {
@@ -169,6 +178,7 @@ pub struct ModuleService {
     pub(super) client_settings: ModuleClientSettings,
     pub(super) health_client: ModuleHealthHttpClient,
     pub(super) diagnostics: Arc<ServiceDiagnostics>,
+    pub(super) runtime_gateways: Arc<RuntimeGatewayRegistry>,
     pub(super) dev_overrides: Arc<RwLock<HashMap<ModuleId, DevOverrideState>>>,
     pub(super) dev_agents: Arc<Mutex<HashMap<ModuleId, Arc<Mutex<DevAgentHandle>>>>>,
     pub(super) dev_agent_rotations: Arc<Mutex<HashMap<ModuleId, JoinHandle<()>>>>,
@@ -184,6 +194,7 @@ pub struct ModuleService {
     pub(super) manifest_client: Client,
     pub(super) service_snapshot_path: Option<PathBuf>,
     pub(super) service_endpoints: Arc<RwLock<HashMap<String, String>>>,
+    pub(super) app_services: Weak<AppServices>,
     pub(super) self_ref: Weak<ModuleService>,
 }
 
@@ -192,6 +203,27 @@ impl ModuleService {
         self.dev_sources
             .as_ref()
             .map(|config| config.module_root(module_id))
+    }
+
+    pub async fn scaffold_module(
+        &self,
+        module_id: &ModuleId,
+        options: ModuleScaffoldOptions,
+    ) -> ModuleResult<ModuleScaffoldSummary> {
+        let dev_sources = self.dev_sources.as_ref().ok_or_else(|| {
+            ModuleServiceError::Storage(ModuleStorageError::InvalidState(
+                module_scaffold_errors::DEV_SOURCES_DISABLED.to_string(),
+            ))
+        })?;
+        let root = dev_sources.module_root(module_id);
+        if tokio_fs::metadata(&root).await.is_ok() {
+            return Err(ModuleServiceError::Storage(
+                ModuleStorageError::InvalidState(module_scaffold_errors::module_exists(
+                    root.display(),
+                )),
+            ));
+        }
+        generate_module_scaffold(module_id, root, options).await
     }
 
     pub(super) async fn issue_module_service_token(
@@ -307,6 +339,12 @@ impl ModuleService {
         module_id: &ModuleId,
         endpoint: Option<SocketAddr>,
     ) -> ModuleResult<RuntimeEnvironmentExport> {
+        let gateway_endpoint = self
+            .ensure_gateway_endpoint(module_id)
+            .await
+            .map_err(|err| {
+                ModuleServiceError::Storage(ModuleStorageError::InvalidState(err.to_string()))
+            })?;
         let issued = self
             .issue_service_token_with_scopes(module_id, self.default_service_scopes.clone())
             .map_err(|err| {
@@ -324,6 +362,8 @@ impl ModuleService {
             env.retain(|(key, _)| key != "FENRIR_SERVICE_ADDR");
             env.push(("FENRIR_SERVICE_ADDR".to_string(), addr));
         }
+        env.retain(|(key, _)| key != "FENRIR_GATEWAY_ENDPOINT");
+        env.push(("FENRIR_GATEWAY_ENDPOINT".to_string(), gateway_endpoint));
         Ok(RuntimeEnvironmentExport {
             entries: env,
             token: issued,
@@ -634,6 +674,35 @@ impl ModuleService {
         guard.insert(module_id.clone(), lease);
     }
 
+    pub(super) fn audit_runtime_token_refresh(&self, module_id: &ModuleId, token: &DelegatedToken) {
+        let Some(app_services) = self.app_services.upgrade() else {
+            return;
+        };
+        let requested_scopes: &[String] = &[];
+        record_module_token_exchange(
+            app_services.as_ref(),
+            module_id,
+            ModuleTokenAuditContext {
+                transport: "module-runtime",
+                endpoint: None,
+                requested_scopes,
+                granted_scopes: Some(&token.claims.scopes),
+                reason: Some("service_token_refresh"),
+                expires_in_seconds: Self::token_ttl_seconds(token),
+                outcome: AuditOutcome::Success,
+                error: None,
+            },
+        );
+    }
+
+    fn token_ttl_seconds(token: &DelegatedToken) -> u64 {
+        let now = OffsetDateTime::now_utc();
+        if token.claims.expires_at <= now {
+            return 0;
+        }
+        (token.claims.expires_at - now).whole_seconds().max(0) as u64
+    }
+
     pub(super) fn record_lifecycle_metrics(&self, started_at: Instant, success: bool) {
         let latency_ms = started_at.elapsed().as_secs_f64() * 1000.0;
         self.diagnostics
@@ -714,7 +783,13 @@ impl ModuleService {
             if let Some(target) = self.resolve_declared_service(&module_id, service_id).await {
                 return Ok(target);
             }
-            return Err(ModuleIngressError::DevServiceInactive {
+            if self
+                .runtime_service_registered(&module_id, service_id)
+                .await
+            {
+                return self.resolve_runtime_ingress_target(&module_id).await;
+            }
+            return Err(ModuleIngressError::DeclaredServiceMissing {
                 module_id: module_id.to_string(),
                 service_id: service_id.to_string(),
             });
@@ -741,11 +816,14 @@ impl ModuleService {
                 control_plane_url,
                 service_snapshot_path,
                 diagnostics,
+                services,
             } = init;
             let manifest_client = Client::builder()
                 .timeout(client_settings.timeout)
                 .build()
                 .expect("module manifest client must build");
+            let gateway_settings = GatewaySettings::from(&client_settings);
+            let dev_sources_cfg = dev_sources.map(DevSourceConfig::new);
             Self {
                 module_registry: registry,
                 storage,
@@ -754,11 +832,15 @@ impl ModuleService {
                 service_registry,
                 port_allocator,
                 security,
-                dev_sources: dev_sources.map(DevSourceConfig::new),
+                dev_sources: dev_sources_cfg,
                 overrides: Arc::new(overrides),
                 client_settings,
                 health_client,
-                diagnostics,
+                diagnostics: Arc::clone(&diagnostics),
+                runtime_gateways: Arc::new(RuntimeGatewayRegistry::new(
+                    gateway_settings,
+                    diagnostics,
+                )),
                 dev_overrides: Arc::new(RwLock::new(HashMap::new())),
                 dev_agents: Arc::new(Mutex::new(HashMap::new())),
                 dev_agent_rotations: Arc::new(Mutex::new(HashMap::new())),
@@ -774,6 +856,7 @@ impl ModuleService {
                 manifest_client,
                 service_snapshot_path,
                 service_endpoints: Arc::new(RwLock::new(HashMap::new())),
+                app_services: services,
                 self_ref: weak.clone(),
             }
         })
@@ -940,6 +1023,11 @@ impl ModuleService {
             }
             Err(err) => Err(ModuleIngressError::Runtime(err)),
         }
+    }
+
+    async fn runtime_service_registered(&self, module_id: &ModuleId, service_id: &str) -> bool {
+        let guard = self.runtime_services.read().await;
+        runtime_service_present(&guard, module_id, service_id)
     }
 
     pub(super) async fn ensure_distribution_backup(
@@ -1273,6 +1361,7 @@ impl ModuleService {
         self.revoke_service_token_if_any(id, "module-uninstall")
             .await;
         self.port_allocator.release(id).await;
+        self.stop_gateway_if_any(id).await;
         Ok(())
     }
     /// Check for available updates for all installed modules
@@ -1647,7 +1736,6 @@ impl ModuleService {
     }
 }
 
-/// Check if a module is compatible with a specific Fenrir version
 fn check_fenrir_compatibility(manifest: &ModuleManifest, fenrir_version: &str) -> bool {
     if let Some(ref req) = manifest.fenrir_version {
         // Parse the Fenrir version
@@ -1658,4 +1746,100 @@ fn check_fenrir_compatibility(manifest: &ModuleManifest, fenrir_version: &str) -
 
     // If no requirement specified, assume compatible
     true
+}
+
+fn runtime_service_present(
+    registry: &std::collections::HashMap<ModuleId, Vec<String>>,
+    module_id: &ModuleId,
+    service_id: &str,
+) -> bool {
+    registry
+        .get(module_id)
+        .map(|services| services.iter().any(|id| id == service_id))
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{check_fenrir_compatibility, runtime_service_present};
+    use crate::domain::module::{
+        ChecksumAlgorithm, ModuleArtifactDescriptor, ModuleChecksum, ModuleId, ModuleManifest,
+        ModuleSignatureDescriptor, SignatureAlgorithm,
+    };
+    use std::collections::HashMap;
+
+    fn module(id: &str) -> ModuleId {
+        ModuleId::new(id).expect("module id valid")
+    }
+
+    #[test]
+    fn detects_registered_runtime_service() {
+        let mut registry: HashMap<ModuleId, Vec<String>> = HashMap::new();
+        let module = module("fenrir-api");
+        registry.insert(
+            module.clone(),
+            vec![
+                "module:fenrir-api::api-gateway".to_string(),
+                "module:fenrir-api::health".to_string(),
+            ],
+        );
+
+        assert!(runtime_service_present(
+            &registry,
+            &module,
+            "module:fenrir-api::api-gateway"
+        ));
+        assert!(runtime_service_present(
+            &registry,
+            &module,
+            "module:fenrir-api::health"
+        ));
+        assert!(!runtime_service_present(
+            &registry,
+            &module,
+            "module:fenrir-api::missing"
+        ));
+    }
+
+    #[test]
+    fn returns_false_for_unknown_module() {
+        let registry: HashMap<ModuleId, Vec<String>> = HashMap::new();
+        let module = module("fenrir-api");
+        assert!(!runtime_service_present(
+            &registry,
+            &module,
+            "module:fenrir-api::api-gateway"
+        ));
+    }
+
+    #[test]
+    fn fenrir_version_compatibility() {
+        let manifest = ModuleManifest {
+            id: "m".to_string(),
+            version: semver::Version::parse("1.0.0").unwrap(),
+            title: None,
+            description: None,
+            fenrir_version: Some(semver::VersionReq::parse(">=1.0.0").unwrap()),
+            authors: Vec::new(),
+            license: None,
+            artifact: ModuleArtifactDescriptor {
+                download_url: "".to_string(),
+                checksum: ModuleChecksum {
+                    algorithm: ChecksumAlgorithm::Sha256,
+                    hash: "".to_string(),
+                },
+                content_type: None,
+                size_bytes: None,
+            },
+            signature: ModuleSignatureDescriptor {
+                algorithm: SignatureAlgorithm::Ed25519,
+                key_id: "".to_string(),
+                signature: "".to_string(),
+            },
+            tags: Vec::new(),
+            published_at: None,
+        };
+        assert!(check_fenrir_compatibility(&manifest, "1.2.3"));
+        assert!(!check_fenrir_compatibility(&manifest, "0.9.0"));
+    }
 }

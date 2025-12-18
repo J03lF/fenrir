@@ -83,6 +83,18 @@ impl IdentityProvider for RejectIdentity {
     fn authenticate_user(&self, _: &str, _: &str) -> Result<IdentityUserProfile, IdentityError> {
         unimplemented!()
     }
+
+    fn set_user_password(&self, _: &str, _: &str, _: Role) -> Result<(), IdentityError> {
+        unimplemented!()
+    }
+
+    fn is_password_set(&self, _: &str) -> Result<bool, IdentityError> {
+        Ok(true)
+    }
+
+    fn take_pending_password(&self) -> Option<String> {
+        None
+    }
 }
 
 struct AcceptIdentity {
@@ -109,6 +121,18 @@ impl IdentityProvider for AcceptIdentity {
 
     fn authenticate_user(&self, _: &str, _: &str) -> Result<IdentityUserProfile, IdentityError> {
         unimplemented!()
+    }
+
+    fn set_user_password(&self, _: &str, _: &str, _: Role) -> Result<(), IdentityError> {
+        unimplemented!()
+    }
+
+    fn is_password_set(&self, _: &str) -> Result<bool, IdentityError> {
+        Ok(true)
+    }
+
+    fn take_pending_password(&self) -> Option<String> {
+        None
     }
 }
 

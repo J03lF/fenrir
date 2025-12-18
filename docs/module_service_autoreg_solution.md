@@ -68,16 +68,27 @@ Dieser Plan konkretisiert, wie Service-Definitionen aus dem Modulcode heraus erf
 | Docs | `docs/modules_overview.md`, `AGENTS.md`, `module-kit/README.md` | Flows, ENV, scopes |
 
 ## Demo-Szenario (implementiert in separaten Modul-Repos)
+- **Dev-Aufstellung** (`/opt/fenrir/development/modules/`)  
+  - Enthält `fenrir-web`, `fenrir-api` und `notification-hub`. `sync module <id>` nutzt diesen gemeinsamen Pfad, Dev-Overrides leben in denselben Repos.  
+  - Alle drei Module exportieren `/.fenrir/services` und lesen `FENRIR_SERVICE_SNAPSHOT_PATH`, um die `service://`-Routen lokal aufzulösen.
+- **Fenrir-Web** (`/opt/fenrir/development/modules/fenrir-web`)  
+  - Angular Static-Site (`mode = "static_site"`). Nutzt das Gateway (`/gateway/services/module%3Afenrir-api%3A%3Aapi-gateway/*`) für Auth-Flows.  
+  - UI-Screens: (1) Formular zum Anfordern eines Login-PINs, (2) Eingabeseite für empfangene PINs inkl. TTL-Anzeige. Die PIN wird nie lokal persistiert; Web ruft ausschließlich die API.
 - **Fenrir-API** (`/opt/fenrir/development/modules/fenrir-api`)  
-  - Route `POST /api/v1/auth/email-code` nimmt `{ email }`, fordert Service-Token `notifications:send`, ruft Notification Hub via SDK-Client, liefert Resultat an Webclient.  
-  - Meldet ServiceDescriptor über `/.fenrir/services` (`service_id = "api-gateway"`, `kind = "transport"`, `route_prefix = "/api/v1"`, `scopes = ["tickets:read","notifications:send"]`).
+  - `POST /api/v1/auth/email-code` nimmt `{ email }`, generiert einen 6-stelligen PIN, erzeugt einen `verification_code_id` und schreibt den Datensatz via `DbConnectorClient` (`DbConnectorIntent::Write`) nach `verification_codes` (`id`, `email`, `pin_hash`, `issued_at`, `expires_at`, `status`).  
+  - Die TTL ist konfigurabel (Default 10 Minuten) und wird bereits beim Insert geprüft; abgelaufene Codes beantwortet das API mit `422 PIN_EXPIRED`.  
+  - Meldet ServiceDescriptor über `/.fenrir/services` (`service_id = "api-gateway"`, `kind = "transport"`, `route_prefix = "/api/v1"`, `scopes = ["tickets:read","notifications:send"]`).  
+  - `POST /api/v1/auth/email-code/verify` erwartet `{ verification_code_id, pin }`, lädt per `DbConnectorClient` (`DbConnectorIntent::Read`) den Datensatz, vergleicht den Hash via `SecurityManager::verifier`, markiert erfolgreiche PINs als `consumed` und erstellt danach die Session.
 - **Notification Hub** (`/opt/fenrir/development/modules/notification-hub`)  
   - Deklariert Service `email-outbound` (`kind = "notification"`, `internal_only = true`).  
-  - Endpoint `POST /internal/notify/email` verarbeitet Anfragen, nutzt DbConnector (z. B. Template lookup) und acked result; Descriptor kommt ebenfalls aus `/.fenrir/services`.
+  - Endpoint `POST /internal/notify/email` verarbeitet Anfragen, nutzt DbConnector (z. B. Template lookup) und acked result; Descriptor kommt ebenfalls aus `/.fenrir/services`.  
+  - Erwartet Payload `{ email, pin_preview, expires_at }`, loggt Audit `notifications::email-pin-dispatched` inkl. TTL und schreibt optionale Dispatch-Metadaten für spätere Auswertungen.
 - **Flow**  
-  1. Webclient call → Fenrir API (service token from Gateway).  
-  2. Fenrir API `service://module:notification-hub::email-outbound`.  
-  3. Gateway enforces `notifications:send`.  
-  4. Notification Hub sendet Email, antwortet success, Fenrir API forwarded success.
+  1. Webclient (fenrir-web) ruft `POST /api/v1/auth/email-code` über das Gateway auf.  
+  2. Fenrir API erzeugt PIN + TTL, persistiert sie im `verification_codes`-Table und ruft `service://module:notification-hub::email-outbound`, damit der Dispatch die Informationen in die E-Mail schreibt.  
+  3. Gateway erzwingt `notifications:send`; Notification Hub sendet die E-Mail, bestätigt Versand und liefert TTL-Notizen zurück.  
+  4. Fenrir API reicht `verification_code_id` an das Frontend weiter; fenrir-web zeigt Countdown und erlaubt die PIN-Eingabe.  
+  5. Bei der Eingabe ruft fenrir-web `POST /api/v1/auth/email-code/verify`, die API liest den Datensatz erneut, prüft Hash + TTL + Status und markiert den Code als verbraucht; gültige PINs resultieren in einer Session/Token-Antwort, ungültige in strukturierten Fehlern (`PIN_INVALID`, `PIN_EXPIRED`, `PIN_CONSUMED`).  
+  6. Optionale Audits (`identity::pin-issued`, `identity::pin-verified`) werden geschrieben, um PIN-Lebenszyklen nachvollziehen zu können.
 
 Siehe auch die aktualisierten Beispielcodes in den Modul-Repos für Referenz.

@@ -28,8 +28,8 @@ pub use manifest::{
 pub use ports::{ModuleRegistryPort, ModuleStoragePort, ModuleVerifierPort};
 pub use progress::{ModuleProgress, ProgressCallback};
 pub use runtime::{
-    ModuleRuntimeError, ModuleRuntimeInfo, ModuleRuntimePort, ModuleRuntimeStatus,
-    ModuleStartConfig,
+    ModuleRuntimeError, ModuleRuntimeInfo, ModuleRuntimeKind, ModuleRuntimePort,
+    ModuleRuntimeStatus, ModuleStartConfig,
 };
 pub use search::ModuleSearchQuery;
 pub use summary::ModuleSummary;

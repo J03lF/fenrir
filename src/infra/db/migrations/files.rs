@@ -1,10 +1,12 @@
 use anyhow::Result;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+const MIGRATIONS_ROOT: &str = "infra/db/migrations";
 
 pub fn list_migration_files(engine: &str) -> Result<Vec<String>> {
-    let dir = format!("migrations/{engine}");
-    let path = Path::new(&dir);
+    let dir = migration_dir(engine);
+    let path = dir.as_path();
     if !path.exists() {
         return Ok(vec![]);
     }
@@ -15,4 +17,8 @@ pub fn list_migration_files(engine: &str) -> Result<Vec<String>> {
         .collect();
     files.sort();
     Ok(files)
+}
+
+pub fn migration_dir(engine: &str) -> PathBuf {
+    Path::new(MIGRATIONS_ROOT).join(engine)
 }

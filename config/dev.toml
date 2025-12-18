@@ -47,8 +47,18 @@ provider = "embedded"
 environment = "dev"
 instance_id = "local"
 
+# Password policy for first-time setup (relaxed for dev)
+[security.password_policy]
+min_length = 4
+max_length = 125
+require_uppercase = false
+require_lowercase = false
+require_digit = false
+require_special = false
+check_common_passwords = false
+
 [security.identity.embedded]
-store_path = "runtime/identity/store-dev.json"
+store_path = "identity/store-dev.json"
 audience = "fenrir-control-plane"
 
 [security.identity.external]
@@ -82,13 +92,21 @@ enabled = true
 enabled = true
 interval_ms = 5000
 
+[telemetry.history]
+retention_days = 1
+persist_interval_seconds = 60
+sample_interval_seconds = 30
+
 [audit]
 enabled = true
 
 [audit.storage]
 path = "runtime/audit/fenrir-audit-history.json"
-retention_hours = 24
+retention_days = 2
 persist_interval_seconds = 30
 
 [cli]
 prompt_theme = "default"
+
+[modules.dev_sources]
+base_path = "/opt/fenrir/development/modules/"

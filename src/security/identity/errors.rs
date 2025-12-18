@@ -7,9 +7,11 @@ use crate::utils::messages::security::identity as identity_messages;
 pub enum IdentityError {
     Io(std::io::Error),
     Serde(serde_json::Error),
+    Db(String),
     StatePoisoned,
     Invalid(String),
     Unauthorized(String),
+    PasswordNotSet { user_id: String },
 }
 
 impl fmt::Display for IdentityError {
@@ -19,10 +21,14 @@ impl fmt::Display for IdentityError {
             IdentityError::Serde(err) => {
                 f.write_str(&identity_messages::store_serialization_error(err))
             }
+            IdentityError::Db(err) => write!(f, "database error: {}", err),
             IdentityError::StatePoisoned => f.write_str(identity_messages::state_poisoned()),
             IdentityError::Invalid(reason) => f.write_str(&identity_messages::data_invalid(reason)),
             IdentityError::Unauthorized(reason) => {
                 f.write_str(&identity_messages::authorization_failed(reason))
+            }
+            IdentityError::PasswordNotSet { user_id } => {
+                write!(f, "password not set for user '{}'", user_id)
             }
         }
     }

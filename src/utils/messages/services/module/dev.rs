@@ -15,6 +15,18 @@ pub mod logs {
 pub mod errors {
     use super::fmt;
 
+    pub fn dev_sources_disabled() -> String {
+        "modules.dev_sources.base_path must be configured to use `sync module`".to_string()
+    }
+
+    pub fn dev_root_missing(root: impl fmt::Display, module: impl fmt::Display) -> String {
+        format!(
+            "dev directory {root} for module {module} is missing – clone the repo under modules.dev_sources.base_path",
+            root = root,
+            module = module
+        )
+    }
+
     pub fn install_path_missing(path: impl fmt::Display) -> String {
         format!("installation path {path} does not exist")
     }

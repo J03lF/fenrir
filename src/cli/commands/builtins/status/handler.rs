@@ -22,6 +22,9 @@ pub(super) fn handle_status_command(
     };
 
     match *resource {
+        "db" | "database" => {
+            show_db_runtime_status(deps, out)?;
+        }
         "service" => {
             let Some(service_id) = tail.first() else {
                 writeln!(out, "{}", status_messages::missing_service_id())?;
@@ -43,6 +46,30 @@ pub(super) fn handle_status_command(
     }
 
     Ok(CommandOutcome::Continue)
+}
+
+fn show_db_runtime_status(deps: &CliDependencies, out: &mut dyn Write) -> io::Result<()> {
+    if let Some(status) = deps.services.db_runtime_status() {
+        writeln!(out, "DB Runtime Status")?;
+        writeln!(out, "=================")?;
+        writeln!(out, "Engine: {}", status.engine.as_str())?;
+        writeln!(out, "Running: {}", if status.running { "yes" } else { "no" })?;
+        if let Some(uri) = status.connector_uri {
+            writeln!(out, "URI: {uri}")?;
+        }
+        if let Some(port) = status.port {
+            writeln!(out, "Port: {port}")?;
+        }
+        if let Some(pid) = status.pid {
+            writeln!(out, "PID: {pid}")?;
+        }
+        if let Some(health) = status.last_health {
+            writeln!(out, "Last Health: {health}")?;
+        }
+    } else {
+        writeln!(out, "db-runtime not available (mode != embedded?)")?;
+    }
+    Ok(())
 }
 
 fn show_service_status(

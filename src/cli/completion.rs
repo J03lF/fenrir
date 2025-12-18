@@ -7,6 +7,7 @@ use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
 use rustyline::{Context, Helper, Result as RustylineResult};
+use std::io::{self, Write};
 use std::sync::Mutex;
 use tracing::debug;
 
@@ -433,17 +434,132 @@ fn parse_state<'a>(line: &'a str, pos: usize) -> CompletionState<'a> {
 }
 
 /// Lightweight completer for static token lists (DB shell, etc.).
+/// Supports cycling through suggestions like the main shell.
+/// Displays suggestions in a grid format when there are multiple matches.
 pub struct ListCompleter {
     entries: Vec<String>,
+    cycle_state: Mutex<Option<ListCycleState>>,
+    /// Terminal width for grid formatting (default 80)
+    term_width: usize,
+    /// Maximum suggestions to show in grid (rest hidden)
+    max_grid_items: usize,
+}
+
+struct ListCycleState {
+    prefix: String,
+    suggestions: Vec<String>,
+    index: usize,
 }
 
 impl ListCompleter {
     pub fn new(entries: Vec<String>) -> Self {
-        Self { entries }
+        Self {
+            entries,
+            cycle_state: Mutex::new(None),
+            term_width: 80,
+            max_grid_items: 24,
+        }
+    }
+
+    pub fn with_term_width(mut self, width: usize) -> Self {
+        self.term_width = width;
+        self
     }
 
     pub fn update(&mut self, entries: Vec<String>) {
         self.entries = entries;
+        if let Ok(mut guard) = self.cycle_state.lock() {
+            *guard = None;
+        }
+    }
+
+    fn apply_cycle(&self, prefix: &str, mut suggestions: Vec<String>) -> (Vec<String>, bool) {
+        if suggestions.is_empty() {
+            if let Ok(mut guard) = self.cycle_state.lock() {
+                *guard = None;
+            }
+            return (suggestions, false);
+        }
+
+        let mut guard = self.cycle_state.lock().expect("cycle state mutex poisoned");
+
+        // Check if we should cycle through existing suggestions
+        if let Some(state) = guard.as_mut() {
+            // Same prefix as when we started cycling
+            if state.prefix == prefix {
+                // Cycle to next suggestion
+                state.index = (state.index + 1) % state.suggestions.len();
+                return (vec![state.suggestions[state.index].clone()], false);
+            }
+            // Check if current input matches a previous suggestion (user accepted it)
+            if state.suggestions.contains(&prefix.to_string()) {
+                // Continue cycling from where we were
+                state.index = (state.index + 1) % state.suggestions.len();
+                return (vec![state.suggestions[state.index].clone()], false);
+            }
+        }
+
+        // Start new cycle
+        suggestions.sort();
+        suggestions.dedup();
+        let should_print_grid = suggestions.len() > 1;
+        let first = suggestions.first().cloned().unwrap_or_default();
+        *guard = Some(ListCycleState {
+            prefix: prefix.to_string(),
+            suggestions,
+            index: 0,
+        });
+        (vec![first], should_print_grid)
+    }
+
+    /// Print suggestions grid directly to stdout
+    fn print_grid_to_stdout(&self, total_count: usize) {
+        let guard = match self.cycle_state.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+
+        let state = match guard.as_ref() {
+            Some(s) => s,
+            None => return,
+        };
+
+        if state.suggestions.is_empty() {
+            return;
+        }
+
+        let suggestions = &state.suggestions;
+
+        // Find the longest suggestion for column width
+        let max_len = suggestions.iter().map(|s| s.len()).max().unwrap_or(0);
+        let col_width = max_len + 2; // Add padding
+        let cols = (self.term_width / col_width).max(1);
+
+        let items_to_show = suggestions.len().min(self.max_grid_items);
+        let hidden = suggestions.len().saturating_sub(self.max_grid_items);
+
+        let mut stdout = io::stdout();
+        let _ = writeln!(stdout); // newline before grid
+
+        for (i, item) in suggestions.iter().take(items_to_show).enumerate() {
+            let _ = write!(stdout, "{:<width$}", item, width = col_width);
+            if (i + 1) % cols == 0 {
+                let _ = writeln!(stdout);
+            }
+        }
+
+        // Add newline if last row wasn't complete
+        if items_to_show % cols != 0 {
+            let _ = writeln!(stdout);
+        }
+
+        if hidden > 0 {
+            let _ = writeln!(stdout, "... {} more (TAB to cycle)", hidden);
+        } else if total_count > 1 {
+            let _ = writeln!(stdout, "(TAB to cycle)");
+        }
+
+        let _ = stdout.flush();
     }
 }
 
@@ -459,7 +575,16 @@ impl Completer for ListCompleter {
         _ctx: &Context<'_>,
     ) -> RustylineResult<(usize, Vec<Pair>)> {
         let (start, matches) = completion_matches(&self.entries, line, pos);
-        let pairs = matches
+        let prefix = &line[start..pos];
+        let match_count = matches.len();
+        let (cycled, should_print_grid) = self.apply_cycle(prefix, matches);
+
+        // Print grid to stdout when first showing multiple suggestions
+        if should_print_grid && match_count > 1 {
+            self.print_grid_to_stdout(match_count);
+        }
+
+        let pairs = cycled
             .into_iter()
             .map(|m| Pair {
                 display: m.clone(),
@@ -473,7 +598,19 @@ impl Completer for ListCompleter {
 impl Hinter for ListCompleter {
     type Hint = String;
 
-    fn hint(&self, _line: &str, _pos: usize, _ctx: &Context<'_>) -> Option<Self::Hint> {
+    fn hint(&self, line: &str, pos: usize, _ctx: &Context<'_>) -> Option<Self::Hint> {
+        let guard = self.cycle_state.lock().ok()?;
+        let state = guard.as_ref()?;
+
+        let (start, _) = completion_matches(&self.entries, line, pos);
+        let prefix = &line[start..pos];
+
+        // Show inline hint with remaining count after user accepted a suggestion
+        if state.suggestions.len() > 1 && state.suggestions.contains(&prefix.to_string()) {
+            let remaining = state.suggestions.len() - 1;
+            return Some(format!(" ({} more, TAB to cycle)", remaining));
+        }
+
         None
     }
 }

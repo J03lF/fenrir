@@ -187,6 +187,34 @@ pub mod problems {
         )
     }
 
+    pub fn static_module_invalid(id: &str) -> ProblemText {
+        ProblemText::new(
+            "static_module_invalid",
+            format!("module identifier '{id}' is invalid"),
+        )
+    }
+
+    pub fn static_module_not_running(id: &str) -> ProblemText {
+        ProblemText::new(
+            "static_module_not_running",
+            format!("static module '{id}' is not running"),
+        )
+    }
+
+    pub fn static_module_not_static(id: &str) -> ProblemText {
+        ProblemText::new(
+            "static_module_not_static",
+            format!("module '{id}' is not a static site"),
+        )
+    }
+
+    pub fn static_module_unreachable(id: &str) -> ProblemText {
+        ProblemText::new(
+            "static_module_unreachable",
+            format!("static module '{id}' is temporarily unavailable"),
+        )
+    }
+
     pub fn gateway_security_unavailable() -> ProblemText {
         ProblemText::new(
             "gateway_security_unavailable",

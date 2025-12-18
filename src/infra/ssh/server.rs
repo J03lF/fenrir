@@ -15,7 +15,9 @@ use tokio::sync::mpsc;
 
 use crate::audit::AuditActor;
 use crate::cli::commands::builtins;
-use crate::cli::commands::builtins::db_shell::{self, RuntimeExecutor};
+use crate::cli::commands::builtins::db_shell::{
+    self, build_completion_list_with_tables, RuntimeExecutor,
+};
 use crate::cli::commands::registry::{
     parse_confirmation_answer, CliDependencies, CommandOutcome, CommandOutput, CommandRegistry,
     CommandStatus, ConfirmationRequest, ShellEnvironment,
@@ -65,6 +67,7 @@ struct Handler {
     mode: ShellMode,
     db_session: Option<DbShellSession>,
     db_executor: Option<Arc<RuntimeExecutor>>,
+    db_completion_words: Vec<String>,
     cursor: usize,
     pending_confirmation: Option<ConfirmationRequest>,
 }
@@ -146,33 +149,39 @@ impl server::Handler for Handler {
 
     fn auth_password(mut self, user: &str, password: &str) -> Self::FutureAuth {
         if self.identity_required {
-            // ... we need to clone user/password to move into async block if we were fully async,
-            // but here we can just do sync checks and return ready.
-            // But authenticate_identity uses block_in_place internally if needed.
-            // We can keep it sync for now as auth is usually fast or handles blocking.
-            // But since we changed the return type, we must box.
             let user = user.to_string();
             let password = password.to_string();
+            let allowed_user = self.config.server.ssh.user.clone();
 
             async move {
-                if self.identity_required {
-                    match self.authenticate_identity(&user, &password) {
-                        Ok(()) => return Ok((self, Auth::Accept)),
-                        Err(err) => {
-                            warn!(ssh_user = %user, error = %err, "identity authentication rejected");
-                            return Ok((self, Auth::Reject));
-                        }
+                // Only allow the configured user (from config/FENRIR_USER)
+                if user != allowed_user {
+                    warn!(
+                        ssh_user = %user,
+                        allowed_user = %allowed_user,
+                        "login rejected: user not authorized"
+                    );
+                    return Ok((self, Auth::Reject));
+                }
+
+                match self.authenticate_identity(&user, &password) {
+                    Ok(true) => {
+                        // Normal authentication success
+                        Ok((self, Auth::Accept))
+                    }
+                    Ok(false) => {
+                        // Password not set - entering setup mode
+                        // Accept auth to allow channel for setup dialog
+                        Ok((self, Auth::Accept))
+                    }
+                    Err(err) => {
+                        warn!(ssh_user = %user, error = %err, "identity authentication rejected");
+                        Ok((self, Auth::Reject))
                     }
                 }
-                // ...
-                if self.password_env_accepts(&user, &password) {
-                    Ok((self, Auth::Accept))
-                } else {
-                    Ok((self, Auth::Reject))
-                }
-            }.boxed()
+            }
+            .boxed()
         } else {
-            // ...
             let user = user.to_string();
             let password = password.to_string();
             async move {
@@ -197,8 +206,8 @@ impl server::Handler for Handler {
                     "{}",
                     prompts::welcome_line(self.config.as_ref())
                 );
+                Handler::send_prompt(&mut session, channel, self.current_prompt());
             }
-            Handler::send_prompt(&mut session, channel, self.current_prompt());
             Ok((self, session))
         }
         .boxed()
@@ -307,9 +316,19 @@ impl server::Handler for Handler {
 
 impl Handler {
     fn refresh_prompts(&mut self) {
+        // Use profile name for host if set, otherwise server_name
+        let host = self
+            .config
+            .app
+            .profile
+            .as_ref()
+            .filter(|p| !p.is_empty())
+            .cloned()
+            .unwrap_or_else(|| self.config.server.ssh.server_name.clone());
+
         let prompt_ctx = PromptContext {
             user: self.username.clone(),
-            host: self.config.server.ssh.server_name.clone(),
+            host,
             role: self.role_label.clone(),
             transport: SSH_TRANSPORT.to_string(),
         };
@@ -335,23 +354,39 @@ impl Handler {
         self.refresh_prompts();
     }
 
-    fn authenticate_identity(&mut self, user: &str, password: &str) -> Result<(), IdentityError> {
+    /// Authenticate user via identity provider.
+    /// Returns `Ok(true)` for successful auth, `Ok(false)` for password setup needed.
+    fn authenticate_identity(&mut self, user: &str, password: &str) -> Result<bool, IdentityError> {
         let identity = self
             .services
             .identity()
             .ok_or_else(|| IdentityError::Invalid("identity provider not available".into()))?;
-        let profile = if TokioHandle::try_current().is_ok() {
-            tokio::task::block_in_place(|| identity.authenticate_user(user, password))?
+
+        let result = if TokioHandle::try_current().is_ok() {
+            tokio::task::block_in_place(|| identity.authenticate_user(user, password))
         } else {
-            identity.authenticate_user(user, password)?
+            identity.authenticate_user(user, password)
         };
-        if !matches!(profile.role, Role::Admin) {
-            return Err(IdentityError::Unauthorized(
-                "insufficient role for SSH access".into(),
-            ));
+
+        match result {
+            Ok(profile) => {
+                if !matches!(profile.role, Role::Admin) {
+                    return Err(IdentityError::Unauthorized(
+                        "insufficient role for SSH access".into(),
+                    ));
+                }
+                self.set_identity_context(profile);
+                Ok(true)
+            }
+            Err(IdentityError::PasswordNotSet { user_id }) => {
+                // Password not set - user must run setup script first
+                warn!(user = %user_id, "password not configured - run ./scripts/fenrir-setup.sh first");
+                Err(IdentityError::Unauthorized(
+                    "password not configured - run ./scripts/fenrir-setup.sh first".into(),
+                ))
+            }
+            Err(err) => Err(err),
         }
-        self.set_identity_context(profile);
-        Ok(())
     }
 
     fn process_buffer(&mut self, channel: ChannelId, session: &mut Session) -> bool {
@@ -475,6 +510,21 @@ impl Handler {
             }
             match db_shell::apply_command(db_session, trimmed, executor.as_ref(), &mut writer) {
                 Ok(true) => {
+                    // Refresh completion cache after DDL commands
+                    let cmd_upper = trimmed.to_uppercase();
+                    let needs_refresh = cmd_upper.contains("CREATE TABLE")
+                        || cmd_upper.contains("DROP TABLE")
+                        || cmd_upper.contains("ALTER TABLE")
+                        || cmd_upper.contains("CREATE INDEX")
+                        || cmd_upper.contains("DROP INDEX")
+                        || cmd_upper.contains("CREATE VIEW")
+                        || cmd_upper.contains("DROP VIEW");
+                    if needs_refresh {
+                        let mut sink = std::io::sink();
+                        let (words, _) =
+                            build_completion_list_with_tables(db_session, executor.as_ref(), &mut sink);
+                        self.db_completion_words = words;
+                    }
                     Handler::send_prompt(session, channel, self.current_prompt());
                     db_probe.mark_success();
                     ssh_probe.mark_success();
@@ -689,7 +739,8 @@ impl Handler {
     }
 
     fn complete_db(&mut self, channel: ChannelId, session: &mut Session) {
-        let commands = db_shell::completion_words(self.db_session.as_ref());
+        // Use cached completion words (includes table names)
+        let commands = &self.db_completion_words;
         if commands.is_empty() {
             session.data(channel, CryptoVec::from_slice(b"\x07"));
             return;
@@ -732,8 +783,32 @@ impl Handler {
         session.data(channel, CryptoVec::from_slice(b"\r\n"));
         {
             let mut writer = SessionWriter::new(session, channel);
-            for entry in &matches {
-                let _ = writeln!(&mut writer, "{entry}");
+            // Display matches in grid format (horizontal columns) like main CLI
+            let total = matches.len();
+            let hidden = total.saturating_sub(COMPLETION_MAX_VISIBLE);
+            let visible: Vec<_> = matches.iter().take(COMPLETION_MAX_VISIBLE).collect();
+
+            let max_len = visible.iter().map(|s| s.len()).max().unwrap_or(0);
+            let col_width = max_len.saturating_add(COMPLETION_PADDING).max(COMPLETION_PADDING);
+            let cols = (COMPLETION_DISPLAY_WIDTH / col_width).max(1).min(visible.len());
+
+            for chunk in visible.chunks(cols) {
+                for (i, entry) in chunk.iter().enumerate() {
+                    if cols == 1 || i + 1 == chunk.len() {
+                        let _ = write!(&mut writer, "{entry}");
+                    } else {
+                        let _ = write!(&mut writer, "{entry:<width$}", width = col_width);
+                    }
+                }
+                let _ = writeln!(&mut writer);
+            }
+
+            if hidden > 0 {
+                let _ = writeln!(
+                    &mut writer,
+                    "{}",
+                    ssh_messages::completion_hidden_hint(hidden)
+                );
             }
         }
         self.render_buffer(session, channel);
@@ -835,7 +910,16 @@ impl Handler {
                     .collect::<Vec<_>>();
                 match RuntimeExecutor::new() {
                     Ok(executor) => {
-                        self.db_executor = Some(Arc::new(executor));
+                        let executor = Arc::new(executor);
+                        // Load table names for completion
+                        let mut sink = std::io::sink();
+                        let (words, table_count) = build_completion_list_with_tables(
+                            &db_session,
+                            executor.as_ref(),
+                            &mut sink,
+                        );
+                        self.db_completion_words = words;
+                        self.db_executor = Some(executor);
                         self.db_session = Some(db_session);
                         let mut writer = SessionWriter::new(session, channel);
                         let _ = writeln!(
@@ -856,6 +940,13 @@ impl Handler {
                             "{}",
                             ssh_messages::db_shell_force_hint(DESTRUCTIVE_FORCE_WARNING)
                         );
+                        if table_count > 0 {
+                            let _ = writeln!(
+                                &mut writer,
+                                "completion: {} tables loaded",
+                                table_count
+                            );
+                        }
                         Handler::send_prompt(session, channel, &self.db_prompt);
                     }
                     Err(err) => {
@@ -1129,6 +1220,7 @@ pub async fn start(cfg: &Arc<AppConfig>, services: &Arc<AppServices>) -> Result<
                 mode: ShellMode::Main,
                 db_session: None,
                 db_executor: None,
+                db_completion_words: Vec::new(),
                 cursor: 0,
                 pending_confirmation: None,
             };
@@ -1178,17 +1270,21 @@ pub async fn start(cfg: &Arc<AppConfig>, services: &Arc<AppServices>) -> Result<
 }
 
 fn should_enforce_identity(cfg: &AppConfig) -> bool {
-    if cfg.security.identity.provider != IdentityProviderKind::External {
-        return false;
-    }
-    let environment = cfg.security.identity.environment.to_ascii_lowercase();
-    let is_prod_env = matches!(environment.as_str(), "prod" | "production");
-    if !is_prod_env {
-        return false;
-    }
-    match Version::parse(&cfg.app.version) {
-        Ok(version) => version >= Version::new(1, 0, 0),
-        Err(_) => false,
+    match cfg.security.identity.provider {
+        // Embedded provider: always use identity (supports first-time password setup)
+        IdentityProviderKind::Embedded => true,
+        // External provider: only enforce in production with version >= 1.0.0
+        IdentityProviderKind::External => {
+            let environment = cfg.security.identity.environment.to_ascii_lowercase();
+            let is_prod_env = matches!(environment.as_str(), "prod" | "production");
+            if !is_prod_env {
+                return false;
+            }
+            match Version::parse(&cfg.app.version) {
+                Ok(version) => version >= Version::new(1, 0, 0),
+                Err(_) => false,
+            }
+        }
     }
 }
 

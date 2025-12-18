@@ -52,6 +52,14 @@ export FENRIR_IDENTITY_TOKEN=test1234567891202
 # Fenrir lädt diese Datei automatisch (bzw. eine alternative via `FENRIR_ENV_FILE=/path/to/.env`),
 # solange der jeweilige Key noch nicht im Environment gesetzt ist.
 
+DB Runtime Switch
+- `db.runtime.mode = "external"|"embedded"` (Default: external).  
+- External: nutzt wie bisher `db.connections.*` URIs (z. B. `FENRIR_DB_POSTGRES_URI`).  
+- Embedded: wähle Engine via `db.runtime.embedded.engine` (`sqlite`/`postgres`).  
+  - Sqlite: `db.runtime.embedded.sqlite.file_path`, optional `vacuum_interval_seconds`.  
+  - Postgres: `db.runtime.embedded.postgres.data_dir`, `binary_path`, `port_range`.  
+- ENV-Overrides folgen dem Schema `FENRIR__DB__RUNTIME__...` (z. B. `FENRIR__DB__RUNTIME__MODE=embedded`).
+
 
 export FENRIR_IDENTITY_TLS_CA="/opt/fenrir/development/fenrir/config/certs/test-ca.crt"
 export FENRIR_IDENTITY_TLS_CERT="/opt/fenrir/development/fenrir/config/certs/identity-client.crt"

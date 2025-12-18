@@ -4,12 +4,13 @@ use crate::cli::commands::builtins;
 use crate::cli::commands::registry::{CliDependencies, ShellEnvironment};
 use crate::config::{
     AppConfig, AppSection, AuditSection, AuditStorageSection, CliSection, DbConnectionSettings,
-    DbConnections, DbPoolSettings, DbSection, HttpConfig, HttpSecuritySection, HttpTlsConfig,
-    IdentitySection, JwtConfig, KdfConfig, ModuleDevSourcesSection, ModuleRegistrySection,
-    ModuleRegistryTlsSection, ModuleRuntimeSection, ModuleStorageSection, ModuleTrustSection,
-    ModulesSection, SecuritySection, ServerSection, ServiceTokenSection, SessionSection, SshConfig,
-    SshTlsConfig, TelemetryHealthSection, TelemetryMetricsSection, TelemetrySection,
-    TelemetrySystemSection, TelemetryTracingSection,
+    DbConnections, DbPoolSettings, DbRuntimeSection, DbSection, HttpConfig, HttpSecuritySection,
+    HttpTlsConfig, IdentitySection, JwtConfig, KdfConfig, ModuleDevSourcesSection,
+    ModuleRegistrySection, ModuleRegistryTlsSection, ModuleRuntimeSection, ModuleStorageSection,
+    ModuleTrustSection, ModulesSection, PasswordPolicyConfig, SecuritySection, ServerSection,
+    ServiceTokenSection, SessionSection, SshConfig, SshTlsConfig, TelemetryHealthSection,
+    TelemetryHistorySection, TelemetryMetricsSection, TelemetrySection, TelemetrySystemSection,
+    TelemetryTracingSection,
 };
 use crate::domain::db::{
     DbAdminPort, DbEngine, DbExecutionResult, DbResult, DbTable, DbTableSchema, DbValue,
@@ -63,19 +64,24 @@ impl DbAdminPort for DummyDbAdapter {
 }
 
 fn test_config() -> Arc<AppConfig> {
-    let mut connections = DbConnections::default();
-    connections.postgres = Some(DbConnectionSettings {
-        uri: "postgres://test".to_string(),
-        pool: DbPoolSettings {
-            max: Some(8),
-            timeout_ms: Some(1000),
-        },
-    });
+    let connections = DbConnections {
+        postgres: Some(DbConnectionSettings {
+            uri: "postgres://test".to_string(),
+            pool: DbPoolSettings {
+                max: Some(8),
+                timeout_ms: Some(1000),
+            },
+        }),
+        ..Default::default()
+    };
 
     Arc::new(AppConfig {
         app: AppSection {
             name: "fenrir-test".to_string(),
             version: "0.0.0".to_string(),
+            distribution: None,
+            profile: None,
+            debug: false,
         },
         server: ServerSection {
             enable_http: false,
@@ -126,10 +132,12 @@ fn test_config() -> Arc<AppConfig> {
                 cleanup_interval_seconds: 60,
             },
             identity: IdentitySection::default(),
+            password_policy: PasswordPolicyConfig::default(),
         },
         db: DbSection {
             default_engine: "postgres".to_string(),
             connections,
+            runtime: DbRuntimeSection::default(),
         },
         telemetry: TelemetrySection {
             tracing: TelemetryTracingSection {
@@ -144,6 +152,7 @@ fn test_config() -> Arc<AppConfig> {
                 enabled: true,
                 interval_ms: Some(5000),
             },
+            history: TelemetryHistorySection::default(),
         },
         audit: AuditSection {
             enabled: false,
@@ -242,10 +251,7 @@ fn search_command_suggests_module_resource() {
     let completer = ContextualCompleter::new(shapes, dependencies, ShellEnvironment::Cli);
 
     let (_, suggestions) = completer.suggestions_for("search ", "search ".len());
-    assert_eq!(
-        suggestions,
-        vec!["module".to_string(), "modules".to_string()]
-    );
+    assert_eq!(suggestions, vec!["modules".to_string()]);
 }
 
 #[test]

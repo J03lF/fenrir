@@ -31,6 +31,24 @@ enum Command {
     Shutdown,
     /// Show installed modules
     Status,
+    /// Show db-runtime status (embedded mode)
+    DbRuntimeStatus {
+        /// Tail N log lines
+        #[arg(long, default_value = "0")]
+        tail: usize,
+    },
+    /// Show db-runtime logs
+    DbRuntimeLogs {
+        /// Tail N log lines
+        #[arg(long, default_value = "50")]
+        tail: usize,
+    },
+    /// Start db-runtime
+    DbRuntimeStart,
+    /// Stop db-runtime
+    DbRuntimeStop,
+    /// Restart db-runtime
+    DbRuntimeRestart,
 }
 
 #[derive(Deserialize, Debug)]
@@ -75,6 +93,24 @@ async fn main() -> Result<()> {
         }
         Command::Status => {
             show_status(&client, &cli.url, &token).await?;
+        }
+        Command::DbRuntimeStatus { tail } => {
+            db_runtime_status(&client, &cli.url, &token, tail).await?;
+        }
+        Command::DbRuntimeLogs { tail } => {
+            db_runtime_logs(&client, &cli.url, &token, tail).await?;
+        }
+        Command::DbRuntimeStart => {
+            control_db_runtime(&client, &cli.url, &token, "start").await?;
+            println!("db-runtime start requested");
+        }
+        Command::DbRuntimeStop => {
+            control_db_runtime(&client, &cli.url, &token, "stop").await?;
+            println!("db-runtime stop requested");
+        }
+        Command::DbRuntimeRestart => {
+            control_db_runtime(&client, &cli.url, &token, "restart").await?;
+            println!("db-runtime restart requested");
         }
     }
 
@@ -141,6 +177,50 @@ async fn stop_services(client: &Client, base_url: &str, token: &str) -> Result<(
         token,
     )
     .await
+}
+
+async fn db_runtime_status(client: &Client, base_url: &str, token: &str, tail: usize) -> Result<()> {
+    let url = format!("{base_url}/services/db-runtime/status?tail={tail}");
+    let resp = client
+        .get(&url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .with_context(|| format!("request to {url} failed"))?;
+    if !resp.status().is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("request to {url} failed: {body}"));
+    }
+    let body = resp.text().await?;
+    println!("{body}");
+    Ok(())
+}
+
+async fn db_runtime_logs(client: &Client, base_url: &str, token: &str, tail: usize) -> Result<()> {
+    let url = format!("{base_url}/services/db-runtime/logs?tail={tail}");
+    let resp = client
+        .get(&url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .with_context(|| format!("request to {url} failed"))?;
+    if !resp.status().is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("request to {url} failed: {body}"));
+    }
+    let body = resp.text().await?;
+    println!("{body}");
+    Ok(())
+}
+
+async fn control_db_runtime(
+    client: &Client,
+    base_url: &str,
+    token: &str,
+    action: &str,
+) -> Result<()> {
+    let url = format!("{base_url}/services/db-runtime/{action}");
+    post_empty(client, url, token).await
 }
 
 async fn show_status(client: &Client, base_url: &str, token: &str) -> Result<()> {

@@ -7,6 +7,7 @@ use std::io::{self, Write};
 
 use super::issue::handle_issue;
 use super::list::handle_list;
+use super::password::handle_password;
 use super::tokens::handle_tokens;
 
 const USER_ARGUMENTS: &[CommandArgument] = &[CommandArgument::required("action")
@@ -44,6 +45,7 @@ fn handle_user(
         "list" => handle_list(deps, out),
         "issue" => handle_issue(deps, rest, out),
         "tokens" => handle_tokens(deps, rest, out),
+        "password" => handle_password(deps, rest, out),
         other => {
             writeln!(out, "{}", user_command_messages::unknown_action(other))?;
             Ok(CommandOutcome::Continue)

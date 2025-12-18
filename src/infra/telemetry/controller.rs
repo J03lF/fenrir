@@ -6,7 +6,7 @@ use std::fs::File;
 #[cfg(target_os = "linux")]
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -32,8 +32,11 @@ static SERVICE_PROCESS_REGISTRY: OnceLock<Mutex<HashMap<String, HashSet<u32>>>> 
 static PROCESS_SYSTEM: OnceLock<Mutex<System>> = OnceLock::new();
 
 const HISTORY_FILENAME: &str = "fenrir-telemetry-history.json";
-const HISTORY_RETENTION_SECS: u64 = 24 * 60 * 60; // 24h
-const HISTORY_PERSIST_INTERVAL_SECS: u64 = 30;
+const DEFAULT_HISTORY_RETENTION_SECS: u64 = 24 * 60 * 60; // 24h
+const DEFAULT_HISTORY_PERSIST_INTERVAL_SECS: u64 = 60;
+const DEFAULT_HISTORY_SAMPLE_INTERVAL_SECS: u64 = 30;
+const MIN_HISTORY_RETENTION_SECS: u64 = 60;
+const MIN_HISTORY_INTERVAL_SECS: u64 = 5;
 const HISTORY_MAX_SAMPLES: usize = 200_000;
 const PROCESS_HISTORY_PREFIX: &str = "process.";
 const HISTORY_VERSION: u8 = 1;
@@ -49,20 +52,24 @@ struct TelemetryState {
     readiness_probes: Mutex<Vec<Probe>>, // lazily evaluated health probes
     history: Mutex<VecDeque<MetricHistorySample>>,
     history_path: PathBuf,
-    history_retention: Duration,
-    history_persist_interval: Duration,
+    history_retention_secs: AtomicU64,
+    history_persist_interval_secs: AtomicU64,
+    history_sample_interval_secs: AtomicU64,
+    last_history_sample: Mutex<Instant>,
     last_persist: Mutex<Instant>,
 }
 
 impl TelemetryState {
     fn new(config: TelemetryConfig) -> Self {
         let history_path = telemetry_history_path();
-        let history_retention = Duration::from_secs(HISTORY_RETENTION_SECS);
-        let history_persist_interval = Duration::from_secs(HISTORY_PERSIST_INTERVAL_SECS);
-        let history = load_history_from_disk(&history_path, history_retention);
-        let initial_persist = Instant::now()
-            .checked_sub(history_persist_interval)
-            .unwrap_or_else(Instant::now);
+        let history = load_history_from_disk(&history_path, config.history_retention);
+        let now = Instant::now();
+        let initial_persist = now
+            .checked_sub(config.history_persist_interval)
+            .unwrap_or(now);
+        let initial_sample = now
+            .checked_sub(config.history_sample_interval)
+            .unwrap_or(now);
         Self {
             ready: AtomicBool::new(false),
             live: AtomicBool::new(true),
@@ -74,9 +81,72 @@ impl TelemetryState {
             readiness_probes: Mutex::new(Vec::new()),
             history: Mutex::new(history),
             history_path,
-            history_retention,
-            history_persist_interval,
+            history_retention_secs: AtomicU64::new(config.history_retention.as_secs().max(1)),
+            history_persist_interval_secs: AtomicU64::new(
+                config.history_persist_interval.as_secs().max(1),
+            ),
+            history_sample_interval_secs: AtomicU64::new(
+                config.history_sample_interval.as_secs().max(1),
+            ),
+            last_history_sample: Mutex::new(initial_sample),
             last_persist: Mutex::new(initial_persist),
+        }
+    }
+
+    fn history_retention_duration(&self) -> Duration {
+        Duration::from_secs(self.history_retention_secs.load(Ordering::Acquire).max(1))
+    }
+
+    fn history_persist_interval(&self) -> Duration {
+        Duration::from_secs(
+            self.history_persist_interval_secs
+                .load(Ordering::Acquire)
+                .max(1),
+        )
+    }
+
+    fn history_sample_interval(&self) -> Duration {
+        Duration::from_secs(
+            self.history_sample_interval_secs
+                .load(Ordering::Acquire)
+                .max(1),
+        )
+    }
+
+    fn should_sample_history(&self) -> bool {
+        if let Ok(mut guard) = self.last_history_sample.lock() {
+            if guard.elapsed() >= self.history_sample_interval() {
+                *guard = Instant::now();
+                return true;
+            }
+        }
+        false
+    }
+
+    fn update_history_config(&self, config: &TelemetryConfig) {
+        self.history_retention_secs
+            .store(config.history_retention.as_secs().max(1), Ordering::Release);
+        self.history_persist_interval_secs.store(
+            config.history_persist_interval.as_secs().max(1),
+            Ordering::Release,
+        );
+        self.history_sample_interval_secs.store(
+            config.history_sample_interval.as_secs().max(1),
+            Ordering::Release,
+        );
+        let now = Instant::now();
+        if let Ok(mut guard) = self.last_persist.lock() {
+            *guard = now
+                .checked_sub(config.history_persist_interval)
+                .unwrap_or(now);
+        }
+        if let Ok(mut guard) = self.last_history_sample.lock() {
+            *guard = now
+                .checked_sub(config.history_sample_interval)
+                .unwrap_or(now);
+        }
+        if let Ok(mut history) = self.history.lock() {
+            self.trim_history(&mut history);
         }
     }
 
@@ -117,7 +187,7 @@ impl TelemetryState {
     }
 
     fn trim_history(&self, history: &mut VecDeque<MetricHistorySample>) {
-        let cutoff = now_ms().saturating_sub(duration_to_millis(self.history_retention));
+        let cutoff = now_ms().saturating_sub(duration_to_millis(self.history_retention_duration()));
         while let Some(front) = history.front() {
             if front.timestamp_ms < cutoff {
                 history.pop_front();
@@ -132,7 +202,7 @@ impl TelemetryState {
 
     fn should_persist(&self) -> bool {
         if let Ok(mut guard) = self.last_persist.lock() {
-            if guard.elapsed() >= self.history_persist_interval {
+            if guard.elapsed() >= self.history_persist_interval() {
                 *guard = Instant::now();
                 return true;
             }
@@ -353,13 +423,32 @@ struct Probe {
 struct TelemetryConfig {
     metrics_enabled: bool,
     health_enabled: bool,
+    history_retention: Duration,
+    history_persist_interval: Duration,
+    history_sample_interval: Duration,
 }
 
 impl From<&AppConfig> for TelemetryConfig {
     fn from(cfg: &AppConfig) -> Self {
+        let history_cfg = &cfg.telemetry.history;
+        let retention_secs = history_cfg
+            .retention_seconds()
+            .unwrap_or(DEFAULT_HISTORY_RETENTION_SECS)
+            .max(MIN_HISTORY_RETENTION_SECS);
+        let persist_secs = history_cfg
+            .persist_interval_seconds()
+            .unwrap_or(DEFAULT_HISTORY_PERSIST_INTERVAL_SECS)
+            .max(MIN_HISTORY_INTERVAL_SECS);
+        let sample_secs = history_cfg
+            .sample_interval_seconds()
+            .unwrap_or(DEFAULT_HISTORY_SAMPLE_INTERVAL_SECS)
+            .max(MIN_HISTORY_INTERVAL_SECS);
         Self {
             metrics_enabled: cfg.telemetry.metrics.enabled,
             health_enabled: cfg.telemetry.health.enabled,
+            history_retention: Duration::from_secs(retention_secs),
+            history_persist_interval: Duration::from_secs(persist_secs),
+            history_sample_interval: Duration::from_secs(sample_secs),
         }
     }
 }
@@ -402,6 +491,7 @@ pub fn reload(cfg: &AppConfig) {
         state
             .health_enabled
             .store(new_cfg.health_enabled, Ordering::Release);
+        state.update_history_config(&new_cfg);
         tracing::info!(
             metrics_enabled = new_cfg.metrics_enabled,
             health_enabled = new_cfg.health_enabled,
@@ -562,6 +652,9 @@ pub fn get_service_specific_metrics(service_id: &str) -> ServiceResourceSample {
 fn record_process_history_sample() {
     if let Some(state) = TELEMETRY.get() {
         if !state.metrics_enabled.load(Ordering::Acquire) {
+            return;
+        }
+        if !state.should_sample_history() {
             return;
         }
         if let Ok(metrics) = state.metrics.lock() {

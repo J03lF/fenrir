@@ -11,6 +11,7 @@ use super::store::IdentityUserRecord;
 use super::types::{IdentityClaims, IdentityUserProfile, IssueTokenRequest, IssuedToken};
 use crate::config::{AppConfig, IdentityExternalTlsResolved, IdentityProviderKind};
 use crate::security::manager::AuditSink;
+use crate::services::db_shell::DbShellService;
 use crate::utils::messages::security::identity as identity_messages;
 
 pub trait IdentityProvider: Send + Sync {
@@ -22,16 +23,49 @@ pub trait IdentityProvider: Send + Sync {
         user_id: &str,
         password: &str,
     ) -> Result<IdentityUserProfile, IdentityError>;
+
+    /// Set password for a user (for embedded provider first-time setup)
+    /// Returns Err for external providers that don't support local password management
+    fn set_user_password(
+        &self,
+        user_id: &str,
+        password_hash: &str,
+        role: crate::security::auth::Role,
+    ) -> Result<(), IdentityError>;
+
+    /// Check if user has a password set (for first-time setup detection)
+    fn is_password_set(&self, user_id: &str) -> Result<bool, IdentityError>;
+
+    /// Take pending password from setup script (if any)
+    /// Returns Some(password) and deletes the pending file, None if no pending password
+    fn take_pending_password(&self) -> Option<String>;
 }
 
+/// Build identity provider (file storage only - for backward compatibility)
 pub fn build_identity_provider(
     cfg: &AppConfig,
     runtime_dir: &Path,
     audit: Arc<dyn AuditSink>,
 ) -> Result<Arc<dyn IdentityProvider>, IdentityError> {
+    build_identity_provider_with_db(cfg, runtime_dir, None, audit)
+}
+
+/// Build identity provider with optional database support
+/// Uses storage backend from config: `security.identity.embedded.storage`
+pub fn build_identity_provider_with_db(
+    cfg: &AppConfig,
+    runtime_dir: &Path,
+    db_shell: Option<Arc<DbShellService>>,
+    audit: Arc<dyn AuditSink>,
+) -> Result<Arc<dyn IdentityProvider>, IdentityError> {
     match cfg.security.identity.provider {
         IdentityProviderKind::Embedded => {
-            let provider = IdentityAuthority::bootstrap(cfg, runtime_dir, Arc::clone(&audit))?;
+            let provider = IdentityAuthority::bootstrap_with_storage(
+                cfg,
+                runtime_dir,
+                db_shell,
+                Arc::clone(&audit),
+            )?;
             Ok(Arc::new(provider))
         }
         IdentityProviderKind::External => {

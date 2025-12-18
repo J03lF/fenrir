@@ -19,8 +19,7 @@ use crate::services::module::{
 use crate::utils::messages::cli::builtins::modules as msg_modules;
 
 use super::ctx::{
-    dev_services_metadata, module_error_metadata, record_module_audit, run_module_runtime_call,
-    OwnedStreamedWriter,
+    dev_services_metadata, module_error_metadata, record_module_audit, OwnedStreamedWriter,
 };
 use super::output::{module_error_code, render_runtime_error, render_service_error};
 
@@ -500,17 +499,10 @@ impl InstallDistributionConfirmation {
             let mut block = LiveTaskBlock::new(&mut out, &module_label)?;
 
             if matches!(entry.action, DistributionAction::Update) {
-                let module_id_for_status = entry.module_id.clone();
-                match run_module_runtime_call(Arc::clone(&service), move |svc| async move {
-                    svc.runtime_status(&module_id_for_status).await
-                }) {
+                // Use direct async calls instead of run_module_runtime_call to avoid blocking
+                match service.runtime_status(&entry.module_id).await {
                     Ok(_) => {
-                        let module_id_for_stop = entry.module_id.clone();
-                        if let Err(err) =
-                            run_module_runtime_call(Arc::clone(&service), move |svc| async move {
-                                svc.stop(&module_id_for_stop).await
-                            })
-                        {
+                        if let Err(err) = service.stop(&entry.module_id).await {
                             render_runtime_error(
                                 &mut out,
                                 msg_modules::tasks_flow::runtime_contexts::STOP_FAILED,
@@ -655,18 +647,14 @@ impl InstallDistributionConfirmation {
             }
 
             if needs_restart {
-                let module_id_for_start = entry.module_id.clone();
-                let start_result =
-                    run_module_runtime_call(Arc::clone(&service), move |svc| async move {
+                // Use direct async call instead of run_module_runtime_call to avoid blocking
                         let config = ModuleStartConfig {
-                            module_id: module_id_for_start,
+                    module_id: entry.module_id.clone(),
                             port: None,
                             env_vars: Vec::new(),
                             auto_restart: true,
                         };
-                        svc.start(config).await
-                    });
-                match start_result {
+                match service.start(config).await {
                     Ok(info) => {
                         let pid_hint = msg_modules::tasks_flow::details::start_running(info.pid);
                         block.final_step(msg_modules::tasks_flow::steps::STARTING, &pid_hint)?;

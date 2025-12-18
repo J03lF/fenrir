@@ -19,24 +19,14 @@ where
     T: Send + 'static,
 {
     let span = tracing::Span::current();
-    if Handle::try_current().is_ok() {
-        return std::thread::spawn(move || {
-            let _enter = span.enter();
-            Runtime::new()
-                .map_err(|err| {
-                    ModuleServiceError::Storage(ModuleStorageError::Unavailable(format!(
-                        "runtime init failed: {err}"
-                    )))
-                })?
-                .block_on(factory().in_current_span())
-        })
-        .join()
-        .unwrap_or_else(|err| {
-            Err(ModuleServiceError::Storage(
-                ModuleStorageError::Unavailable(format!("blocking thread panicked: {err:?}")),
-            ))
-        });
+    // If we're already in a tokio runtime, use block_in_place to run the future
+    // in the SAME runtime. This is critical for module lifecycle operations
+    // because spawned tasks (like static site servers) must live in the main runtime.
+    if let Ok(handle) = Handle::try_current() {
+        let _enter = span.enter();
+        return tokio::task::block_in_place(|| handle.block_on(factory().in_current_span()));
     }
+    // Otherwise create a new runtime (for CLI mode without existing runtime)
     let _enter = span.enter();
     Runtime::new()
         .map_err(|err| {
@@ -54,22 +44,14 @@ where
     T: Send + 'static,
 {
     let span = tracing::Span::current();
-    if Handle::try_current().is_ok() {
-        return std::thread::spawn(move || {
-            let _enter = span.enter();
-            Runtime::new()
-                .map_err(|err| {
-                    ModuleRuntimeError::InvalidState(format!("runtime init failed: {err}"))
-                })?
-                .block_on(factory().in_current_span())
-        })
-        .join()
-        .unwrap_or_else(|err| {
-            Err(ModuleRuntimeError::InvalidState(format!(
-                "blocking thread panicked: {err:?}"
-            )))
-        });
+    // If we're already in a tokio runtime, use block_in_place to run the future
+    // in the SAME runtime. This is critical for module lifecycle operations
+    // because spawned tasks (like static site servers) must live in the main runtime.
+    if let Ok(handle) = Handle::try_current() {
+        let _enter = span.enter();
+        return tokio::task::block_in_place(|| handle.block_on(factory().in_current_span()));
     }
+    // Otherwise create a new runtime (for CLI mode without existing runtime)
     let _enter = span.enter();
     Runtime::new()
         .map_err(|err| ModuleRuntimeError::InvalidState(format!("runtime init failed: {err}")))?
@@ -89,50 +71,6 @@ where
         let service = Arc::clone(&service);
         factory(service)
     })
-}
-
-pub(super) fn run_module_runtime_call<F, Fut, T>(
-    service: Arc<ModuleService>,
-    factory: F,
-) -> Result<T, ModuleRuntimeError>
-where
-    F: FnOnce(Arc<ModuleService>) -> Fut + Send + 'static,
-    Fut: Future<Output = Result<T, ModuleRuntimeError>> + Send + 'static,
-    T: Send + 'static,
-{
-    let span = tracing::Span::current();
-    if Handle::try_current().is_ok() {
-        return std::thread::spawn(move || {
-            let _enter = span.enter();
-            Runtime::new()
-                .map_err(|err| {
-                    ModuleRuntimeError::InvalidState(format!("runtime init failed: {err}"))
-                })?
-                .block_on(
-                    async move {
-                        let service = Arc::clone(&service);
-                        factory(service).await
-                    }
-                    .in_current_span(),
-                )
-        })
-        .join()
-        .unwrap_or_else(|err| {
-            Err(ModuleRuntimeError::InvalidState(format!(
-                "blocking thread panicked: {err:?}"
-            )))
-        });
-    }
-    let _enter = span.enter();
-    Runtime::new()
-        .map_err(|err| ModuleRuntimeError::InvalidState(format!("runtime init failed: {err}")))?
-        .block_on(
-            async move {
-                let service = Arc::clone(&service);
-                factory(service).await
-            }
-            .in_current_span(),
-        )
 }
 
 pub(super) struct ModulesCommandCtx<'a> {

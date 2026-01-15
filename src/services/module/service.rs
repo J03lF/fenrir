@@ -31,7 +31,7 @@ use crate::utils::messages::services::module::{
 };
 use crate::utils::system_time_to_rfc3339;
 use reqwest::Client;
-use serde_json;
+use serde_json::{self, Value as JsonValue};
 use sha2::{Digest, Sha256};
 use time::{Duration as TimeDuration, OffsetDateTime};
 use tokio::task::JoinHandle;
@@ -1257,7 +1257,9 @@ impl ModuleService {
         }
 
         // Check if already installed
+        let mut was_installed = false;
         if let Some(installed) = self.storage.load(id).await? {
+            was_installed = true;
             if installed.manifest.version == manifest.version {
                 if let Err(err) = self.register_declared_services(id, &installed).await {
                     tracing::warn!(
@@ -1297,6 +1299,12 @@ impl ModuleService {
                     Some(module_service_notes::INSTALLED.to_string()),
                 );
                 if !self.is_dev_override_active(&module_id).await {
+                    if !was_installed {
+                        tracing::info!(
+                            module = %module_id,
+                            "fresh install completed, starting module"
+                        );
+                    }
                     if let Err(err) = self.ensure_running(&module_id).await {
                         tracing::warn!(
                             module = %module_id,
@@ -1346,6 +1354,15 @@ impl ModuleService {
                 ))
             }
         };
+        tracing::info!(module = %id, "uninstalling module");
+        self.stop_module_process(id).await;
+        if let Err(err) = cleanup_runtime_state(&installed.path, id).await {
+            tracing::warn!(
+                module = %id,
+                error = %err,
+                "failed to cleanup runtime state during uninstall"
+            );
+        }
         self.storage.remove(id).await?;
         if let Err(err) = self.clear_distribution_backup(id, &installed.path).await {
             tracing::warn!(
@@ -1356,12 +1373,8 @@ impl ModuleService {
         }
         self.clear_dev_services_if_any(id).await;
         self.clear_declared_services_if_any(id).await;
-        self.clear_reported_services(id).await;
         self.unregister_module_service(id);
-        self.revoke_service_token_if_any(id, "module-uninstall")
-            .await;
         self.port_allocator.release(id).await;
-        self.stop_gateway_if_any(id).await;
         Ok(())
     }
     /// Check for available updates for all installed modules
@@ -1757,6 +1770,49 @@ fn runtime_service_present(
         .get(module_id)
         .map(|services| services.iter().any(|id| id == service_id))
         .unwrap_or(false)
+}
+
+async fn cleanup_runtime_state(
+    installed_path: &str,
+    module_id: &ModuleId,
+) -> Result<(), ModuleStorageError> {
+    let module_path = PathBuf::from(installed_path);
+    let Some(install_dir) = module_path.parent() else {
+        return Ok(());
+    };
+    let state_path = install_dir.join("runtime").join("runtime-state.json");
+    let Ok(contents) = tokio_fs::read_to_string(&state_path).await else {
+        return Ok(());
+    };
+    let Ok(entries) = serde_json::from_str::<Vec<JsonValue>>(&contents) else {
+        return Ok(());
+    };
+    let entries_len = entries.len();
+    let filtered: Vec<JsonValue> = entries
+        .into_iter()
+        .filter(|entry| {
+            entry
+                .get("module_id")
+                .and_then(|value| value.as_str())
+                .map(|value| value != module_id.as_str())
+                .unwrap_or(true)
+        })
+        .collect();
+    if filtered.len() == entries_len {
+        return Ok(());
+    }
+    let data = serde_json::to_vec_pretty(&filtered).map_err(|err| {
+        ModuleStorageError::InvalidState(format!(
+            "failed to serialize runtime state cleanup: {err}"
+        ))
+    })?;
+    tokio_fs::write(&state_path, data).await.map_err(|err| {
+        ModuleStorageError::Io(format!(
+            "failed to write runtime state cleanup {}: {err}",
+            state_path.display()
+        ))
+    })?;
+    Ok(())
 }
 
 #[cfg(test)]

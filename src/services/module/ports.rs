@@ -60,6 +60,33 @@ impl ModulePortAllocator {
         }
     }
 
+    pub async fn record_assigned(&self, module_id: &ModuleId, port: u16) {
+        if !matches!(self.strategy, ModulePortStrategy::Dynamic) {
+            return;
+        }
+        let mut guard = self.assignments.lock().await;
+        if guard.get(module_id) == Some(&port) {
+            return;
+        }
+        guard.insert(module_id.clone(), port);
+        if let Err(err) = self.persist_locked(&guard) {
+            warn!(
+                module = %module_id,
+                port = port,
+                error = %err,
+                "{}",
+                port_logs::STATE_SAVE_FAILED
+            );
+        } else {
+            info!(
+                module = %module_id,
+                port = port,
+                "{}",
+                port_logs::PORT_ASSIGNED
+            );
+        }
+    }
+
     async fn allocate_dynamic(
         &self,
         module_id: &ModuleId,

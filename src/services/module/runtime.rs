@@ -138,6 +138,9 @@ impl ModuleService {
 
         match self.runtime.status(module_id).await {
             Ok(info) if matches!(info.status, ModuleRuntimeStatus::Running) => {
+                if let Some(port) = info.port {
+                    self.port_allocator.record_assigned(module_id, port).await;
+                }
                 if let Err(err) = self.ensure_gateway_endpoint(module_id).await {
                     tracing::warn!(
                         module = %module_id,
@@ -319,6 +322,11 @@ impl ModuleService {
         if let Some(token) = issued_token {
             self.audit_runtime_token_refresh(&runtime_info.module_id, &token);
             self.record_service_token(&runtime_info.module_id, &token)
+                .await;
+        }
+        if let Some(port) = runtime_info.port {
+            self.port_allocator
+                .record_assigned(&runtime_info.module_id, port)
                 .await;
         }
 

@@ -361,6 +361,93 @@ impl CommandRegistry {
             .record_probe("cli-shell", latency_ms, success);
         result
     }
+
+    /// Find commands similar to the given input (for "Did you mean?" suggestions)
+    pub fn find_similar(&self, input: &str) -> Vec<String> {
+        let input_lower = input.to_lowercase();
+        let mut candidates: Vec<(String, usize)> = Vec::new();
+
+        // Collect all command names and aliases
+        for entry in self.commands.values() {
+            let name_lower = entry.name.to_lowercase();
+
+            // Check prefix match
+            if name_lower.starts_with(&input_lower) || input_lower.starts_with(&name_lower) {
+                candidates.push((entry.name.clone(), 0));
+                continue;
+            }
+
+            // Calculate edit distance
+            let dist = levenshtein(&input_lower, &name_lower);
+            if dist <= 3 {
+                candidates.push((entry.name.clone(), dist));
+            }
+
+            // Also check aliases
+            for alias in &entry.aliases {
+                let alias_lower = alias.to_lowercase();
+                if alias_lower.starts_with(&input_lower) || input_lower.starts_with(&alias_lower) {
+                    if !candidates.iter().any(|(n, _)| n == &entry.name) {
+                        candidates.push((entry.name.clone(), 0));
+                    }
+                } else {
+                    let dist = levenshtein(&input_lower, &alias_lower);
+                    if dist <= 2 && !candidates.iter().any(|(n, _)| n == &entry.name) {
+                        candidates.push((entry.name.clone(), dist));
+                    }
+                }
+            }
+        }
+
+        // Sort by distance, then alphabetically
+        candidates.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+
+        // Return top 3 suggestions
+        candidates
+            .into_iter()
+            .take(3)
+            .map(|(name, _)| name)
+            .collect()
+    }
+}
+
+/// Simple Levenshtein distance for typo detection
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let a_len = a_chars.len();
+    let b_len = b_chars.len();
+
+    if a_len == 0 {
+        return b_len;
+    }
+    if b_len == 0 {
+        return a_len;
+    }
+
+    let mut matrix = vec![vec![0usize; b_len + 1]; a_len + 1];
+
+    for (i, row) in matrix.iter_mut().enumerate().take(a_len + 1) {
+        row[0] = i;
+    }
+    for j in 0..=b_len {
+        matrix[0][j] = j;
+    }
+
+    for i in 1..=a_len {
+        for j in 1..=b_len {
+            let cost = if a_chars[i - 1] == b_chars[j - 1] {
+                0
+            } else {
+                1
+            };
+            matrix[i][j] = (matrix[i - 1][j] + 1)
+                .min(matrix[i][j - 1] + 1)
+                .min(matrix[i - 1][j - 1] + cost);
+        }
+    }
+
+    matrix[a_len][b_len]
 }
 
 #[derive(Clone)]

@@ -112,6 +112,13 @@ accept_invalid_certs = false
 [modules.services."module:fenrir-api".policy.tenant]
 # mode = "fixed"
 # value = "default"
+
+[modules.service_profiles.public_low]
+# internal_only = false
+# ingress_access = "public"
+# allowed_roles = ["service-read", "service-write"]
+# required_scopes = ["tickets:read"]
+# rate_limit_per_second = 20
 ```
 
 `[modules.runtime.clients]` steuert Timeouts, Retry-/Backoff-Strategien sowie den Health-Probe-Intervall des ModuleService. Der `.tls`-Block erlaubt optionales mTLS gegenüber der Control-Plane. Mit `[modules.services."<service-id>"]` lassen sich pro Service zusätzliche Env-Variablen (`.env`) und Secrets (`.secrets`, nur `env:...`) injizieren sowie die Security-Policy (`.policy`, inkl. `tenant.mode = any|fixed|allow_list`) überschreiben.

@@ -12,13 +12,13 @@ use tracing::{info, warn};
 use crate::audit::{AuditLog, InMemoryAuditLog};
 use crate::config::{self, DbRuntimeMode, ModuleRuntimeEngine};
 use crate::domain::db::DbEngine;
+use crate::infra::db::runtime::DbRuntimeSupervisor;
 use crate::infra::http::{HttpServer, HTTP_SERVICE_ID};
 use crate::infra::modules::{
     CompositeModuleRegistry, Ed25519ModuleVerifier, FilesystemModuleStorage, HttpModuleRegistry,
     InProcessModuleRuntime, LocalModuleRegistry, ProcessModuleRuntime,
 };
 use crate::infra::{db, logging, telemetry};
-use crate::infra::db::runtime::DbRuntimeSupervisor;
 use crate::security::identity::build_identity_provider_with_db;
 use crate::security::manager::{AuditSink, SecurityManager};
 use crate::security::service::ServiceScope;
@@ -26,8 +26,8 @@ use crate::services::scheduler::{install_default_jobs, SchedulerJobContext};
 use crate::services::{
     block_on_managed, AppServices, DbShellService, ManagedService, ModuleClientSettings,
     ModuleHealthHttpClient, ModulePortAllocator, ModuleService, ModuleServiceInit,
-    ModuleServiceOverrides, SchedulerService, ServiceDescriptor, ServiceDiagnostics,
-    ServiceKind, ServiceRegistry, ServiceStatus, ServiceTag, SessionService, TokenExchangeService,
+    ModuleServiceOverrides, SchedulerService, ServiceDescriptor, ServiceDiagnostics, ServiceKind,
+    ServiceRegistry, ServiceStatus, ServiceTag, SessionService, TokenExchangeService,
 };
 use crate::utils::messages::boot::{
     errors as boot_errors, logs as boot_logs, runtime as runtime_messages,
@@ -64,6 +64,23 @@ pub fn boot() -> Result<BootContext, BootError> {
         boot_errors::TELEMETRY_INIT_FAILED,
     )?;
 
+    // Early SecurityManager for DB credential sealing (before real audit store exists).
+    // Uses NoopAuditSink since credential operations aren't audit-critical.
+    let early_security_manager: Option<Arc<SecurityManager>> =
+        if cfg.db.runtime.mode == DbRuntimeMode::Embedded
+            && cfg.db.runtime.embedded.security.auth_method.requires_password()
+        {
+            use crate::security::manager::NoopAuditSink;
+            let noop_audit = Arc::new(NoopAuditSink);
+            Some(Arc::new(wrap_boot(
+                SecurityManager::new(&cfg.security, noop_audit),
+                BootErrorCode::SecurityInit,
+                boot_errors::SECURITY_MANAGER_INIT_FAILED,
+            )?))
+        } else {
+            None
+        };
+
     // Early supervisor creation for embedded postgres (needs to start before adapters are built).
     let early_db_runtime: Option<Arc<DbRuntimeSupervisor>> =
         if cfg.db.runtime.mode == DbRuntimeMode::Embedded {
@@ -74,12 +91,17 @@ pub fn boot() -> Result<BootContext, BootError> {
                 cfg.db.runtime.embedded.postgres.port_range,
                 cfg.db.runtime.embedded.postgres.binary_path.clone(),
                 db_dir,
+                cfg.db.runtime.embedded.security.clone(),
             );
+            
+            // Attach early security manager if password auth is required
+            if let Some(ref security) = early_security_manager {
+                sup.attach_security(Arc::clone(security));
+            }
+            
             // Start the supervisor (blocking) to get connector URI before building adapters.
             let sup_clone = Arc::clone(&sup);
-            let start_result = block_on_managed(async move {
-                sup_clone.start().await
-            });
+            let start_result = block_on_managed(async move { sup_clone.start().await });
             if let Err(err) = start_result {
                 return Err(BootError::new(
                     BootErrorCode::DbRuntimeStart,
@@ -279,10 +301,9 @@ pub fn boot() -> Result<BootContext, BootError> {
         BootErrorCode::DbShellInit,
         boot_errors::DB_SHELL_INIT_FAILED,
     )?);
-    let migrations_dir = cfg.runtime.migrations_path();
     let migration_report = wrap_boot(
         block_on_managed(db::migrations::apply_pending_migrations(
-            migrations_dir,
+            runtime_dir.clone(),
             Arc::clone(&db_shell_service),
             effective_default_engine,
         )),
@@ -537,7 +558,7 @@ pub fn boot() -> Result<BootContext, BootError> {
         boot_errors::MODULE_SERVICE_SCOPE_INVALID,
     )?;
     let service_overrides = wrap_boot(
-        ModuleServiceOverrides::from_config(&cfg.modules.services),
+        ModuleServiceOverrides::from_config(&cfg.modules.services, &cfg.modules.service_profiles),
         BootErrorCode::ModuleAttach,
         boot_errors::MODULE_SERVICE_ATTACH_FAILED,
     )?;
@@ -625,6 +646,29 @@ pub fn boot() -> Result<BootContext, BootError> {
         );
     }
 
+    // Create backup service if backup is enabled and db runtime is embedded
+    let backup_service = if cfg.db.backup.enabled
+        && cfg.db.runtime.mode == crate::config::DbRuntimeMode::Embedded
+    {
+        // Get db_runtime from services (already attached above)
+        match services.db_runtime() {
+            Some(db_runtime) => Some(Arc::new(crate::services::backup::BackupService::new(
+                cfg.db.backup.clone(),
+                cfg.db.runtime.embedded.engine,
+                Arc::clone(&db_shell_service),
+                db_runtime,
+                services.audit_store(),
+                runtime_dir.clone(),
+            ))),
+            None => {
+                warn!("backup service not created: db_runtime not available");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     wrap_boot(
         install_default_jobs(
             &scheduler_service,
@@ -636,6 +680,7 @@ pub fn boot() -> Result<BootContext, BootError> {
                 services: Arc::clone(&services),
                 runtime_dir: runtime_dir.clone(),
                 token_exchange: Arc::clone(&token_exchange_service),
+                backup_service,
             },
         ),
         BootErrorCode::SchedulerJobs,
@@ -791,6 +836,7 @@ pub fn boot() -> Result<BootContext, BootError> {
                                 services: services_handle,
                                 runtime_dir,
                                 token_exchange,
+                                backup_service: None, // Backup service not available on restart
                             },
                         )
                         .map_err(|err| anyhow!(err))?;

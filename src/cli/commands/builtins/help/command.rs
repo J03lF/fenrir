@@ -2,18 +2,33 @@ use std::io::{self, Write};
 
 use crate::cli::commands::registry::{
     CliDependencies, CommandArgument, CommandEntry, CommandOutcome, CommandRegistry, CommandShape,
-    CompletionKind, ShellEnvironment,
+    CompletionContext, CompletionKind, ShellEnvironment,
 };
 use crate::cli::commands::table::Table;
+use crate::cli::output::style::FieldStyle;
+use crate::cli::output::{MessageBox, StatusBox};
 use crate::utils::messages::cli::builtins::help::{
     command as help_messages, handler as help_handler_messages,
 };
+
+fn complete_commands(_deps: &CliDependencies, ctx: &CompletionContext<'_>) -> Vec<String> {
+    let registry = crate::cli::commands::builtins::build_registry();
+    registry
+        .entries()
+        .flat_map(|entry| {
+            let mut names = vec![entry.name.clone()];
+            names.extend(entry.aliases.iter().map(|a| a.to_string()));
+            names
+        })
+        .filter(|name| ctx.prefix.is_empty() || name.starts_with(ctx.prefix))
+        .collect()
+}
 
 const HELP_ARGUMENTS: &[CommandArgument] = &[CommandArgument {
     name: "command",
     optional: true,
     variadic: false,
-    completion: CompletionKind::None,
+    completion: CompletionKind::Dynamic(complete_commands),
 }];
 
 const HELP_SHAPE: CommandShape = CommandShape::new("help", &[], HELP_ARGUMENTS, &[]);
@@ -39,32 +54,24 @@ fn handle(
     if let Some(command_name) = args.first() {
         match registry.get(command_name) {
             Some(entry) => {
-                writeln!(
-                    out,
-                    "{}",
-                    help_handler_messages::describe_command(&entry.name, &entry.description)
-                )?;
-                writeln!(out, "{}", help_handler_messages::usage_line(entry.usage))?;
-                if !entry.aliases.is_empty() {
-                    writeln!(
-                        out,
-                        "{}",
-                        help_handler_messages::aliases_line(&entry.aliases)
-                    )?;
-                }
-                if !entry.details.is_empty() {
-                    writeln!(out, "{}", help_handler_messages::DETAILS_HEADER)?;
-                    for line in entry.details {
-                        writeln!(out, "{}", help_handler_messages::detail_line(line))?;
-                    }
-                }
+                render_command_details(out, entry)?;
             }
             None => {
-                writeln!(
-                    out,
-                    "{}",
-                    help_handler_messages::unknown_command(command_name)
-                )?;
+                // Command not found - show suggestions
+                let suggestions = registry.find_similar(command_name);
+                let mut msg_box =
+                    MessageBox::warning(format!("Unknown command: '{}'", command_name));
+
+                if !suggestions.is_empty() {
+                    msg_box = msg_box.message("Did you mean?");
+                    for suggestion in suggestions {
+                        msg_box = msg_box.suggestion(suggestion);
+                    }
+                } else {
+                    msg_box = msg_box.suggestion("Type 'help' to see all commands");
+                }
+
+                msg_box.render(out)?;
             }
         }
     } else {
@@ -91,4 +98,26 @@ fn handle(
         writeln!(out, "{}", help_handler_messages::DETAILS_HINT)?;
     }
     Ok(CommandOutcome::Continue)
+}
+
+/// Render detailed help for a single command using StatusBox
+fn render_command_details(out: &mut dyn Write, entry: &CommandEntry) -> io::Result<()> {
+    let mut box_builder = StatusBox::new(format!("Command: {}", entry.name))
+        .with_cols(1)
+        .field("Description", &entry.description)
+        .field_styled("Usage", entry.usage, FieldStyle::Accent);
+
+    if !entry.aliases.is_empty() {
+        box_builder = box_builder.field("Aliases", entry.aliases.join(", "));
+    }
+
+    // Add details section if available
+    if !entry.details.is_empty() {
+        box_builder = box_builder.section();
+        for detail in entry.details {
+            box_builder = box_builder.field_styled("", *detail, FieldStyle::Muted);
+        }
+    }
+
+    box_builder.render(out)
 }

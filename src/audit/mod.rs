@@ -6,4 +6,4 @@ mod serde_time;
 
 pub use error::AuditError;
 pub use event::{AuditActor, AuditEvent, AuditEventBuilder, AuditMetadata, AuditOutcome};
-pub use log::{AuditLog, InMemoryAuditLog};
+pub use log::{AuditLog, InMemoryAuditLog, NoopAuditLog};

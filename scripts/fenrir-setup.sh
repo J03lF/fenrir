@@ -68,24 +68,7 @@ if [ -z "$FENRIR_BIN" ]; then
     FENRIR_BIN="$ROOT_DIR/target/release/fenrir"
 fi
 
-# Run database migrations
-echo -e "${GRAY}   Running database migrations...${RESET}"
-if "$FENRIR_BIN" --migrate 2>&1 | grep -q "MIGRATE-OK"; then
-    echo -e "${GREEN}   [ok]${RESET} ${GRAY}Database migrations complete.${RESET}"
-else
-    MIGRATE_OUTPUT=$("$FENRIR_BIN" --migrate 2>&1 || true)
-    if echo "$MIGRATE_OUTPUT" | grep -q "MIGRATE-OK"; then
-        echo -e "${GREEN}   [ok]${RESET} ${GRAY}Database migrations complete.${RESET}"
-    elif echo "$MIGRATE_OUTPUT" | grep -q "MIGRATE-DB-START"; then
-        echo -e "${RED}   [!]${RESET} Failed to start database. Check that PostgreSQL is installed."
-        echo -e "${GRAY}       $MIGRATE_OUTPUT${RESET}"
-        exit 1
-    else
-        echo -e "${RED}   [!]${RESET} Migration failed: $MIGRATE_OUTPUT"
-        exit 1
-    fi
-fi
-echo ""
+# Note: Migrations run automatically on Fenrir boot - no separate --migrate needed
 
 # Check if password already exists (supports both file and db modes)
 password_is_set() {
@@ -95,8 +78,9 @@ password_is_set() {
     fi
 
     # If we have a Fenrir binary, use it to check password status
+    # Must run from ROOT_DIR so Fenrir can find its config files
     if [ -n "$FENRIR_BIN" ] && [ -f "$FENRIR_BIN" ]; then
-        if "$FENRIR_BIN" --password-status "$FENRIR_USER" >/dev/null 2>&1; then
+        if (cd "$ROOT_DIR" && "$FENRIR_BIN" --password-status "$FENRIR_USER" >/dev/null 2>&1); then
             return 0
         else
             return 1
@@ -118,13 +102,13 @@ password_is_set() {
 }
 
 if password_is_set; then
-    echo -e "${GRAY}   Password already configured for user '${FENRIR_USER}'.${RESET}"
-    echo ""
-    read -p "   Reset password? [y/N] " -n 1 -r
-    echo ""
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo -e "${GRAY}   Setup cancelled.${RESET}"
-        exit 0
+        echo -e "${GRAY}   Password already configured for user '${FENRIR_USER}'.${RESET}"
+        echo ""
+        read -p "   Reset password? [y/N] " -n 1 -r
+        echo ""
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            echo -e "${GRAY}   Setup cancelled.${RESET}"
+            exit 0
     fi
 fi
 

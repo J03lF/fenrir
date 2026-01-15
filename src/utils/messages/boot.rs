@@ -63,7 +63,7 @@ pub mod services {
         pub const SSH: &str = "SSH Transport";
         pub const CLI: &str = "Local CLI";
         pub const MODULE_RUNTIME: &str = "Module Runtime";
-    pub const DB_RUNTIME: &str = "Database Runtime";
+        pub const DB_RUNTIME: &str = "Database Runtime";
         pub const SCHEDULER: &str = "Background Scheduler";
         pub const HTTP: &str = "HTTP Transport";
         pub const IDENTITY: &str = "Identity Broker";
@@ -85,7 +85,7 @@ pub mod services {
         pub const TOKEN_EXCHANGE: &str = "Issues delegated tokens for managed modules";
         pub const MODULE_LIFECYCLE: &str = "Operator-facing module lifecycle orchestrator";
         pub const JOBS_CONTROL: &str = "Front-door for scheduler actions and job controls";
-    pub const DB_RUNTIME: &str = "Embedded database runtime supervisor";
+        pub const DB_RUNTIME: &str = "Embedded database runtime supervisor";
     }
 
     pub mod notes {
@@ -103,7 +103,7 @@ pub mod services {
         pub const TOKEN_EXCHANGE_READY: &str = "token exchange ready";
         pub const MODULE_LIFECYCLE_READY: &str = "module lifecycle orchestrator active";
         pub const JOBS_CONTROL_READY: &str = "jobs control surface active";
-    pub const DB_RUNTIME_READY: &str = "embedded db runtime active";
+        pub const DB_RUNTIME_READY: &str = "embedded db runtime active";
     }
 }
 

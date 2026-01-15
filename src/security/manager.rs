@@ -1,6 +1,11 @@
 use std::sync::Arc;
 
 use tracing::warn;
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine as _;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+use subtle::ConstantTimeEq;
 
 use crate::audit::{AuditActor, AuditEvent, AuditEventBuilder, AuditMetadata, AuditOutcome};
 use crate::config::SecuritySection;
@@ -17,6 +22,16 @@ use crate::utils::messages::security::manager as security_manager_messages;
 
 pub trait AuditSink: Send + Sync {
     fn record(&self, event: AuditEvent) -> Result<(), crate::audit::AuditError>;
+}
+
+/// No-op audit sink that discards all events.
+/// Used during early boot before the real audit store is available.
+pub struct NoopAuditSink;
+
+impl AuditSink for NoopAuditSink {
+    fn record(&self, _event: AuditEvent) -> Result<(), crate::audit::AuditError> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -166,6 +181,27 @@ impl SecurityManager {
         token: &str,
     ) -> Result<DelegatedTokenClaims, SecurityError> {
         Ok(self.service_tokens.validate(token)?)
+    }
+
+    pub fn sign_service_manifest(
+        &self,
+        token: &str,
+        payload: &[u8],
+    ) -> Result<String, SecurityError> {
+        Ok(sign_manifest_hmac(token, payload))
+    }
+
+    pub fn verify_service_manifest_signature(
+        &self,
+        token: &str,
+        payload: &[u8],
+        signature: &str,
+    ) -> Result<bool, SecurityError> {
+        let expected_bytes = sign_manifest_hmac_bytes(token, payload);
+        let Ok(signature_bytes) = STANDARD.decode(signature) else {
+            return Ok(false);
+        };
+        Ok(signature_bytes.as_slice().ct_eq(&expected_bytes).into())
     }
 
     pub fn revoke_service_token(&self, token: &str, reason: &str) -> Result<(), SecurityError> {
@@ -324,6 +360,17 @@ impl SecurityManager {
         let prefix_len = token.len().min(6);
         security_manager_messages::fingerprint_display(&token[..prefix_len], token.len())
     }
+}
+
+fn sign_manifest_hmac(token: &str, payload: &[u8]) -> String {
+    STANDARD.encode(sign_manifest_hmac_bytes(token, payload))
+}
+
+fn sign_manifest_hmac_bytes(token: &str, payload: &[u8]) -> Vec<u8> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(token.as_bytes())
+        .expect("hmac key length is valid");
+    mac.update(payload);
+    mac.finalize().into_bytes().to_vec()
 }
 
 #[cfg(test)]

@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,9 +14,19 @@ use crate::domain::db::{
 };
 use crate::utils::messages::infra::db as infra_db_messages;
 
+/// Connection mode for PostgreSQL
+#[derive(Debug, Clone)]
+enum ConnectionMode {
+    /// TCP connection (host:port)
+    Tcp,
+    /// Unix socket connection (socket directory path)
+    UnixSocket(PathBuf),
+}
+
 pub struct PostgresAdapter {
     uri: Arc<String>,
     query_timeout: Option<Duration>,
+    connection_mode: ConnectionMode,
 }
 
 impl PostgresAdapter {
@@ -25,10 +36,37 @@ impl PostgresAdapter {
             anyhow::bail!(infra_db_messages::postgres::uri_empty());
         }
         let timeout = timeout_ms.map(Duration::from_millis);
+        
+        // Detect if URI uses Unix socket (host parameter points to a directory)
+        let connection_mode = Self::detect_connection_mode(uri);
+        
         Ok(Self {
             uri: Arc::new(uri.to_string()),
             query_timeout: timeout,
+            connection_mode,
         })
+    }
+    
+    /// Detect if the URI uses a Unix socket or TCP connection
+    fn detect_connection_mode(uri: &str) -> ConnectionMode {
+        // Parse the URI to check for Unix socket indicators
+        // Format: postgres://user:pass@/dbname?host=/path/to/socket
+        // Or: host=/path/to/socket in the query string
+        if let Some(query_start) = uri.find('?') {
+            let query = &uri[query_start + 1..];
+            for param in query.split('&') {
+                if let Some(value) = param.strip_prefix("host=") {
+                    let path = urlencoding::decode(value)
+                        .map(|s| s.into_owned())
+                        .unwrap_or_else(|_| value.to_string());
+                    // If host starts with '/' it's a Unix socket path
+                    if path.starts_with('/') {
+                        return ConnectionMode::UnixSocket(PathBuf::from(path));
+                    }
+                }
+            }
+        }
+        ConnectionMode::Tcp
     }
 
     async fn connect(&self) -> DbResult<tokio_postgres::Client> {
@@ -36,18 +74,68 @@ impl PostgresAdapter {
             .uri
             .parse()
             .map_err(|err| DbError::connection(infra_db_messages::postgres::invalid_config(err)))?;
-        let (client, connection) = Self::await_pg(
-            self.query_timeout,
-            config.connect(NoTls),
-            || DbError::connection(infra_db_messages::postgres::connection_timeout()),
-            DbError::connection,
-        )
-        .await?;
+        
+        match &self.connection_mode {
+            ConnectionMode::Tcp => {
+                // Standard TCP connection
+                let (client, connection) = Self::await_pg(
+                    self.query_timeout,
+                    config.connect(NoTls),
+                    || DbError::connection(infra_db_messages::postgres::connection_timeout()),
+                    DbError::connection,
+                )
+                .await?;
+                tokio::spawn(async move {
+                    if let Err(err) = connection.await {
+                        tracing::error!(error = %err, "postgres connection terminated");
+                    }
+                });
+                Ok(client)
+            }
+            ConnectionMode::UnixSocket(socket_dir) => {
+                // Unix socket connection
+                self.connect_unix_socket(&config, socket_dir).await
+            }
+        }
+    }
+    
+    /// Connect via Unix socket
+    async fn connect_unix_socket(
+        &self,
+        config: &tokio_postgres::Config,
+        socket_dir: &Path,
+    ) -> DbResult<tokio_postgres::Client> {
+        use tokio::net::UnixStream;
+        
+        // PostgreSQL socket naming convention: .s.PGSQL.<port>
+        // Default port is 5432 if not specified
+        let port = config.get_ports().first().copied().unwrap_or(5432);
+        let socket_path = socket_dir.join(format!(".s.PGSQL.{}", port));
+        
+        // Connect to the Unix socket
+        let socket = UnixStream::connect(&socket_path)
+            .await
+            .map_err(|err| DbError::connection(format!(
+                "failed to connect to Unix socket at {}: {}",
+                socket_path.display(),
+                err
+            )))?;
+        
+        // Use connect_raw with the socket
+        let (client, connection) = config
+            .connect_raw(socket, NoTls)
+            .await
+            .map_err(|err| DbError::connection(format!(
+                "postgres handshake failed on Unix socket: {}",
+                err
+            )))?;
+        
         tokio::spawn(async move {
             if let Err(err) = connection.await {
-                tracing::error!(error = %err, "postgres connection terminated");
+                tracing::error!(error = %err, "postgres unix socket connection terminated");
             }
         });
+        
         Ok(client)
     }
 

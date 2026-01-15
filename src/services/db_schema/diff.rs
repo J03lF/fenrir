@@ -4,11 +4,8 @@ use super::{ColumnBlueprint, DatabaseBlueprint, MigrationOp, SchemaMigrationPlan
 
 pub fn diff(desired: &DatabaseBlueprint, current: &DatabaseBlueprint) -> SchemaMigrationPlan {
     let mut ops = Vec::new();
-    let mut current_tables: HashMap<_, _> = current
-        .tables
-        .iter()
-        .map(|t| (t.name.clone(), t))
-        .collect();
+    let mut current_tables: HashMap<_, _> =
+        current.tables.iter().map(|t| (t.name.clone(), t)).collect();
     let mut desired_names = HashSet::new();
 
     for dt in &desired.tables {
@@ -123,4 +120,3 @@ fn diff_column(
         });
     }
 }
-

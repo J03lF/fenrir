@@ -15,3 +15,4 @@ fi
 
 echo "db-runtime init completed (runtime dir: ${RUNTIME_DIR})"
 
+art

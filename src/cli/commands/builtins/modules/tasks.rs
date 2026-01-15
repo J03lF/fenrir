@@ -648,12 +648,12 @@ impl InstallDistributionConfirmation {
 
             if needs_restart {
                 // Use direct async call instead of run_module_runtime_call to avoid blocking
-                        let config = ModuleStartConfig {
+                let config = ModuleStartConfig {
                     module_id: entry.module_id.clone(),
-                            port: None,
-                            env_vars: Vec::new(),
-                            auto_restart: true,
-                        };
+                    port: None,
+                    env_vars: Vec::new(),
+                    auto_restart: true,
+                };
                 match service.start(config).await {
                     Ok(info) => {
                         let pid_hint = msg_modules::tasks_flow::details::start_running(info.pid);

@@ -110,7 +110,11 @@ fn handle(
     match action {
         "app" => {
             info!(command = "log", target = action, "log command invoked");
-            display_log_result(out, log_handler_messages::DEFAULT_LABEL_APP, logging::log_file_path())?;
+            display_log_result(
+                out,
+                log_handler_messages::DEFAULT_LABEL_APP,
+                logging::log_file_path(),
+            )?;
         }
         "db" | "database" | "db-runtime" => {
             // Verb-first: "log db" shows embedded db-runtime logs
@@ -134,7 +138,11 @@ fn handle(
         "db-log" => {
             // Access the db.log file (old behavior)
             info!(command = "log", target = "db-log", "log command invoked");
-            display_log_result(out, log_handler_messages::DEFAULT_LABEL_DB, logging::db_log_file_path())?;
+            display_log_result(
+                out,
+                log_handler_messages::DEFAULT_LABEL_DB,
+                logging::db_log_file_path(),
+            )?;
         }
         "all" => {
             info!(command = "log", target = "all", "log command invoked");

@@ -11,6 +11,7 @@ use crate::cli::commands::registry::{
     CliDependencies, CommandOutcome, CommandRegistry, ConfirmationRequest, ShellEnvironment,
 };
 use crate::cli::commands::table::Table;
+use crate::cli::output::BoxTable;
 use crate::domain::module::{ModuleId, ModuleInstallSource, ModuleRuntimeInfo, ModuleVersion};
 use crate::services::module::{
     DistributionAction, ModuleScaffoldOptions, ModuleScaffoldRuntime, ModuleService,
@@ -231,14 +232,15 @@ fn handle_list(
             Err(_) => HashMap::new(),
         };
 
-    let mut table = Table::new(
+    let mut table = BoxTable::new(
         msg_modules::list_modules::HEADERS
             .iter()
             .map(|value| (*value).to_string())
             .collect(),
-    );
+    )
+    .with_title(format!("Modules ({})", modules.len()));
 
-    for module in modules {
+    for module in &modules {
         let module_id = module.manifest.id.clone();
         let dev_override_active = dev_override_modules.contains(&module_id);
         let mut source_label = module.source.label().to_string();
@@ -291,7 +293,7 @@ fn handle_list(
         ]);
     }
 
-    table.render(out, "  ")?;
+    table.render(out)?;
     Ok(CommandOutcome::Continue)
 }
 

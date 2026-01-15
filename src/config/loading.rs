@@ -101,9 +101,7 @@ pub fn validate(cfg: &AppConfig) -> Result<(), ConfigError> {
     cfg.modules.validate_services()?;
     cfg.audit.validate()?;
 
-    cfg.db
-        .runtime
-        .validate(cfg.db.default_engine.as_str())?;
+    cfg.db.runtime.validate(cfg.db.default_engine.as_str())?;
 
     if !matches!(
         cfg.db.default_engine.as_str(),

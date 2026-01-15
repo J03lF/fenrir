@@ -19,3 +19,19 @@ fn enforce_guard_allows_force() {
 fn enforce_guard_blocks_without_force() {
     assert!(enforce_guard("DROP TABLE foo").is_err());
 }
+
+#[test]
+fn normalize_meta_command_trims_semicolons() {
+    assert_eq!(normalize_meta_command("exit;"), "exit");
+    assert_eq!(normalize_meta_command("  help;;  "), "help");
+    assert_eq!(normalize_meta_command("refresh  ;;;"), "refresh");
+}
+
+#[test]
+fn normalize_meta_command_preserves_inner_content() {
+    assert_eq!(
+        normalize_meta_command("select * from foo;"),
+        "select * from foo"
+    );
+    assert_eq!(normalize_meta_command(r"\d users;"), r"\d users");
+}

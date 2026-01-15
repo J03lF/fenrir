@@ -394,6 +394,15 @@ pub enum IdentityProviderKind {
     External,
 }
 
+impl IdentityProviderKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            IdentityProviderKind::Embedded => "Embedded",
+            IdentityProviderKind::External => "External",
+        }
+    }
+}
+
 impl Default for IdentitySection {
     fn default() -> Self {
         Self {
@@ -431,6 +440,8 @@ pub struct DbSection {
     pub runtime: DbRuntimeSection,
     #[serde(default)]
     pub schema: DbSchemaSection,
+    #[serde(default)]
+    pub backup: DbBackupSection,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -454,6 +465,70 @@ impl Default for DbSchemaSection {
 
 fn default_schema_export_dir() -> String {
     "runtime/schemas".to_string()
+}
+
+/// Database backup configuration
+#[derive(Debug, Deserialize, Clone)]
+pub struct DbBackupSection {
+    /// Enable automatic backups
+    #[serde(default)]
+    pub enabled: bool,
+    /// Backup schedule: "hourly", "daily", "weekly", or cron expression
+    #[serde(default = "default_backup_schedule")]
+    pub schedule: String,
+    /// Number of backups to retain (oldest are deleted)
+    #[serde(default = "default_backup_retention")]
+    pub retention_count: usize,
+    /// Backup directory (relative to runtime base or absolute)
+    #[serde(default = "default_backup_path")]
+    pub path: String,
+    /// Minimum free disk space in MB required before backup
+    #[serde(default = "default_backup_min_disk_mb")]
+    pub min_disk_space_mb: u64,
+    /// Skip backup if DB is not healthy
+    #[serde(default = "default_true")]
+    pub require_healthy: bool,
+    /// Verify backup integrity after creation
+    #[serde(default = "default_true")]
+    pub verify_integrity: bool,
+    /// Maximum allowed size deviation from last backup (percentage, 0 = disabled)
+    #[serde(default)]
+    pub anomaly_threshold_pct: u32,
+    /// Path to pg_basebackup binary (for Postgres backups)
+    #[serde(default)]
+    pub pg_basebackup_path: Option<String>,
+}
+
+impl Default for DbBackupSection {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            schedule: default_backup_schedule(),
+            retention_count: default_backup_retention(),
+            path: default_backup_path(),
+            min_disk_space_mb: default_backup_min_disk_mb(),
+            require_healthy: true,
+            verify_integrity: true,
+            anomaly_threshold_pct: 0,
+            pg_basebackup_path: None,
+        }
+    }
+}
+
+fn default_backup_schedule() -> String {
+    "daily".to_string()
+}
+
+fn default_backup_retention() -> usize {
+    7
+}
+
+fn default_backup_path() -> String {
+    "backups".to_string()
+}
+
+fn default_backup_min_disk_mb() -> u64 {
+    500 // 500 MB minimum
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -528,6 +603,8 @@ pub struct DbEmbeddedSection {
     pub sqlite: DbEmbeddedSqlite,
     #[serde(default)]
     pub postgres: DbEmbeddedPostgres,
+    #[serde(default)]
+    pub security: DbEmbeddedSecuritySection,
 }
 
 impl Default for DbEmbeddedSection {
@@ -536,8 +613,68 @@ impl Default for DbEmbeddedSection {
             engine: EmbeddedEngineKind::Sqlite,
             sqlite: DbEmbeddedSqlite::default(),
             postgres: DbEmbeddedPostgres::default(),
+            security: DbEmbeddedSecuritySection::default(),
         }
     }
+}
+
+/// Security settings for embedded database connections
+#[derive(Debug, Deserialize, Clone)]
+pub struct DbEmbeddedSecuritySection {
+    /// Authentication method: "trust" (legacy, insecure) or "scram-sha-256" (secure)
+    #[serde(default = "default_db_auth_method")]
+    pub auth_method: DbAuthMethod,
+    /// Prefer Unix socket over TCP (more secure, no network)
+    #[serde(default = "default_true")]
+    pub prefer_unix_socket: bool,
+    /// Credential rotation interval in hours (0 = disabled)
+    #[serde(default)]
+    pub credential_rotation_hours: u32,
+}
+
+impl Default for DbEmbeddedSecuritySection {
+    fn default() -> Self {
+        Self {
+            auth_method: default_db_auth_method(),
+            prefer_unix_socket: true,
+            credential_rotation_hours: 0,
+        }
+    }
+}
+
+/// Database authentication method
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum DbAuthMethod {
+    /// Trust authentication (no password) - insecure, legacy only
+    Trust,
+    /// SCRAM-SHA-256 password authentication (secure)
+    #[serde(rename = "scram-sha-256")]
+    ScramSha256,
+}
+
+impl DbAuthMethod {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DbAuthMethod::Trust => "trust",
+            DbAuthMethod::ScramSha256 => "scram-sha-256",
+        }
+    }
+
+    pub fn as_pg_arg(&self) -> &'static str {
+        self.as_str()
+    }
+
+    pub fn requires_password(&self) -> bool {
+        match self {
+            DbAuthMethod::Trust => false,
+            DbAuthMethod::ScramSha256 => true,
+        }
+    }
+}
+
+fn default_db_auth_method() -> DbAuthMethod {
+    DbAuthMethod::ScramSha256
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -600,7 +737,10 @@ fn default_embedded_pg_binary() -> String {
 }
 
 fn default_embedded_pg_port_range() -> DbEmbeddedPortRange {
-    DbEmbeddedPortRange { min: 55432, max: 55442 }
+    DbEmbeddedPortRange {
+        min: 55432,
+        max: 55442,
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -739,6 +879,8 @@ pub struct ModulesSection {
     pub dev_sources: ModuleDevSourcesSection,
     #[serde(default)]
     pub services: HashMap<String, ModuleServiceOverride>,
+    #[serde(default)]
+    pub service_profiles: HashMap<String, ModuleServiceProfile>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -901,6 +1043,23 @@ pub struct ModuleServicePolicyOverride {
     pub required_scopes: Vec<String>,
     #[serde(default)]
     pub tenant: Option<ModuleServiceTenantConfig>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ModuleServiceProfile {
+    pub internal_only: Option<bool>,
+    #[serde(default)]
+    pub allowed_roles: Vec<String>,
+    #[serde(default)]
+    pub required_scopes: Vec<String>,
+    #[serde(default)]
+    pub tenant: Option<ModuleServiceTenantConfig>,
+    #[serde(default)]
+    pub ingress_access: Option<String>,
+    #[serde(default)]
+    pub rate_limit_per_second: Option<u32>,
+    #[serde(default)]
+    pub disable_rate_limit: bool,
 }
 
 #[derive(Debug, Deserialize, Clone)]

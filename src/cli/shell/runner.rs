@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use super::history::init_history;
 use super::map_readline_error;
 use super::outcome::handle_outcome;
-use super::output::{show_error, show_pending, show_success};
+use super::output::{show_command_not_found, show_error, show_pending, show_success};
 
 pub fn run_shell(config: Arc<AppConfig>, services: Arc<AppServices>) -> io::Result<()> {
     #[derive(Clone)]
@@ -31,9 +31,16 @@ pub fn run_shell(config: Arc<AppConfig>, services: Arc<AppServices>) -> io::Resu
         }
     }
 
+    let prompt_context = PromptContext::local_default(&config.server.ssh.server_name);
+    let prompt_set = prompts::prompt_set(config.as_ref(), &prompt_context);
+
     let mut stdout = io::stdout();
     write!(&mut stdout, "{}", prompts::clear_screen_sequence())?;
-    writeln!(&mut stdout, "{}", prompts::banner())?;
+    writeln!(
+        &mut stdout,
+        "{}",
+        prompts::banner(config.as_ref(), &prompt_context)
+    )?;
     writeln!(&mut stdout, "{}", prompts::welcome_line(config.as_ref()))?;
 
     let registry = builtins::build_registry();
@@ -45,9 +52,6 @@ pub fn run_shell(config: Arc<AppConfig>, services: Arc<AppServices>) -> io::Resu
         ServiceStatus::Active,
         Some(shell_runner_messages::local_session_note(std::process::id())),
     );
-
-    let prompt_context = PromptContext::local_default(&config.server.ssh.server_name);
-    let prompt_set = prompts::prompt_set(config.as_ref(), &prompt_context);
 
     let mut editor =
         Editor::<ContextualCompleter, DefaultHistory>::new().map_err(map_readline_error)?;
@@ -118,7 +122,7 @@ pub fn run_shell(config: Arc<AppConfig>, services: Arc<AppServices>) -> io::Resu
 
         match editor.readline(&prompt_set.main_cli) {
             Ok(line) => {
-                let cmd = line.trim();
+                let cmd = line.trim().trim_end_matches(';').trim();
                 if cmd.is_empty() {
                     continue;
                 }
@@ -151,13 +155,8 @@ pub fn run_shell(config: Arc<AppConfig>, services: Arc<AppServices>) -> io::Resu
                             }
                         }
                         Ok(CommandStatus::NotFound) => {
-                            let duration = started.elapsed();
-                            show_error(
-                                &mut stdout,
-                                "CLI-0001",
-                                shell_runner_messages::command_unknown(name),
-                                duration,
-                            )?;
+                            let suggestions = registry.find_similar(name);
+                            show_command_not_found(&mut stdout, name, suggestions)?;
                         }
                         Err(err) => {
                             let duration = started.elapsed();

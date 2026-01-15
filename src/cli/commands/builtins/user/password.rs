@@ -21,7 +21,11 @@ pub(super) fn handle_password(
         "set" => handle_set_password(deps, rest, out),
         "check" => handle_check_password(deps, rest, out),
         other => {
-            writeln!(out, "Unknown password action '{}'. Available: set, check", other)?;
+            writeln!(
+                out,
+                "Unknown password action '{}'. Available: set, check",
+                other
+            )?;
             Ok(CommandOutcome::Continue)
         }
     }
@@ -66,34 +70,34 @@ fn handle_set_password(
     } else {
         // Interactive mode - prompt for password
         writeln!(out, "{}", &user_messages::password_prompt_intro(user_id))?;
-        
+
         // Read password
         write!(out, "{}", user_messages::enter_new_password())?;
         out.flush()?;
-        
+
         let mut password = String::new();
         if std::io::stdin().read_line(&mut password).is_err() {
             writeln!(out, "✗ {}", user_messages::password_read_error())?;
             return Ok(CommandOutcome::Continue);
         }
         let password = password.trim().to_string();
-        
+
         // Read confirmation
         write!(out, "{}", user_messages::confirm_password())?;
         out.flush()?;
-        
+
         let mut confirm = String::new();
         if std::io::stdin().read_line(&mut confirm).is_err() {
             writeln!(out, "✗ {}", user_messages::password_read_error())?;
             return Ok(CommandOutcome::Continue);
         }
         let confirm = confirm.trim().to_string();
-        
+
         if password != confirm {
             writeln!(out, "✗ {}", user_messages::password_mismatch())?;
             return Ok(CommandOutcome::Continue);
         }
-        
+
         password
     };
 
@@ -117,7 +121,11 @@ fn handle_set_password(
     let hash = match security.hash_password(password.as_bytes()) {
         Ok(h) => h,
         Err(e) => {
-            writeln!(out, "✗ {}", user_messages::password_hash_error(&e.to_string()))?;
+            writeln!(
+                out,
+                "✗ {}",
+                user_messages::password_hash_error(&e.to_string())
+            )?;
             return Ok(CommandOutcome::Continue);
         }
     };
@@ -129,7 +137,11 @@ fn handle_set_password(
             Ok(CommandOutcome::Continue)
         }
         Err(e) => {
-            writeln!(out, "✗ {}", user_messages::password_set_error(&e.to_string()))?;
+            writeln!(
+                out,
+                "✗ {}",
+                user_messages::password_set_error(&e.to_string())
+            )?;
             Ok(CommandOutcome::Continue)
         }
     }

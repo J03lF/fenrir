@@ -59,8 +59,9 @@ password_is_set() {
     fi
 
     # If we have a Fenrir binary, use it to check password status
+    # Must run from ROOT_DIR so Fenrir can find its config files
     if [ -n "$FENRIR_BIN" ] && [ -f "$FENRIR_BIN" ]; then
-        if "$FENRIR_BIN" --password-status "$FENRIR_SSH_USER" >/dev/null 2>&1; then
+        if (cd "$ROOT_DIR" && "$FENRIR_BIN" --password-status "$FENRIR_SSH_USER" >/dev/null 2>&1); then
             return 0
         else
             return 1
@@ -112,13 +113,8 @@ if [ -z "$FENRIR_BIN" ]; then
     FENRIR_BIN="$ROOT_DIR/target/debug/fenrir"
 fi
 
-# Run database migrations (ensures tables exist before starting)
-echo -e "${GRAY}   Checking database migrations...${RESET}"
-if ! "$FENRIR_BIN" --migrate >/dev/null 2>&1; then
-    echo -e "${RED}   [!]${RESET} Database migration check failed"
-    "$FENRIR_BIN" --migrate 2>&1 | head -5
-    exit 1
-fi
+# Skip explicit --migrate: Fenrir runs migrations automatically on boot.
+# The --migrate flag starts its own embedded DB which can conflict.
 
 # Start Fenrir
 echo -e "${CYAN}   Starting Fenrir...${RESET}"

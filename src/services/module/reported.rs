@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
 pub struct ReportedServicesPayload {
@@ -7,8 +7,23 @@ pub struct ReportedServicesPayload {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ModuleServicesPublishRequest {
+    pub module_id: String,
+    #[serde(default)]
+    pub schema_version: Option<String>,
+    #[serde(default)]
+    pub signed_at: Option<String>,
+    #[serde(default)]
+    pub signature: Option<String>,
+    #[serde(default)]
+    pub services: Vec<ReportedServiceEntry>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ReportedServiceEntry {
     pub service_id: String,
+    #[serde(default)]
+    pub profile: Option<String>,
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]

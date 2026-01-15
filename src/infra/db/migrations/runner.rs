@@ -8,7 +8,9 @@ use tokio::fs;
 use tokio::io::ErrorKind;
 use tracing::{info, warn};
 
+use crate::config::EmbeddedEngineKind;
 use crate::domain::db::{DbEngine, DbError, DbExecutionResult};
+use crate::infra::db::runtime::state::sync_from_migrations;
 use crate::services::db_shell::DbShellService;
 
 use super::{list_migration_files, migration_dir};
@@ -143,6 +145,12 @@ pub async fn apply_pending_migrations(
         persist_state(&state_path, &state).await?;
     }
 
+    if let Some(kind) = embedded_kind(engine) {
+        if let Err(err) = sync_from_migrations(runtime_dir.as_path(), kind).await {
+            warn!(engine = %engine, error = %err, "failed to sync db-runtime state");
+        }
+    }
+
     Ok(report)
 }
 
@@ -208,6 +216,14 @@ async fn check_migrations_applied(
             false
         }
         Err(_) => false,
+    }
+}
+
+fn embedded_kind(engine: DbEngine) -> Option<EmbeddedEngineKind> {
+    match engine {
+        DbEngine::Postgres => Some(EmbeddedEngineKind::Postgres),
+        DbEngine::Sqlite => Some(EmbeddedEngineKind::Sqlite),
+        _ => None,
     }
 }
 

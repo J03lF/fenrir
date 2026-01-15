@@ -8,6 +8,8 @@ const COLOR_RESET: &str = "\x1b[0m";
 const COLOR_DIM: &str = "\x1b[38;5;244m";
 const COLOR_SUCCESS: &str = "\x1b[38;5;76m";
 const COLOR_ERROR: &str = "\x1b[38;5;203m";
+const COLOR_ACCENT: &str = "\x1b[38;5;79m";
+const COLOR_MUTED: &str = "\x1b[38;5;245m";
 
 pub(super) fn show_pending(out: &mut dyn Write, command: &str, args: &[&str]) -> io::Result<()> {
     let joined = if args.is_empty() {
@@ -77,5 +79,48 @@ pub(super) fn show_error(
         msg = message,
         hint = hint
     )?;
+    out.flush()
+}
+
+/// Show command not found error with suggestions - compact inline format
+pub(super) fn show_command_not_found(
+    out: &mut dyn Write,
+    command: &str,
+    suggestions: Vec<String>,
+) -> io::Result<()> {
+    // Line 1: Error message
+    writeln!(
+        out,
+        "{err}✗{reset} Command '{accent}{cmd}{reset}' not found",
+        err = COLOR_ERROR,
+        accent = COLOR_ACCENT,
+        cmd = command,
+        reset = COLOR_RESET,
+    )?;
+
+    // Line 2: Suggestions (if any)
+    if !suggestions.is_empty() {
+        let suggestions_str = suggestions
+            .iter()
+            .map(|s| {
+                format!(
+                    "{accent}{s}{reset}",
+                    accent = COLOR_ACCENT,
+                    s = s,
+                    reset = COLOR_RESET
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(format!("{muted},{reset} ", muted = COLOR_MUTED, reset = COLOR_RESET).as_str());
+
+        writeln!(
+            out,
+            "  {muted}→{reset} Did you mean: {suggestions}",
+            muted = COLOR_MUTED,
+            reset = COLOR_RESET,
+            suggestions = suggestions_str,
+        )?;
+    }
+
     out.flush()
 }

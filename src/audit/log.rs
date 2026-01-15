@@ -13,6 +13,19 @@ pub trait AuditLog: Send + Sync {
     fn recent(&self, limit: usize) -> Result<Vec<AuditEvent>, AuditError>;
 }
 
+/// No-op audit log that discards all events.
+/// Used during early boot before the real audit store is available.
+pub struct NoopAuditLog;
+
+impl AuditLog for NoopAuditLog {
+    fn append(&self, _event: AuditEvent) -> Result<(), AuditError> {
+        Ok(())
+    }
+    fn recent(&self, _limit: usize) -> Result<Vec<AuditEvent>, AuditError> {
+        Ok(Vec::new())
+    }
+}
+
 pub struct InMemoryAuditLog {
     capacity: usize,
     events: RwLock<VecDeque<AuditEvent>>,

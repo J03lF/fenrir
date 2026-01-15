@@ -20,8 +20,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 tracing-appender = "0.2"
 time = { version = "0.3", features = ["formatting", "macros", "serde"] }
 whoami = "1.5"
-thrussh = "=0.32.10"
-thrussh-keys = "=0.20.6"
+russh = "0.44"
+russh-keys = "0.44"
 futures = "0.3"
 async-trait = "0.1"
 rustyline = "12"
@@ -45,6 +45,7 @@ base64 = "0.21"
 hex = "0.4"
 ed25519-dalek = { version = "1.0", features = ["std"] }
 sha2 = "0.10"
+hmac = "0.12"
 toml = "0.8.23"
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls", "blocking", "stream"] }
 urlencoding = "2.1"

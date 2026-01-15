@@ -464,6 +464,7 @@ pub struct SchedulerJobContext {
     pub services: Arc<AppServices>,
     pub runtime_dir: PathBuf,
     pub token_exchange: Arc<TokenExchangeService>,
+    pub backup_service: Option<Arc<crate::services::backup::BackupService>>,
 }
 
 pub fn install_default_jobs(
@@ -478,6 +479,7 @@ pub fn install_default_jobs(
         services,
         runtime_dir,
         token_exchange,
+        backup_service,
     } = ctx;
     let registry_for_uptime = Arc::clone(&registry);
     scheduler.schedule_fixed_rate(
@@ -686,11 +688,77 @@ pub fn install_default_jobs(
         },
     )?;
 
+    // Automatic database backup job (if enabled)
+    if let Some(backup_svc) = backup_service {
+        if backup_svc.is_enabled() {
+            let backup_interval = parse_backup_schedule(backup_svc.config().schedule.as_str());
+            let backup_service_for_job = Arc::clone(&backup_svc);
+            let registry_for_backup = Arc::clone(&registry);
+
+            scheduler.schedule_fixed_rate(
+                ScheduledJobSpec {
+                    id: "db-auto-backup".to_string(),
+                    interval: backup_interval,
+                    initial_delay: Some(Duration::from_secs(300)), // 5 min after start
+                    description: "Automatic database backup with health guards".to_string(),
+                },
+                move || {
+                    let backup_svc = Arc::clone(&backup_service_for_job);
+                    let registry = Arc::clone(&registry_for_backup);
+                    async move {
+                        info!("Running scheduled database backup");
+                        match backup_svc.run_backup(crate::services::backup::BackupTrigger::Auto).await {
+                            Ok(status) => {
+                                info!(
+                                    path = %status.path.display(),
+                                    size_mb = status.size_bytes / (1024 * 1024),
+                                    "Scheduled backup completed successfully"
+                                );
+                                registry.update_note(
+                                    "db-runtime",
+                                    Some(format!(
+                                        "backup: {} ({} MB)",
+                                        status.path.display(),
+                                        status.size_bytes / (1024 * 1024)
+                                    )),
+                                );
+                            }
+                            Err(err) => {
+                                warn!(error = %err, "Scheduled backup failed");
+                                registry.update_note(
+                                    "db-runtime",
+                                    Some(format!("backup failed: {}", err)),
+                                );
+                            }
+                        }
+                        Ok::<(), anyhow::Error>(())
+                    }
+                },
+            )?;
+
+            info!(
+                schedule = %backup_svc.config().schedule,
+                "Automatic backup job registered"
+            );
+        }
+    }
+
     registry.update_note(
         "scheduler",
         Some(scheduler_service_messages::STANDARD_JOBS_ACTIVE_NOTE.to_string()),
     );
     Ok(())
+}
+
+/// Parse backup schedule string to Duration
+fn parse_backup_schedule(schedule: &str) -> Duration {
+    match schedule.to_lowercase().as_str() {
+        "hourly" => Duration::from_secs(3600),
+        "daily" => Duration::from_secs(86400),
+        "weekly" => Duration::from_secs(604800),
+        // Could add cron parsing here
+        _ => Duration::from_secs(86400), // Default to daily
+    }
 }
 
 impl Drop for SchedulerService {

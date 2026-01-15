@@ -44,14 +44,15 @@ pub fn parse_staruml(bytes: &[u8], engine: DbEngine) -> anyhow::Result<DatabaseB
 
                 let stereotypes = a.all_stereotypes();
                 let is_pk = stereotypes.iter().any(|x| x == "pk" || x == "primary_key");
-                let is_not_null =
-                    stereotypes.iter().any(|x| x == "not_null" || x == "nn" || x == "required");
+                let is_not_null = stereotypes
+                    .iter()
+                    .any(|x| x == "not_null" || x == "nn" || x == "required");
                 // Primary keys are always NOT NULL
                 let nullable = !is_pk && !is_not_null;
 
                 // Get data type - can be string or object, TypeOrRef handles this
                 let data_type = a.resolved_type().unwrap_or_else(|| "text".into());
-                
+
                 // Skip if type is a reference (relationship, not a column)
                 if data_type.is_empty() || a.type_is_ref() {
                     debug!("skipping attribute: {} (ref type)", a.name);

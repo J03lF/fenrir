@@ -484,6 +484,39 @@ impl ModuleService {
         self.runtime.logs(module_id, tail).await
     }
 
+    pub async fn register_reported_services(
+        &self,
+        module_id: &ModuleId,
+        payload: ReportedServicesPayload,
+    ) -> Result<(), ModuleRuntimeError> {
+        let installed = self
+            .storage
+            .load(module_id)
+            .await
+            .map_err(|err| ModuleRuntimeError::InvalidState(err.to_string()))?
+            .ok_or_else(|| ModuleRuntimeError::NotInstalled {
+                module_id: module_id.to_string(),
+            })?;
+        if self.is_dev_override_active(module_id).await {
+            return Ok(());
+        }
+        let info = self.runtime.status(module_id).await?;
+        if !matches!(info.status, ModuleRuntimeStatus::Running) {
+            return Err(ModuleRuntimeError::NotRunning {
+                module_id: module_id.to_string(),
+            });
+        }
+        let Some(port) = info.port else {
+            return Err(ModuleRuntimeError::InvalidState(format!(
+                "module {module_id} has no runtime port"
+            )));
+        };
+        let _ = self
+            .apply_reported_services(module_id, &installed.manifest, port, payload)
+            .await?;
+        Ok(())
+    }
+
     pub async fn runtime_env(
         &self,
         module_id: &ModuleId,
@@ -1065,6 +1098,19 @@ impl ModuleService {
             security.required_scopes = map_scopes(&entry.required_scopes)?;
         }
         descriptor = descriptor.with_security(security);
+
+        if let Some(profile_name) = entry.profile.as_deref() {
+            if let Some(profile) = self.overrides.profile(profile_name) {
+                descriptor = profile.apply(descriptor);
+            } else {
+                tracing::warn!(
+                    module = %module_id,
+                    profile = %profile_name,
+                    "unknown module service profile"
+                );
+            }
+        }
+        descriptor = self.apply_descriptor_overrides(descriptor);
 
         let route_base = descriptor
             .ingress

@@ -8,7 +8,12 @@ use tokio::runtime::Handle;
 
 pub fn command() -> CommandEntry {
     const SUBS: &[crate::cli::commands::registry::CommandSubcommand] = &[
-        crate::cli::commands::registry::CommandSubcommand::new("status", &[], &[], "Show db runtime status"),
+        crate::cli::commands::registry::CommandSubcommand::new(
+            "status",
+            &[],
+            &[],
+            "Show db runtime status",
+        ),
         crate::cli::commands::registry::CommandSubcommand::new(
             "logs",
             &[],
@@ -69,11 +74,17 @@ pub fn handle(
     let args = &tokens[1..];
     match sub {
         "status" => {
-            let tail = args.first().and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+            let tail = args
+                .first()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(0);
             write_status(out, services, tail)?;
         }
         "logs" => {
-    let tail = args.first().and_then(|v| v.parse::<usize>().ok()).unwrap_or(50);
+            let tail = args
+                .first()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(50);
             for line in services.db_runtime_logs(tail) {
                 writeln!(out, "{line}")?;
             }
@@ -91,7 +102,17 @@ pub fn handle(
             let label = args.first().map(|s| s.to_string());
             match services.db_runtime() {
                 Some(rt) => match block_on_any(rt.backup(label)) {
-                    Ok(path) => writeln!(out, "backup created at {path}")?,
+                    Ok(artifact) => {
+                        if let Some(state_path) = artifact.state_snapshot_path {
+                            writeln!(
+                                out,
+                                "backup created at {} (state: {state_path})",
+                                artifact.artifact_path
+                            )?
+                        } else {
+                            writeln!(out, "backup created at {}", artifact.artifact_path)?
+                        }
+                    }
                     Err(err) => writeln!(out, "error: {err}")?,
                 },
                 None => writeln!(out, "db-runtime not available")?,
@@ -117,7 +138,9 @@ pub fn handle(
 }
 
 pub fn completion(ctx: &CompletionContext<'_>) -> Vec<String> {
-    let subs = ["status", "logs", "start", "stop", "restart", "backup", "restore"];
+    let subs = [
+        "status", "logs", "start", "stop", "restart", "backup", "restore",
+    ];
     match ctx.active_index {
         0 => subs
             .iter()
@@ -179,4 +202,3 @@ where
             .block_on(fut)
     }
 }
-

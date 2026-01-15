@@ -165,7 +165,7 @@ fn handle_migrate() {
 
     let rt = Runtime::new().expect("Failed to create tokio runtime");
     // Use config-based runtime paths
-    let migrations_dir = cfg.runtime.migrations_path();
+    let runtime_root = cfg.runtime.resolve_base_path();
     let db_dir = cfg.runtime.db_path();
 
     // Start DB runtime if embedded
@@ -178,7 +178,24 @@ fn handle_migrate() {
             embedded.postgres.port_range,
             embedded.postgres.binary_path.clone(),
             db_dir,
+            embedded.security.clone(),
         );
+        
+        // Attach early SecurityManager if password auth is required
+        if embedded.security.auth_method.requires_password() {
+            use fenrir::security::manager::{NoopAuditSink, SecurityManager};
+            let noop_audit = std::sync::Arc::new(NoopAuditSink);
+            match SecurityManager::new(&cfg.security, noop_audit) {
+                Ok(security) => {
+                    supervisor.attach_security(std::sync::Arc::new(security));
+                }
+                Err(e) => {
+                    eprintln!("MIGRATE-SECURITY: failed to create security manager ({e})");
+                    std::process::exit(1);
+                }
+            }
+        }
+        
         match rt.block_on(supervisor.clone().start()) {
             Ok(_) => Some(supervisor),
             Err(e) => {
@@ -239,7 +256,7 @@ fn handle_migrate() {
     // Run migrations
     println!("MIGRATE: applying pending migrations...");
     match rt.block_on(db::migrations::apply_pending_migrations(
-        migrations_dir,
+        runtime_root,
         db_shell,
         effective_engine,
     )) {

@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_json;
 use time::Duration as TimeDuration;
 use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use tokio_stream::{
     wrappers::{errors::BroadcastStreamRecvError, BroadcastStream},
     StreamExt,
@@ -51,7 +52,10 @@ use crate::security::service_tokens::{
 use crate::services::module::token_audit::{record_module_token_exchange, ModuleTokenAuditContext};
 use crate::services::scheduler::ScheduledJobSnapshot;
 use crate::services::{
-    module::{ModuleIngressError, ModuleIngressTarget},
+    module::{
+        ModuleIngressError, ModuleIngressTarget, ModuleServicesPublishRequest, ReportedServiceEntry,
+        ReportedServicesPayload,
+    },
     AppServices, ServiceActionKind, ServiceControlError, ServiceIngressAccess,
     ServiceIngressMetadata, ServiceIngressProtocol, ServiceMetricSnapshot, ServiceRateLimit,
     ServiceRegistry, ServiceSecurityMetadata, ServiceSnapshot, ServiceStatus, TokenExchangeError,
@@ -70,6 +74,8 @@ const SERVICE_RESOURCE_STALE_AFTER_SECS: i64 = 60;
 const SERVICE_HEALTH_STALE_AFTER_SECS: u64 = 180;
 const ALLOWED_MODULE_TOKEN_SCOPES: &[&str] = &["db:write"];
 const MODULE_TOKEN_ENDPOINT: &str = "/modules/runtime/tokens";
+const MODULE_SERVICE_SIGNATURE_MAX_AGE_SECS: i64 = 300;
+const MODULE_SERVICE_SIGNATURE_MAX_FUTURE_SECS: i64 = 60;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GatewayRequestKind {
@@ -102,6 +108,7 @@ struct ServicesResponse {
 struct DbRuntimeStatusResponse {
     engine: String,
     running: bool,
+    adapter_status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     uri: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -110,6 +117,16 @@ struct DbRuntimeStatusResponse {
     pid: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_health: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_checkpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    snapshot_updated_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_backup_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_backup_state_path: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    applied_migrations: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     logs: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -209,6 +226,14 @@ struct ServiceResourceView {
     updated_at: Option<String>,
     stale: bool,
     reported: bool,
+}
+
+#[derive(Serialize)]
+struct ServiceManifestSignaturePayload {
+    module_id: String,
+    schema_version: String,
+    signed_at: String,
+    services: Vec<ReportedServiceEntry>,
 }
 
 #[derive(Deserialize)]
@@ -845,6 +870,17 @@ fn module_id_from_claims(claims: &DelegatedTokenClaims) -> Result<ModuleId, Serv
             http_messages::problems::module_token_service_only(),
         )),
     }
+}
+
+fn normalize_module_id(raw: &str) -> Result<ModuleId, ServiceActionProblem> {
+    let value = raw.trim();
+    let cleaned = value.strip_prefix("module:").unwrap_or(value);
+    ModuleId::new(cleaned).map_err(|_| {
+        http_problem(
+            StatusCode::BAD_REQUEST,
+            http_messages::problems::module_token_invalid_service(value),
+        )
+    })
 }
 
 fn parse_requested_scopes(scopes: &[String]) -> Result<Vec<ServiceScope>, ServiceActionProblem> {
@@ -1485,6 +1521,131 @@ async fn issue_module_service_token(
     (StatusCode::OK, Json(response)).into_response()
 }
 
+async fn register_module_services(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Json(payload): Json<ModuleServicesPublishRequest>,
+) -> Response {
+    let Some(module_service) = state.services.module_service() else {
+        return module_service_unavailable().into_response();
+    };
+    let Some(security) = state.services.security_manager() else {
+        return http_problem(
+            StatusCode::SERVICE_UNAVAILABLE,
+            http_messages::problems::gateway_security_unavailable(),
+        )
+        .into_response();
+    };
+    let token = match extract_gateway_token(&headers) {
+        Ok(token) => token,
+        Err(problem) => return problem.into_response(),
+    };
+    let claims = match security.validate_service_token(token) {
+        Ok(claims) => claims,
+        Err(err) => return map_service_token_error(err).into_response(),
+    };
+    let module_id = match module_id_from_claims(&claims) {
+        Ok(id) => id,
+        Err(problem) => return problem.into_response(),
+    };
+    let payload_module_id = match normalize_module_id(&payload.module_id) {
+        Ok(id) => id,
+        Err(problem) => return problem.into_response(),
+    };
+    if module_id != payload_module_id {
+        return http_problem(
+            StatusCode::FORBIDDEN,
+            http_messages::problems::module_token_invalid_service(&payload.module_id),
+        )
+        .into_response();
+    }
+
+    let signed_at_raw = match payload.signed_at.as_deref() {
+        Some(value) => match OffsetDateTime::parse(value, &Rfc3339) {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                return http_problem(
+                    StatusCode::BAD_REQUEST,
+                    http_messages::problems::module_token_invalid_service("invalid signed_at"),
+                )
+                .into_response();
+            }
+        },
+        None => {
+            return http_problem(
+                StatusCode::BAD_REQUEST,
+                http_messages::problems::module_token_invalid_service("signed_at missing"),
+            )
+            .into_response();
+        }
+    };
+    let now = OffsetDateTime::now_utc();
+    if (now - signed_at_raw).whole_seconds() > MODULE_SERVICE_SIGNATURE_MAX_AGE_SECS
+        || (signed_at_raw - now).whole_seconds() > MODULE_SERVICE_SIGNATURE_MAX_FUTURE_SECS
+    {
+        return http_problem(
+            StatusCode::UNAUTHORIZED,
+            http_messages::problems::module_token_invalid_service("signature expired"),
+        )
+        .into_response();
+    }
+    let signature = match payload.signature.as_deref() {
+        Some(value) if !value.trim().is_empty() => value,
+        _ => {
+            return http_problem(
+                StatusCode::BAD_REQUEST,
+                http_messages::problems::module_token_invalid_service("signature missing"),
+            )
+            .into_response();
+        }
+    };
+    let schema_version = payload
+        .schema_version
+        .clone()
+        .unwrap_or_else(|| "1.0".to_string());
+    let signature_payload = ServiceManifestSignaturePayload {
+        module_id: payload.module_id.clone(),
+        schema_version,
+        signed_at: payload.signed_at.clone().unwrap_or_default(),
+        services: payload.services.clone(),
+    };
+    let signature_bytes = match serde_json::to_vec(&signature_payload) {
+        Ok(data) => data,
+        Err(err) => {
+            return http_problem(
+                StatusCode::BAD_REQUEST,
+                http_messages::problems::module_token_invalid_service(&err.to_string()),
+            )
+            .into_response();
+        }
+    };
+    match security.verify_service_manifest_signature(token, &signature_bytes, signature) {
+        Ok(true) => {}
+        Ok(false) => {
+            return http_problem(
+                StatusCode::FORBIDDEN,
+                http_messages::problems::module_token_invalid_service("signature invalid"),
+            )
+            .into_response();
+        }
+        Err(err) => {
+            return http_problem(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                http_messages::problems::module_token_invalid_service(&err.to_string()),
+            )
+            .into_response();
+        }
+    }
+
+    let payload = ReportedServicesPayload {
+        services: payload.services,
+    };
+    match module_service.register_reported_services(&module_id, payload).await {
+        Ok(()) => (StatusCode::OK, Json("ok")).into_response(),
+        Err(err) => module_runtime_problem(err).into_response(),
+    }
+}
+
 async fn start_module_runtime(
     State(state): State<HttpState>,
     headers: HeaderMap,
@@ -2093,6 +2254,7 @@ pub(super) fn build_router(state: HttpState) -> Router {
             "/modules/runtime/release-dev-overrides",
             post(release_dev_overrides),
         )
+        .route("/modules/runtime/services", post(register_module_services))
         .route("/modules/static/:module_id", any(proxy_static_module_root))
         .route("/modules/static/:module_id/*path", any(proxy_static_module))
         .route("/modules/runtime/tokens", post(issue_module_service_token))
@@ -2726,12 +2888,16 @@ async fn db_runtime_status(
     let resp = DbRuntimeStatusResponse {
         engine: status.engine.as_str().to_string(),
         running: status.running,
+        adapter_status: status.adapter_status.as_str().to_string(),
         uri: status.connector_uri,
         port: status.port,
         pid: status.pid,
-        last_health: status
-            .last_health
-            .map(format_offset_datetime),
+        last_health: status.last_health.map(format_offset_datetime),
+        last_checkpoint: status.last_checkpoint.map(format_offset_datetime),
+        snapshot_updated_at: status.snapshot_updated_at.map(format_offset_datetime),
+        last_backup_path: status.last_backup_path,
+        last_backup_state_path: status.last_backup_state_path,
+        applied_migrations: status.applied_migrations,
         logs: if tail > 0 {
             Some(state.services.db_runtime_logs(tail))
         } else {

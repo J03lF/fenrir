@@ -2,23 +2,26 @@ use std::collections::HashMap;
 use std::env;
 use std::str::FromStr;
 
-use crate::config::{ConfigError, ModuleServiceOverride, ModuleServiceTenantMode};
+use crate::config::{ConfigError, ModuleServiceOverride, ModuleServiceProfile, ModuleServiceTenantMode};
 use crate::security::service::{ServiceRole, ServiceScope};
-use crate::services::types::ServiceTenantGuard;
-use crate::services::ServiceSecurityMetadata;
+use crate::services::types::{ServiceIngressAccess, ServiceRateLimit, ServiceTenantGuard};
+use crate::services::{ServiceDescriptorOwned, ServiceIngressMetadata, ServiceSecurityMetadata};
 
 #[derive(Clone, Debug, Default)]
 pub struct ModuleServiceOverrides {
     env: HashMap<String, Vec<ModuleEnvVar>>,
     security: HashMap<String, ServiceSecurityOverride>,
+    profiles: HashMap<String, ModuleServiceProfileResolved>,
 }
 
 impl ModuleServiceOverrides {
     pub fn from_config(
         entries: &HashMap<String, ModuleServiceOverride>,
+        profiles: &HashMap<String, ModuleServiceProfile>,
     ) -> Result<Self, ConfigError> {
         let mut env_map: HashMap<String, Vec<ModuleEnvVar>> = HashMap::new();
         let mut security_map: HashMap<String, ServiceSecurityOverride> = HashMap::new();
+        let mut profile_map: HashMap<String, ModuleServiceProfileResolved> = HashMap::new();
 
         for (service_id_raw, cfg) in entries {
             let service_id = service_id_raw.trim();
@@ -45,9 +48,21 @@ impl ModuleServiceOverrides {
             }
         }
 
+        for (profile_name_raw, profile) in profiles {
+            let profile_name = profile_name_raw.trim();
+            if profile_name.is_empty() {
+                return Err(ConfigError::Invalid(
+                    "modules.service_profiles keys must not be empty",
+                ));
+            }
+            let resolved = ModuleServiceProfileResolved::from_profile(profile_name, profile)?;
+            profile_map.insert(profile_name.to_string(), resolved);
+        }
+
         Ok(Self {
             env: env_map,
             security: security_map,
+            profiles: profile_map,
         })
     }
 
@@ -68,6 +83,10 @@ impl ModuleServiceOverrides {
             }
         }
         None
+    }
+
+    pub fn profile(&self, name: &str) -> Option<ModuleServiceProfileResolved> {
+        self.profiles.get(name).cloned()
     }
 }
 
@@ -279,5 +298,135 @@ impl ServiceSecurityOverride {
             base.tenant = guard.clone();
         }
         base
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ModuleServiceProfileResolved {
+    pub internal_only: Option<bool>,
+    pub allowed_roles: Option<Vec<ServiceRole>>,
+    pub required_scopes: Option<Vec<ServiceScope>>,
+    pub tenant_guard: Option<ServiceTenantGuard>,
+    pub ingress_access: Option<ServiceIngressAccess>,
+    pub rate_limit: Option<ServiceRateLimit>,
+}
+
+impl ModuleServiceProfileResolved {
+    fn from_profile(
+        profile_name: &str,
+        profile: &ModuleServiceProfile,
+    ) -> Result<Self, ConfigError> {
+        let mut resolved = ModuleServiceProfileResolved::default();
+        if let Some(value) = profile.internal_only {
+            resolved.internal_only = Some(value);
+        }
+        if !profile.allowed_roles.is_empty() {
+            let mut roles = Vec::new();
+            for role in &profile.allowed_roles {
+                let parsed = ServiceRole::from_str(role).map_err(|_| {
+                    ConfigError::InvalidMessage(format!(
+                        "modules.service_profiles.{profile_name}.allowed_roles contains unknown role '{role}'"
+                    ))
+                })?;
+                roles.push(parsed);
+            }
+            resolved.allowed_roles = Some(roles);
+        }
+        if !profile.required_scopes.is_empty() {
+            let mut scopes = Vec::new();
+            for scope in &profile.required_scopes {
+                let parsed = ServiceScope::new(scope).map_err(|err| {
+                    ConfigError::InvalidMessage(format!(
+                        "modules.service_profiles.{profile_name}.required_scopes '{scope}' invalid: {err}"
+                    ))
+                })?;
+                scopes.push(parsed);
+            }
+            resolved.required_scopes = Some(scopes);
+        }
+        if let Some(tenant) = &profile.tenant {
+            let guard = match tenant.mode {
+                ModuleServiceTenantMode::Any => ServiceTenantGuard::any(),
+                ModuleServiceTenantMode::Fixed => {
+                    let value = tenant
+                        .value
+                        .as_ref()
+                        .map(|v| v.trim().to_string())
+                        .filter(|v| !v.is_empty())
+                        .expect("tenant value validated");
+                    ServiceTenantGuard::fixed(value)
+                }
+                ModuleServiceTenantMode::AllowList => ServiceTenantGuard::allow_list(tenant.allow.clone()),
+            };
+            resolved.tenant_guard = Some(guard);
+        }
+        if let Some(access) = &profile.ingress_access {
+            let value = access.trim().to_ascii_lowercase();
+            let parsed = match value.as_str() {
+                "public" => ServiceIngressAccess::Public,
+                "internal" => ServiceIngressAccess::Internal,
+                _ => {
+                    return Err(ConfigError::InvalidMessage(format!(
+                        "modules.service_profiles.{profile_name}.ingress_access '{access}' invalid (expected 'public' or 'internal')"
+                    )))
+                }
+            };
+            resolved.ingress_access = Some(parsed);
+        }
+        if profile.disable_rate_limit && profile.rate_limit_per_second.is_some() {
+            return Err(ConfigError::InvalidMessage(format!(
+                "modules.service_profiles.{profile_name} cannot set both disable_rate_limit and rate_limit_per_second"
+            )));
+        }
+        if profile.disable_rate_limit {
+            resolved.rate_limit = Some(ServiceRateLimit::Unlimited);
+        } else if let Some(limit) = profile.rate_limit_per_second {
+            if limit == 0 {
+                return Err(ConfigError::InvalidMessage(format!(
+                    "modules.service_profiles.{profile_name}.rate_limit_per_second must be > 0"
+                )));
+            }
+            resolved.rate_limit = Some(ServiceRateLimit::CustomPerSecond(limit));
+        }
+        Ok(resolved)
+    }
+
+    pub fn apply(&self, mut descriptor: ServiceDescriptorOwned) -> ServiceDescriptorOwned {
+        let mut security = descriptor
+            .security
+            .clone()
+            .unwrap_or_else(ServiceSecurityMetadata::internal_default);
+        if let Some(value) = self.internal_only {
+            security.internal_only = value;
+        }
+        if let Some(roles) = &self.allowed_roles {
+            security.allowed_roles = roles.clone();
+        }
+        if let Some(scopes) = &self.required_scopes {
+            security.required_scopes = scopes.clone();
+        }
+        if let Some(guard) = &self.tenant_guard {
+            security.tenant = guard.clone();
+        }
+        descriptor.security = Some(security);
+
+        let mut ingress = descriptor
+            .ingress
+            .clone()
+            .unwrap_or_else(ServiceIngressMetadata::internal);
+        if let Some(access) = self.ingress_access {
+            ingress.access = access;
+        } else if let Some(internal_only) = self.internal_only {
+            ingress.access = if internal_only {
+                ServiceIngressAccess::Internal
+            } else {
+                ServiceIngressAccess::Public
+            };
+        }
+        if let Some(rate_limit) = self.rate_limit {
+            ingress.rate_limit = rate_limit;
+        }
+        descriptor.ingress = Some(ingress);
+        descriptor
     }
 }

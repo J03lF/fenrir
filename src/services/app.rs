@@ -131,9 +131,7 @@ impl AppServices {
             .map_err(|_| attach::DB_RUNTIME_ALREADY_ATTACHED)
     }
 
-    pub fn db_runtime(
-        &self,
-    ) -> Option<Arc<crate::infra::db::runtime::DbRuntimeSupervisor>> {
+    pub fn db_runtime(&self) -> Option<Arc<crate::infra::db::runtime::DbRuntimeSupervisor>> {
         self.db_runtime.get().cloned()
     }
 
@@ -146,9 +144,7 @@ impl AppServices {
     }
 
     pub fn db_runtime_status(&self) -> Option<crate::infra::db::runtime::RuntimeStatus> {
-        self.db_runtime
-            .get()
-            .and_then(|rt| rt.status_snapshot())
+        self.db_runtime.get().and_then(|rt| rt.status_snapshot())
     }
 
     pub fn db_runtime_logs(&self, tail: usize) -> Vec<String> {

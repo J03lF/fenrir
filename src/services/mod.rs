@@ -1,6 +1,7 @@
+pub mod backup;
 pub mod db_connector;
-pub mod db_shell;
 pub mod db_schema;
+pub mod db_shell;
 pub mod diagnostics;
 pub mod jobs;
 pub mod module;
@@ -14,6 +15,7 @@ mod registry;
 mod types;
 
 pub use app::AppServices;
+pub use backup::{BackupError, BackupResult, BackupService, BackupStatus};
 pub use db_connector::{DbConnectorEndpoint, DbConnectorService};
 pub use db_shell::DbShellService;
 pub use diagnostics::{ServiceDiagnostics, ServiceMetricSnapshot};

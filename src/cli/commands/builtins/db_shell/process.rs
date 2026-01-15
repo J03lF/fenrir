@@ -23,41 +23,42 @@ pub fn process_command(
     if trimmed.is_empty() {
         return Ok(CommandResult::Message(vec![]));
     }
-    if trimmed.eq_ignore_ascii_case("exit") || trimmed.eq_ignore_ascii_case(r"\q") {
+    let normalized = normalize_meta_command(trimmed);
+    if normalized.eq_ignore_ascii_case("exit") || normalized.eq_ignore_ascii_case(r"\q") {
         return Ok(CommandResult::Exit);
     }
-    if trimmed.eq_ignore_ascii_case("help") {
+    if normalized.eq_ignore_ascii_case("help") {
         return Ok(CommandResult::Message(help_lines(session)));
     }
-    if trimmed.eq_ignore_ascii_case("/ping") || trimmed.eq_ignore_ascii_case(r"\ping") {
+    if normalized.eq_ignore_ascii_case("/ping") || normalized.eq_ignore_ascii_case(r"\ping") {
         executor.run(session.ping())?;
         return Ok(CommandResult::Message(vec![
             db_shell_process_messages::PING_OK.to_string(),
         ]));
     }
     // \refresh is handled in shell.rs, but return a hint if it reaches here
-    if trimmed.eq_ignore_ascii_case("/refresh") || trimmed.eq_ignore_ascii_case(r"\refresh") {
+    if normalized.eq_ignore_ascii_case("/refresh") || normalized.eq_ignore_ascii_case(r"\refresh") {
         return Ok(CommandResult::Message(vec![
             "Use \\refresh at start of line (not after other input)".to_string(),
         ]));
     }
-    if trimmed.starts_with("/c") || trimmed.starts_with(r"\c") {
-        return handle_switch_command(session, trimmed, executor);
+    if normalized.starts_with("/c") || normalized.starts_with(r"\c") {
+        return handle_switch_command(session, normalized, executor);
     }
-    if trimmed == "/d" || trimmed == r"\d" {
+    if normalized == "/d" || normalized == r"\d" {
         let tables = executor.run(session.list_tables())?;
         return Ok(CommandResult::Tables(tables));
     }
     // Describe table: /d <table> or \d <table>
-    let describe_prefix = if trimmed.starts_with("/d ") {
+    let describe_prefix = if normalized.starts_with("/d ") {
         Some("/d ")
-    } else if trimmed.starts_with(r"\d ") {
+    } else if normalized.starts_with(r"\d ") {
         Some(r"\d ")
     } else {
         None
     };
     if let Some(prefix) = describe_prefix {
-        let table = trimmed.strip_prefix(prefix).unwrap_or("").trim();
+        let table = normalized.strip_prefix(prefix).unwrap_or("").trim();
         if table.is_empty() {
             return Ok(CommandResult::Message(vec![
                 db_shell_process_messages::TABLE_NAME_HINT.to_string(),
@@ -156,6 +157,11 @@ fn requires_guard(statement: &str) -> bool {
     } else {
         false
     }
+}
+
+fn normalize_meta_command(input: &str) -> &str {
+    // First trim whitespace, then remove trailing semicolons, then trim again
+    input.trim().trim_end_matches(';').trim()
 }
 
 pub fn sanitize_error(err: &DbError) -> String {

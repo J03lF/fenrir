@@ -1,7 +1,7 @@
 use std::io::{self, Write};
 
-use thrussh::server::Session;
-use thrussh::{ChannelId, CryptoVec};
+use russh::server::Session;
+use russh::{ChannelId, CryptoVec};
 
 pub struct SessionWriter<'a> {
     session: &'a mut Session,

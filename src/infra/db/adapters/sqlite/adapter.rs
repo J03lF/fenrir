@@ -83,7 +83,8 @@ impl DbAdminPort for SqliteAdapter {
     }
 
     async fn list_tables(&self) -> DbResult<Vec<DbTable>> {
-        const SQL: &str = "SELECT name, type FROM sqlite_master WHERE type IN ('table','view') ORDER BY name";
+        const SQL: &str =
+            "SELECT name, type FROM sqlite_master WHERE type IN ('table','view') ORDER BY name";
         let sql = SQL.to_string();
         self.with_conn(move |conn| {
             let mut stmt = conn
@@ -117,9 +118,7 @@ impl DbAdminPort for SqliteAdapter {
     async fn describe_table(&self, table: &str) -> DbResult<DbTableSchema> {
         let table_name = table.trim();
         if table_name.is_empty() {
-            return Err(DbError::invalid_input(
-                format!("table {table} not found"),
-            ));
+            return Err(DbError::invalid_input(format!("table {table} not found")));
         }
         let sql = format!("PRAGMA table_info('{table_name}')");
         let sql_owned = sql.clone();
@@ -150,9 +149,9 @@ impl DbAdminPort for SqliteAdapter {
             })
             .await?;
         if columns.is_empty() {
-            return Err(DbError::invalid_input(
-                format!("table {table_name} not found"),
-            ));
+            return Err(DbError::invalid_input(format!(
+                "table {table_name} not found"
+            )));
         }
         Ok(DbTableSchema {
             table: DbTable {
@@ -176,7 +175,9 @@ impl DbAdminPort for SqliteAdapter {
                 .prepare(&sql)
                 .map_err(|err| DbError::query(err.to_string()))?;
             let rows_iter = stmt
-                .query_map(params_from_iter(params_vec.iter()), |row| Ok(row_to_strings(row)))
+                .query_map(params_from_iter(params_vec.iter()), |row| {
+                    Ok(row_to_strings(row))
+                })
                 .map_err(|err| DbError::query(err.to_string()))?;
             let mut rows = Vec::new();
             for row in rows_iter {
@@ -242,4 +243,3 @@ fn prepare_params(params: &[DbValue]) -> DbResult<Vec<rusqlite::types::Value>> {
     }
     Ok(out)
 }
-

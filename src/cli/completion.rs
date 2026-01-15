@@ -2,11 +2,13 @@ use crate::cli::commands::registry::{
     CliDependencies, CommandArgument, CommandShape, CommandSubcommand, CompletionContext,
     CompletionKind, ShellEnvironment,
 };
+use crate::cli::sql_completion::SqlCompletionEngine;
 use rustyline::completion::{Completer, Pair};
 use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
 use rustyline::{Context, Helper, Result as RustylineResult};
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 use std::sync::Mutex;
 use tracing::debug;
@@ -443,6 +445,8 @@ pub struct ListCompleter {
     term_width: usize,
     /// Maximum suggestions to show in grid (rest hidden)
     max_grid_items: usize,
+    /// Optional table catalog for DB shell context
+    table_names: HashSet<String>,
 }
 
 struct ListCycleState {
@@ -458,6 +462,7 @@ impl ListCompleter {
             cycle_state: Mutex::new(None),
             term_width: 80,
             max_grid_items: 24,
+            table_names: HashSet::new(),
         }
     }
 
@@ -466,8 +471,13 @@ impl ListCompleter {
         self
     }
 
-    pub fn update(&mut self, entries: Vec<String>) {
+    pub fn set_table_names(&mut self, tables: &[String]) {
+        self.table_names = tables.iter().cloned().collect();
+    }
+
+    pub fn update_catalog(&mut self, entries: Vec<String>, table_names: Vec<String>) {
         self.entries = entries;
+        self.table_names = table_names.into_iter().collect();
         if let Ok(mut guard) = self.cycle_state.lock() {
             *guard = None;
         }
@@ -574,7 +584,11 @@ impl Completer for ListCompleter {
         pos: usize,
         _ctx: &Context<'_>,
     ) -> RustylineResult<(usize, Vec<Pair>)> {
-        let (start, matches) = completion_matches(&self.entries, line, pos);
+        let (start, matches) = if self.table_names.is_empty() {
+            completion_matches(&self.entries, line, pos)
+        } else {
+            db_shell_completion_matches(&self.entries, &self.table_names, line, pos)
+        };
         let prefix = &line[start..pos];
         let match_count = matches.len();
         let (cycled, should_print_grid) = self.apply_cycle(prefix, matches);
@@ -647,6 +661,34 @@ pub fn longest_common_prefix(strings: &[String]) -> Option<String> {
         }
     }
     Some(prefix)
+}
+
+// =============================================================================
+// SQL Completion Integration
+// =============================================================================
+//
+// Uses the sql_completion module for intelligent, context-aware SQL suggestions.
+// The engine tracks query structure, aliases, and schema to provide accurate completions.
+// =============================================================================
+
+/// Get context-aware SQL completions using the SqlCompletionEngine
+pub fn db_shell_completion_matches(
+    _entries: &[String],  // Legacy parameter, kept for API compatibility
+    table_names: &HashSet<String>,
+    line: &str,
+    pos: usize,
+) -> (usize, Vec<String>) {
+    // Create engine with current schema
+    let columns: HashMap<String, Vec<String>> = HashMap::new();
+    let engine = SqlCompletionEngine::with_tables_and_columns(
+        table_names.iter().cloned(),
+        columns,
+    );
+    
+    // Get completions
+    let result = engine.complete(line, pos);
+    
+    (result.start, result.suggestions)
 }
 
 #[cfg(test)]

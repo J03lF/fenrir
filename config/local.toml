@@ -1,63 +1,9 @@
-app = { name = "fenrir", version = "0.1.4" }
-
-[server]
-enable_http = true
-enable_grpc = true
-
 [server.ssh]
-host = "127.0.0.1"
-port = 2222
-user = "test"
-server_name = "fenrir-Test"
-host_key_path = "keys/server/ssh/host_ed25519"
-idle_close_seconds = 300
-
-[server.ssh.tls]
-allowed_ciphers = []
-
-[server.http]
-host = "127.0.0.1"
-port = 8080
-
-[server.http.tls]
-enabled = false
-cert_path = "config/certs/server.crt"
-key_path = "config/certs/server.key"
-cipher_suites = ["TLS_AES_256_GCM_SHA384", "TLS_AES_128_GCM_SHA256"]
-
-[server.grpc]
-host = "127.0.0.1"
-port = 50051
-
-[server.grpc.tls]
-enabled = false
-cert_path = "config/certs/server-grpc.crt"
-key_path = "config/certs/server-grpc.key"
-cipher_suites = ["TLS_AES_256_GCM_SHA384", "TLS_AES_128_GCM_SHA256"]
-
-[security]
-allowed_ciphers = ["AES-GCM", "XChaCha20-Poly1305"]
-
-[security.kdf]
-algorithm = "argon2id"
-version = 1
-
-[security.jwt]
-issuer = "fenrir"
-audience = "fenrir-clients"
-exp_seconds = 3600
-
-[security.http]
-control_tokens = [
-    "admin:env:FENRIR_HTTP_TOKEN_ADMIN",
-    "operator:env:FENRIR_HTTP_TOKEN_OPERATOR",
-    "viewer:env:FENRIR_HTTP_TOKEN_VIEWER",
-]
+idle_close_seconds = 3000
 
 [security.identity]
 provider = "embedded"
 environment = "development"
-instance_id = "local"
 
 # Password policy for first-time setup (relaxed for local dev)
 [security.password_policy]
@@ -70,126 +16,20 @@ require_special = false
 check_common_passwords = false
 
 [security.identity.embedded]
-storage = "db"  # oder "file" (default)
+storage = "db"
 store_path = "/opt/fenrir/development/tmp/identity/store.json"
-audience = "fenrir-control-plane"
-
-[security.identity.external]
-base_url = "http://127.0.0.1:8081"
-jwks_url = "http://127.0.0.1:8081/jwks.json"
-auth_token = "env:FENRIR_IDENTITY_TOKEN"
-jwks_refresh_seconds = 300
-audience = "fenrir-control-plane"
-
-[security.session]
-lifetime_seconds = 3600
-idle_timeout_seconds = 900
-cleanup_interval_seconds = 300
 
 [security.service_tokens]
-lifetime_seconds = 900
 idle_timeout_seconds = 850
 cleanup_interval_seconds = 50
 
-[db]
-default_engine = "postgres"
-
-[db.runtime]
-mode = "embedded" # external | embedded
-
-[db.runtime.embedded]
-engine = "postgres" # sqlite | postgres
-
 [db.runtime.embedded.sqlite]
 file_path = "/opt/fenrir/development/tmp/runtime/db/fenrir.db"
-# vacuum_interval_seconds = 0
 
 [db.runtime.embedded.postgres]
 data_dir = "runtime/db/postgres"
 binary_path = "/opt/homebrew/opt/postgresql@16/bin/postgres"
 
-[db.runtime.embedded.postgres.port_range]
-min = 55432
-max = 55442
-
-[db.connections.postgres]
-uri = "env:FENRIR_DB_POSTGRES_URI"
-
-[db.connections.postgres.pool]
-max = 16
-timeout_ms = 5000
-
-[db.schema]
-export_dir = "/opt/fenrir/development/tmp/schemas"
-import_dir = "/opt/fenrir/development/tmp/schemas"
-auto_backup = true  # Vor Import automatisch Backup machen
-
-[telemetry.tracing]
-level = "info"
-
-[telemetry.metrics]
-enabled = true
-
-[telemetry.health]
-enabled = true
-
-[telemetry.system]
-enabled = true
-interval_ms = 5000
-
-[telemetry.history]
-retention_days = 1
-persist_interval_seconds = 120
-sample_interval_seconds = 30
-
-[audit]
-enabled = true
-buffer_capacity = 2048
-
 [audit.storage]
 path = "/opt/fenrir/development/tmp/runtime/audit/fenrir-audit-history.json"
 retention_days = 1
-persist_interval_seconds = 30
-
-[cli]
-prompt_theme = "default"
-
-#[modules]
-#bootstrap = ["fenrir-api"]
-
-[modules.registry]
-url = "http://localhost:8443"
-allow_offline = false
-offline_dirs = []
-auth_token = "env:FENRIR_REGISTRY_TOKEN"
-
-[modules.registry.tls]
-# ca_cert_path = "config/certs/registry-ca.pem"
-# client_cert_path = "config/certs/fenrir-client.crt"
-# client_key_path = "config/certs/fenrir-client.key"
-accept_invalid_certs = false
-
-[modules.runtime]
-# stub = expiremtel (fake engine)
-engine = "process"
-default_service_scopes = ["db:read"]
-
-[modules.runtime.ports]
-strategy = "dynamic"
-
-[modules.runtime.ports.range]
-min = 41000
-max = 46000
-
-
-[modules.storage]
-install_dir = "/Users/jfurocket/Documents/personal/modules"
-cache_dir = "/Users/jfurocket/Documents/personal/modules/.cache"
-
-[modules.dev_sources]
-base_path = "/opt/fenrir/development/modules/"
-
-[modules.trust]
-require_signature = false
-allowed_signers = ["module-registry"]
-keyring_path = "config/modules/keyring.json"

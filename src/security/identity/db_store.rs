@@ -392,7 +392,7 @@ impl DbIdentityStore {
     // === Row parsing helpers ===
 
     fn parse_key_row(&self, row: &[String]) -> Result<IdentityKeyMaterial, IdentityError> {
-        let key_id = row.get(0).cloned().unwrap_or_default();
+        let key_id = row.first().cloned().unwrap_or_default();
         let secret_b64 = row.get(1).cloned().unwrap_or_default();
         let public_b64 = row.get(2).cloned().unwrap_or_default();
         let created_str = row.get(3).cloned().unwrap_or_default();
@@ -402,15 +402,12 @@ impl DbIdentityStore {
         let created_at = parse_timestamp(&created_str)?;
 
         Ok(IdentityKeyMaterial::from_parts(
-            key_id,
-            secret,
-            public,
-            created_at,
+            key_id, secret, public, created_at,
         ))
     }
 
     fn parse_user_row(&self, row: &[String]) -> Result<IdentityUserRecord, IdentityError> {
-        let user_id = row.get(0).cloned().unwrap_or_default();
+        let user_id = row.first().cloned().unwrap_or_default();
         let display_name = row.get(1).cloned().filter(|s| !s.is_empty());
         let role_str = row.get(2).cloned().unwrap_or_default();
         let password_hash = row.get(3).cloned().filter(|s| !s.is_empty());
@@ -425,10 +422,7 @@ impl DbIdentityStore {
             .cloned()
             .filter(|s| !s.is_empty())
             .and_then(|s| parse_timestamp(&s).ok());
-        let token_count = row
-            .get(7)
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0);
+        let token_count = row.get(7).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
         let last_token_fingerprint = row.get(8).cloned().filter(|s| !s.is_empty());
         let last_login_at = row
             .get(9)
@@ -455,7 +449,7 @@ impl DbIdentityStore {
     }
 
     fn parse_token_row(&self, row: &[String]) -> Result<IdentityTokenRecord, IdentityError> {
-        let token_id = row.get(0).cloned().unwrap_or_default();
+        let token_id = row.first().cloned().unwrap_or_default();
         let fingerprint = row.get(1).cloned().unwrap_or_default();
         let issued_at = parse_timestamp(&row.get(2).cloned().unwrap_or_default())?;
         let expires_at = parse_timestamp(&row.get(3).cloned().unwrap_or_default())?;
@@ -541,16 +535,20 @@ fn parse_timestamp(s: &str) -> Result<OffsetDateTime, IdentityError> {
 
     // Fallback: try to convert PostgreSQL format to RFC3339 and parse
     // Replace space with 'T' and ensure offset has colon
-    let normalized = s
-        .replace(' ', "T")
-        .chars()
-        .collect::<String>();
+    let normalized = s.replace(' ', "T").chars().collect::<String>();
 
     // Fix offset format if needed (e.g., "+01" -> "+01:00")
     let normalized = if normalized.ends_with("+00") || normalized.ends_with("-00") {
         format!("{}:00", normalized)
     } else if normalized.len() > 3 {
-        let last_three: String = normalized.chars().rev().take(3).collect::<String>().chars().rev().collect();
+        let last_three: String = normalized
+            .chars()
+            .rev()
+            .take(3)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
         if (last_three.starts_with('+') || last_three.starts_with('-'))
             && last_three[1..].chars().all(|c| c.is_ascii_digit())
         {

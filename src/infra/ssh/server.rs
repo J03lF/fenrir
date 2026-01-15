@@ -1,22 +1,20 @@
 use anyhow::{anyhow, Context, Result};
-use futures::FutureExt;
+use async_trait::async_trait;
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
-use std::future::Future;
 use std::io::Write;
 use std::path::Path;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use thrussh::server::{Auth, Handle as SessionHandle, Server, Session};
-use thrussh::{server, ChannelId, CryptoVec};
+use russh::server::{Auth, Handle as SessionHandle, Server, Session, Msg};
+use russh::{server, Channel, ChannelId, CryptoVec};
 use tokio::runtime::Handle as TokioHandle;
 use tokio::sync::mpsc;
 
-use crate::audit::AuditActor;
+use crate::audit::{AuditActor, AuditEvent, AuditMetadata, AuditOutcome};
 use crate::cli::commands::builtins;
 use crate::cli::commands::builtins::db_shell::{
-    self, build_completion_list_with_tables, RuntimeExecutor,
+    self, build_completion_list_with_tables, DbCompletionCatalog, RuntimeExecutor,
 };
 use crate::cli::commands::registry::{
     parse_confirmation_answer, CliDependencies, CommandOutcome, CommandOutput, CommandRegistry,
@@ -24,6 +22,7 @@ use crate::cli::commands::registry::{
 };
 use crate::cli::completion::{self, ContextualCompleter};
 use crate::config::{AppConfig, IdentityProviderKind};
+use crate::infra::telemetry;
 use crate::prompts::{self, PromptContext};
 use crate::security::auth::Role;
 use crate::security::identity::{IdentityError, IdentityUserProfile};
@@ -42,6 +41,7 @@ const HISTORY_MAX: usize = 200;
 const COMPLETION_DISPLAY_WIDTH: usize = 80;
 const COMPLETION_PADDING: usize = 2;
 const COMPLETION_MAX_VISIBLE: usize = 24;
+const DB_CONTINUATION_PROMPT: &str = "...> ";
 const SSH_TRANSPORT: &str = "ssh";
 const SSH_DEFAULT_ROLE: &str = "ssh";
 const SSH_PASSWORD_ENV: &str = "FENRIR_SSH_PASSWORD";
@@ -55,6 +55,7 @@ struct Handler {
     buffer: String,
     main_prompt: String,
     db_prompt: String,
+    db_continuation_prompt: String,
     skip_next_lf: bool,
     escape_state: EscapeState,
     config: Arc<AppConfig>,
@@ -68,8 +69,11 @@ struct Handler {
     db_session: Option<DbShellSession>,
     db_executor: Option<Arc<RuntimeExecutor>>,
     db_completion_words: Vec<String>,
+    db_completion_tables: HashSet<String>,
+    db_multiline_buffer: String,
     cursor: usize,
     pending_confirmation: Option<ConfirmationRequest>,
+    channel: Option<Channel<Msg>>,
 }
 
 struct ServiceProbe {
@@ -114,6 +118,46 @@ impl Handler {
             .unwrap_or_default();
         !env_pw.is_empty() && password == env_pw
     }
+
+    fn record_login_audit(&self, user: &str, success: bool, reason: Option<&str>) {
+        let role = self
+            .identity_profile
+            .as_ref()
+            .map(|p| p.role.as_str())
+            .unwrap_or("ssh");
+
+        let outcome = if success {
+            AuditOutcome::Success
+        } else {
+            AuditOutcome::Denied
+        };
+
+        let mut metadata = AuditMetadata::default().insert("transport", "ssh");
+        if let Some(r) = reason {
+            metadata = metadata.insert("reason", r);
+        }
+
+        if let Ok(event) = AuditEvent::builder()
+            .actor(AuditActor::User {
+                user_id: user.to_string(),
+                role: role.to_string(),
+            })
+            .action("ssh.login")
+            .target(format!("ssh://{}", user))
+            .outcome(outcome)
+            .metadata(metadata)
+            .build()
+        {
+            let _ = self.services.record_audit(event);
+        }
+    }
+}
+
+impl Drop for Handler {
+    fn drop(&mut self) {
+        // Decrement active SSH connection count
+        telemetry::decrement_counter("ssh.connections.active", 1);
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -130,90 +174,88 @@ enum ShellMode {
     DbShell,
 }
 
+#[async_trait]
 impl server::Handler for Handler {
     type Error = anyhow::Error;
-    type FutureAuth = Pin<Box<dyn Future<Output = Result<(Self, Auth), Self::Error>> + Send>>;
-    type FutureUnit = Pin<Box<dyn Future<Output = Result<(Self, Session), Self::Error>> + Send>>;
-    type FutureBool =
-        Pin<Box<dyn Future<Output = Result<(Self, Session, bool), Self::Error>> + Send>>;
 
-    fn finished_auth(self, auth: Auth) -> Self::FutureAuth {
-        futures::future::ready(Ok((self, auth))).boxed()
-    }
-    fn finished(self, session: Session) -> Self::FutureUnit {
-        futures::future::ready(Ok((self, session))).boxed()
-    }
-    fn finished_bool(self, b: bool, session: Session) -> Self::FutureBool {
-        futures::future::ready(Ok((self, session, b))).boxed()
-    }
-
-    fn auth_password(mut self, user: &str, password: &str) -> Self::FutureAuth {
+    async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
         if self.identity_required {
-            let user = user.to_string();
-            let password = password.to_string();
             let allowed_user = self.config.server.ssh.user.clone();
 
-            async move {
-                // Only allow the configured user (from config/FENRIR_USER)
-                if user != allowed_user {
-                    warn!(
-                        ssh_user = %user,
-                        allowed_user = %allowed_user,
-                        "login rejected: user not authorized"
-                    );
-                    return Ok((self, Auth::Reject));
-                }
-
-                match self.authenticate_identity(&user, &password) {
-                    Ok(true) => {
-                        // Normal authentication success
-                        Ok((self, Auth::Accept))
-                    }
-                    Ok(false) => {
-                        // Password not set - entering setup mode
-                        // Accept auth to allow channel for setup dialog
-                        Ok((self, Auth::Accept))
-                    }
-                    Err(err) => {
-                        warn!(ssh_user = %user, error = %err, "identity authentication rejected");
-                        Ok((self, Auth::Reject))
-                    }
-                }
-            }
-            .boxed()
-        } else {
-            let user = user.to_string();
-            let password = password.to_string();
-            async move {
-                if self.password_env_accepts(&user, &password) {
-                    Ok((self, Auth::Accept))
-                } else {
-                    Ok((self, Auth::Reject))
-                }
-            }
-            .boxed()
-        }
-    }
-
-    fn channel_open_session(self, channel: ChannelId, mut session: Session) -> Self::FutureUnit {
-        async move {
-            {
-                let mut writer = SessionWriter::new(&mut session, channel);
-                let _ = write!(&mut writer, "{}", prompts::clear_screen_sequence());
-                let _ = writeln!(&mut writer, "{}", prompts::banner());
-                let _ = writeln!(
-                    &mut writer,
-                    "{}",
-                    prompts::welcome_line(self.config.as_ref())
+            // Only allow the configured user (from config/FENRIR_USER)
+            if user != allowed_user {
+                warn!(
+                    ssh_user = %user,
+                    allowed_user = %allowed_user,
+                    "login rejected: user not authorized"
                 );
-                Handler::send_prompt(&mut session, channel, self.current_prompt());
+                self.record_login_audit(user, false, Some("user not authorized"));
+                return Ok(Auth::Reject { proceed_with_methods: None });
             }
-            Ok((self, session))
+
+            match self.authenticate_identity(user, password) {
+                Ok(true) => {
+                    // Normal authentication success
+                    self.record_login_audit(user, true, None);
+                    Ok(Auth::Accept)
+                }
+                Ok(false) => {
+                    // Password not set - entering setup mode
+                    // Accept auth to allow channel for setup dialog
+                    Ok(Auth::Accept)
+                }
+                Err(err) => {
+                    warn!(ssh_user = %user, error = %err, "identity authentication rejected");
+                    self.record_login_audit(user, false, Some(&err.to_string()));
+                    Ok(Auth::Reject { proceed_with_methods: None })
+                }
+            }
+        } else if self.password_env_accepts(user, password) {
+            self.record_login_audit(user, true, None);
+            Ok(Auth::Accept)
+        } else {
+            self.record_login_audit(user, false, Some("invalid credentials"));
+            Ok(Auth::Reject { proceed_with_methods: None })
         }
-        .boxed()
     }
 
-    fn data(mut self, channel: ChannelId, data: &[u8], mut session: Session) -> Self::FutureUnit {
+    async fn channel_open_session(
+        &mut self,
+        channel: Channel<Msg>,
+        _session: &mut Session,
+    ) -> Result<bool, Self::Error> {
+        self.channel = Some(channel);
+        Ok(true)
+    }
+
+    async fn shell_request(
+        &mut self,
+        channel: ChannelId,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let mut writer = SessionWriter::new(session, channel);
+        let prompt_context = self.prompt_context();
+        let _ = write!(&mut writer, "{}", prompts::clear_screen_sequence());
+        let _ = writeln!(
+            &mut writer,
+            "{}",
+            prompts::banner(self.config.as_ref(), &prompt_context)
+        );
+        let _ = writeln!(
+            &mut writer,
+            "{}",
+            prompts::welcome_line(self.config.as_ref())
+        );
+        Handler::send_prompt(session, channel, self.current_prompt());
+        Ok(())
+    }
+
+    async fn data(
+        &mut self,
+        channel: ChannelId,
+        data: &[u8],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
         let chunk = String::from_utf8_lossy(data);
         for ch in chunk.chars() {
             if self.skip_next_lf {
@@ -225,8 +267,8 @@ impl server::Handler for Handler {
             }
 
             if self.pending_confirmation.is_some() {
-                if !self.handle_confirmation_input(ch, channel, &mut session) {
-                    return self.finished(session);
+                if !self.handle_confirmation_input(ch, channel, session) {
+                    return Ok(());
                 }
                 continue;
             }
@@ -242,13 +284,13 @@ impl server::Handler for Handler {
                 }
                 EscapeState::Csi => {
                     if ch == 'A' {
-                        self.history_prev(&mut session, channel);
+                        self.history_prev(session, channel);
                     } else if ch == 'B' {
-                        self.history_next(&mut session, channel);
+                        self.history_next(session, channel);
                     } else if ch == 'C' {
-                        self.move_cursor_right(&mut session, channel);
+                        self.move_cursor_right(session, channel);
                     } else if ch == 'D' {
-                        self.move_cursor_left(&mut session, channel);
+                        self.move_cursor_left(session, channel);
                     }
                     if ('@'..='~').contains(&ch) {
                         self.escape_state = EscapeState::None;
@@ -266,25 +308,25 @@ impl server::Handler for Handler {
                 '\r' => {
                     self.skip_next_lf = true;
                     session.data(channel, CryptoVec::from_slice(b"\r\n"));
-                    if !self.process_buffer(channel, &mut session) {
-                        return self.finished(session);
+                    if !self.process_buffer(channel, session) {
+                        return Ok(());
                     }
                 }
                 '\n' => {
                     session.data(channel, CryptoVec::from_slice(b"\r\n"));
-                    if !self.process_buffer(channel, &mut session) {
-                        return self.finished(session);
+                    if !self.process_buffer(channel, session) {
+                        return Ok(());
                     }
                 }
                 '\t' => {
-                    self.handle_tab(channel, &mut session);
+                    self.handle_tab(channel, session);
                 }
                 '\u{8}' | '\u{7f}' => {
                     if let Some(prev) = self.buffer[..self.cursor].chars().next_back() {
                         let start = self.cursor - prev.len_utf8();
                         self.buffer.drain(start..self.cursor);
                         self.cursor = start;
-                        self.render_buffer(&mut session, channel);
+                        self.render_buffer(session, channel);
                     } else {
                         session.data(channel, CryptoVec::from_slice(b"\x07"));
                     }
@@ -294,7 +336,7 @@ impl server::Handler for Handler {
                     self.cursor = 0;
                     session.data(channel, CryptoVec::from_slice(b"^C\r\n"));
                     self.history_index = None;
-                    Handler::send_prompt(&mut session, channel, self.current_prompt());
+                    Handler::send_prompt(session, channel, self.current_prompt());
                 }
                 ch => {
                     if ch.is_control() {
@@ -306,17 +348,24 @@ impl server::Handler for Handler {
                     self.buffer.insert_str(insert_at, encoded);
                     self.cursor += encoded.len();
                     self.history_index = None;
-                    self.render_buffer(&mut session, channel);
+                    self.render_buffer(session, channel);
                 }
             }
         }
-        self.finished(session)
+        Ok(())
     }
 }
 
 impl Handler {
     fn refresh_prompts(&mut self) {
-        // Use profile name for host if set, otherwise server_name
+        let prompt_ctx = self.prompt_context();
+        let prompts = prompts::prompt_set(self.config.as_ref(), &prompt_ctx);
+        self.main_prompt = prompts.main_transport;
+        self.db_prompt = prompts.db_transport;
+        self.db_continuation_prompt = DB_CONTINUATION_PROMPT.to_string();
+    }
+
+    fn prompt_context(&self) -> PromptContext {
         let host = self
             .config
             .app
@@ -325,16 +374,12 @@ impl Handler {
             .filter(|p| !p.is_empty())
             .cloned()
             .unwrap_or_else(|| self.config.server.ssh.server_name.clone());
-
-        let prompt_ctx = PromptContext {
+        PromptContext {
             user: self.username.clone(),
             host,
             role: self.role_label.clone(),
             transport: SSH_TRANSPORT.to_string(),
-        };
-        let prompts = prompts::prompt_set(self.config.as_ref(), &prompt_ctx);
-        self.main_prompt = prompts.main_transport;
-        self.db_prompt = prompts.db_transport;
+        }
     }
 
     fn set_identity_context(&mut self, profile: IdentityUserProfile) {
@@ -390,22 +435,23 @@ impl Handler {
     }
 
     fn process_buffer(&mut self, channel: ChannelId, session: &mut Session) -> bool {
-        let cmd = self.buffer.trim().to_string();
+        let raw_line = self.buffer.clone();
+        let cmd = raw_line.trim().to_string();
         self.buffer.clear();
         self.cursor = 0;
         self.history_index = None;
         let mut ssh_probe = ServiceProbe::new(&self.services, "ssh-server");
+
+        if matches!(self.mode, ShellMode::DbShell) {
+            return self.process_db_line(raw_line, cmd, channel, session, &mut ssh_probe);
+        }
 
         if cmd.is_empty() {
             Handler::send_prompt(session, channel, self.current_prompt());
             ssh_probe.mark_success();
             return true;
         }
-
         self.record_history(&cmd);
-        if matches!(self.mode, ShellMode::DbShell) {
-            return self.process_db_command(cmd, channel, session, &mut ssh_probe);
-        }
         let mut parts = cmd.split_whitespace();
         if let Some(name) = parts.next() {
             let args: Vec<&str> = parts.collect();
@@ -421,7 +467,8 @@ impl Handler {
                     self.handle_command_outcome(outcome, channel, session)
                 }
                 Ok(CommandStatus::NotFound) => {
-                    let _ = writeln!(&mut writer, "{}", cli_shell_runner::command_unknown(name));
+                    let suggestions = self.registry.find_similar(name);
+                    self.render_command_not_found(&mut writer, name, suggestions);
                     Handler::send_prompt(session, channel, self.current_prompt());
                     true
                 }
@@ -442,9 +489,86 @@ impl Handler {
         session.data(channel, CryptoVec::from_slice(prompt.as_bytes()));
     }
 
+    fn render_command_not_found(
+        &self,
+        writer: &mut SessionWriter,
+        command: &str,
+        suggestions: Vec<String>,
+    ) {
+        // Compact inline format
+        let _ = writeln!(
+            writer,
+            "\x1b[38;5;203m✗\x1b[0m Command '\x1b[38;5;79m{}\x1b[0m' not found\r",
+            command
+        );
+
+        if !suggestions.is_empty() {
+            let suggestions_str = suggestions
+                .iter()
+                .map(|s| format!("\x1b[38;5;79m{}\x1b[0m", s))
+                .collect::<Vec<_>>()
+                .join("\x1b[38;5;245m,\x1b[0m ");
+
+            let _ = writeln!(
+                writer,
+                "  \x1b[38;5;245m→\x1b[0m Did you mean: {}\r",
+                suggestions_str
+            );
+        }
+    }
+
+    fn process_db_line(
+        &mut self,
+        raw_line: String,
+        trimmed_line: String,
+        channel: ChannelId,
+        session: &mut Session,
+        ssh_probe: &mut ServiceProbe,
+    ) -> bool {
+        let trimmed = trimmed_line.as_str();
+        let has_buffer = !self.db_multiline_buffer.is_empty();
+
+        if trimmed.is_empty() {
+            Handler::send_prompt(session, channel, self.current_prompt());
+            ssh_probe.mark_success();
+            return true;
+        }
+
+        let normalized = trimmed_line.trim_end_matches(';').trim().to_string();
+
+        if !has_buffer && self.handle_db_refresh_request(&normalized, channel, session) {
+            Handler::send_prompt(session, channel, self.current_prompt());
+            ssh_probe.mark_success();
+            return true;
+        }
+
+        if !has_buffer && Self::is_immediate_db_command(&normalized) {
+            self.record_history(&normalized);
+            return self.process_db_command(&normalized, channel, session, ssh_probe);
+        }
+
+        if !trimmed.is_empty() {
+            if !self.db_multiline_buffer.is_empty() {
+                self.db_multiline_buffer.push('\n');
+            }
+            self.db_multiline_buffer.push_str(raw_line.trim_end());
+        }
+
+        if trimmed.ends_with(';') {
+            let statement = self.db_multiline_buffer.trim().to_string();
+            self.db_multiline_buffer.clear();
+            self.record_history(&statement);
+            return self.process_db_command(&statement, channel, session, ssh_probe);
+        }
+
+        Handler::send_prompt(session, channel, self.current_prompt());
+        ssh_probe.mark_success();
+        true
+    }
+
     fn process_db_command(
         &mut self,
-        command: String,
+        command: &str,
         channel: ChannelId,
         session: &mut Session,
         ssh_probe: &mut ServiceProbe,
@@ -458,11 +582,13 @@ impl Handler {
             ssh_probe.mark_success();
             return true;
         }
+        self.db_multiline_buffer.clear();
 
         if self.db_session.is_none() {
             if !self.services.db_shell.is_enabled() {
                 let _ = writeln!(&mut writer, "{}", ssh_messages::db_shell_disabled_return());
                 self.mode = ShellMode::Main;
+                self.db_multiline_buffer.clear();
                 Handler::send_prompt(session, channel, self.current_prompt());
                 db_probe.mark_success();
                 ssh_probe.mark_success();
@@ -501,6 +627,7 @@ impl Handler {
                     ssh_messages::db_shell_disabled_return_short()
                 );
                 self.mode = ShellMode::Main;
+                self.db_multiline_buffer.clear();
                 self.db_session = None;
                 self.db_executor = None;
                 Handler::send_prompt(session, channel, self.current_prompt());
@@ -521,9 +648,16 @@ impl Handler {
                         || cmd_upper.contains("DROP VIEW");
                     if needs_refresh {
                         let mut sink = std::io::sink();
-                        let (words, _) =
-                            build_completion_list_with_tables(db_session, executor.as_ref(), &mut sink);
-                        self.db_completion_words = words;
+                        let DbCompletionCatalog {
+                            entries,
+                            table_names,
+                        } = build_completion_list_with_tables(
+                            db_session,
+                            executor.as_ref(),
+                            &mut sink,
+                        );
+                        self.db_completion_tables = table_names.iter().cloned().collect();
+                        self.db_completion_words = entries;
                     }
                     Handler::send_prompt(session, channel, self.current_prompt());
                     db_probe.mark_success();
@@ -533,6 +667,7 @@ impl Handler {
                 Ok(false) => {
                     self.mode = ShellMode::Main;
                     self.history_index = None;
+                    self.db_multiline_buffer.clear();
                     self.db_session = None;
                     self.db_executor = None;
                     self.services.registry().set_status(
@@ -564,6 +699,60 @@ impl Handler {
             ssh_probe.mark_success();
             true
         }
+    }
+
+    fn handle_db_refresh_request(
+        &mut self,
+        normalized: &str,
+        channel: ChannelId,
+        session: &mut Session,
+    ) -> bool {
+        if !Self::is_refresh_command(normalized) {
+            return false;
+        }
+        if let (Some(db_session), Some(executor)) =
+            (self.db_session.as_ref(), self.db_executor.as_ref())
+        {
+            let mut writer = SessionWriter::new(session, channel);
+            let DbCompletionCatalog {
+                entries,
+                table_names,
+            } = build_completion_list_with_tables(db_session, executor.as_ref(), &mut writer);
+            let table_count = table_names.len();
+            self.db_completion_tables = table_names.iter().cloned().collect();
+            self.db_completion_words = entries;
+            let _ = writeln!(&mut writer, "completion refreshed: {} tables", table_count);
+        } else {
+            let mut writer = SessionWriter::new(session, channel);
+            let _ = writeln!(
+                &mut writer,
+                "completion refresh unavailable (session not ready)"
+            );
+        }
+        true
+    }
+
+    fn is_refresh_command(command: &str) -> bool {
+        command.eq_ignore_ascii_case(r"\refresh")
+            || command.eq_ignore_ascii_case("/refresh")
+            || command.eq_ignore_ascii_case("refresh")
+    }
+
+    fn is_immediate_db_command(command: &str) -> bool {
+        if command.is_empty() {
+            return false;
+        }
+        let lower = command.to_ascii_lowercase();
+        if matches!(lower.as_str(), "help" | "exit" | "quit") {
+            return true;
+        }
+        if command.starts_with('\\') {
+            return true;
+        }
+        if command.starts_with('/') && !command.contains(' ') {
+            return true;
+        }
+        false
     }
 
     fn handle_tab(&mut self, channel: ChannelId, session: &mut Session) {
@@ -745,7 +934,16 @@ impl Handler {
             session.data(channel, CryptoVec::from_slice(b"\x07"));
             return;
         }
-        let (start, matches) = completion::completion_matches(&commands, &self.buffer, self.cursor);
+        let (start, matches) = if self.db_completion_tables.is_empty() {
+            completion::completion_matches(commands, &self.buffer, self.cursor)
+        } else {
+            completion::db_shell_completion_matches(
+                commands,
+                &self.db_completion_tables,
+                &self.buffer,
+                self.cursor,
+            )
+        };
         if matches.is_empty() {
             session.data(channel, CryptoVec::from_slice(b"\x07"));
             return;
@@ -789,8 +987,12 @@ impl Handler {
             let visible: Vec<_> = matches.iter().take(COMPLETION_MAX_VISIBLE).collect();
 
             let max_len = visible.iter().map(|s| s.len()).max().unwrap_or(0);
-            let col_width = max_len.saturating_add(COMPLETION_PADDING).max(COMPLETION_PADDING);
-            let cols = (COMPLETION_DISPLAY_WIDTH / col_width).max(1).min(visible.len());
+            let col_width = max_len
+                .saturating_add(COMPLETION_PADDING)
+                .max(COMPLETION_PADDING);
+            let cols = (COMPLETION_DISPLAY_WIDTH / col_width)
+                .max(1)
+                .min(visible.len());
 
             for chunk in visible.chunks(cols) {
                 for (i, entry) in chunk.iter().enumerate() {
@@ -817,7 +1019,13 @@ impl Handler {
     fn current_prompt(&self) -> &str {
         match self.mode {
             ShellMode::Main => &self.main_prompt,
-            ShellMode::DbShell => &self.db_prompt,
+            ShellMode::DbShell => {
+                if self.db_multiline_buffer.is_empty() {
+                    &self.db_prompt
+                } else {
+                    &self.db_continuation_prompt
+                }
+            }
         }
     }
 
@@ -901,6 +1109,7 @@ impl Handler {
                 self.buffer.clear();
                 self.history_index = None;
                 self.cursor = 0;
+                self.db_multiline_buffer.clear();
                 let db_session = self.services.db_shell.create_session();
                 let current_engine = db_session.current_engine();
                 let engines = db_session
@@ -913,12 +1122,17 @@ impl Handler {
                         let executor = Arc::new(executor);
                         // Load table names for completion
                         let mut sink = std::io::sink();
-                        let (words, table_count) = build_completion_list_with_tables(
+                        let DbCompletionCatalog {
+                            entries,
+                            table_names,
+                        } = build_completion_list_with_tables(
                             &db_session,
                             executor.as_ref(),
                             &mut sink,
                         );
-                        self.db_completion_words = words;
+                        let table_count = table_names.len();
+                        self.db_completion_tables = table_names.iter().cloned().collect();
+                        self.db_completion_words = entries;
                         self.db_executor = Some(executor);
                         self.db_session = Some(db_session);
                         let mut writer = SessionWriter::new(session, channel);
@@ -941,11 +1155,8 @@ impl Handler {
                             ssh_messages::db_shell_force_hint(DESTRUCTIVE_FORCE_WARNING)
                         );
                         if table_count > 0 {
-                            let _ = writeln!(
-                                &mut writer,
-                                "completion: {} tables loaded",
-                                table_count
-                            );
+                            let _ =
+                                writeln!(&mut writer, "completion: {} tables loaded", table_count);
                         }
                         Handler::send_prompt(session, channel, &self.db_prompt);
                     }
@@ -966,7 +1177,7 @@ impl Handler {
             CommandOutcome::AsyncTask(task) => {
                 let prompt = format!("\r\n{}", self.current_prompt());
                 let output_sink = self.dependencies.output();
-                let mut handle = session.handle();
+                let handle = session.handle();
 
                 tokio::spawn(async move {
                     let result = task.await;
@@ -1168,8 +1379,12 @@ impl Handler {
 }
 
 pub async fn start(cfg: &Arc<AppConfig>, services: &Arc<AppServices>) -> Result<()> {
+    use russh::MethodSet;
+    
     let config = server::Config {
         auth_rejection_time: Duration::from_secs(1),
+        // Enable password authentication
+        methods: MethodSet::PASSWORD,
         ..Default::default()
     };
     let mut config = config;
@@ -1187,7 +1402,11 @@ pub async fn start(cfg: &Arc<AppConfig>, services: &Arc<AppServices>) -> Result<
     }
     impl Server for Factory {
         type Handler = Handler;
-        fn new(&mut self, _peer_addr: Option<std::net::SocketAddr>) -> Self::Handler {
+        fn new_client(&mut self, _peer_addr: Option<std::net::SocketAddr>) -> Self::Handler {
+            // Track SSH connection count
+            telemetry::increment_counter("ssh.connections.active", 1);
+            telemetry::record_counter("ssh.connections.total", 1);
+
             let services = Arc::clone(&self.services);
             let config = Arc::clone(&self.config);
             let dependencies =
@@ -1208,6 +1427,7 @@ pub async fn start(cfg: &Arc<AppConfig>, services: &Arc<AppServices>) -> Result<
                 buffer: String::new(),
                 main_prompt: String::new(),
                 db_prompt: String::new(),
+                db_continuation_prompt: DB_CONTINUATION_PROMPT.to_string(),
                 skip_next_lf: false,
                 escape_state: EscapeState::None,
                 config,
@@ -1221,8 +1441,11 @@ pub async fn start(cfg: &Arc<AppConfig>, services: &Arc<AppServices>) -> Result<
                 db_session: None,
                 db_executor: None,
                 db_completion_words: Vec::new(),
+                db_completion_tables: HashSet::new(),
+                db_multiline_buffer: String::new(),
                 cursor: 0,
                 pending_confirmation: None,
+                channel: None,
             };
             handler.refresh_prompts();
             handler
@@ -1238,7 +1461,7 @@ pub async fn start(cfg: &Arc<AppConfig>, services: &Arc<AppServices>) -> Result<
     );
 
     let identity_required = should_enforce_identity(cfg.as_ref());
-    let server = Factory {
+    let mut server = Factory {
         username: cfg.server.ssh.user.clone(),
         password_env: if identity_required {
             None
@@ -1249,7 +1472,7 @@ pub async fn start(cfg: &Arc<AppConfig>, services: &Arc<AppServices>) -> Result<
         config: Arc::clone(cfg),
         services: Arc::clone(services),
     };
-    match thrussh::server::run(config, &bind_addr, server).await {
+    match server.run_on_address(config, &bind_addr).await {
         Ok(()) => {
             services.registry().set_status(
                 "ssh-server",
@@ -1262,7 +1485,7 @@ pub async fn start(cfg: &Arc<AppConfig>, services: &Arc<AppServices>) -> Result<
             services.registry().set_status(
                 "ssh-server",
                 ServiceStatus::Failed,
-                Some(ssh_messages::service_failure_note(&err)),
+                Some(ssh_messages::service_failure_note(err.to_string())),
             );
             Err(err.into())
         }
@@ -1288,43 +1511,44 @@ fn should_enforce_identity(cfg: &AppConfig) -> bool {
     }
 }
 
-fn load_or_create_host_key(path: &str) -> Result<thrussh_keys::key::KeyPair> {
+fn load_or_create_host_key(path: &str) -> Result<russh_keys::key::KeyPair> {
     let key_path = Path::new(path);
     if key_path.exists() {
-        if let Ok(key) = thrussh_keys::load_secret_key(key_path, None) {
-            return Ok(key);
+        // Try to load as OpenSSH format
+        match russh_keys::load_secret_key(key_path, None) {
+            Ok(key) => return Ok(key),
+            Err(e) => {
+                tracing::warn!(
+                    path = %key_path.display(),
+                    error = %e,
+                    "failed to load host key, regenerating"
+                );
+            }
         }
-        let bytes = fs::read(key_path)?;
-        let mut secret = thrussh_keys::key::ed25519::SecretKey::new_zeroed();
-        if bytes.len() != secret.key.len() {
-            return Err(anyhow!(
-                "unsupported host key format in {}",
-                key_path.display()
-            ));
-        }
-        secret.key.clone_from_slice(&bytes);
-        return Ok(thrussh_keys::key::KeyPair::Ed25519(secret));
     }
 
     if let Some(parent) = key_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let key = thrussh_keys::key::KeyPair::generate_ed25519()
+    
+    let key = russh_keys::key::KeyPair::generate_ed25519()
         .ok_or_else(|| anyhow!("failed to generate ed25519 host key"))?;
-    if let thrussh_keys::key::KeyPair::Ed25519(secret) = &key {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(key_path)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
-        }
-        file.write_all(&secret.key)?;
-        tracing::info!(path = %key_path.display(), "generated new SSH host key");
+    
+    // Save the key in PKCS8 PEM format
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(key_path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
     }
+    russh_keys::encode_pkcs8_pem(&key, &mut file)
+        .map_err(|e| anyhow!("failed to write host key: {}", e))?;
+    tracing::info!(path = %key_path.display(), "generated new SSH host key");
+    
     Ok(key)
 }
 
@@ -1336,7 +1560,6 @@ struct SshCommandOutput {
 impl SshCommandOutput {
     fn new(handle: SessionHandle, channel: ChannelId) -> Self {
         let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let mut handle = handle;
         let runtime = TokioHandle::current();
         runtime.spawn(async move {
             while let Some(buf) = rx.recv().await {

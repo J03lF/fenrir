@@ -1,70 +1,24 @@
 app = { name = "fenrir", version = "1.0.0" }
 
-[server]
-enable_http = true
-enable_grpc = true
-
 [server.ssh]
-host = "127.0.0.1"
-port = 2222
-user = "test"
 server_name = "fenrir-prod"
-host_key_path = "keys/server/ssh/host_ed25519"
 idle_close_seconds = 30
-
-[server.ssh.tls]
-allowed_ciphers = []
-
-[server.http]
-host = "127.0.0.1"
-port = 8080
 
 [server.http.tls]
 enabled = true
-cert_path = "config/certs/server.crt"
-key_path = "config/certs/server.key"
-cipher_suites = ["TLS_AES_256_GCM_SHA384", "TLS_AES_128_GCM_SHA256"]
-
-[server.grpc]
-host = "127.0.0.1"
-port = 50051
 
 [server.grpc.tls]
 enabled = true
-cert_path = "config/certs/server-grpc.crt"
-key_path = "config/certs/server-grpc.key"
-cipher_suites = ["TLS_AES_256_GCM_SHA384", "TLS_AES_128_GCM_SHA256"]
-
-[security]
-allowed_ciphers = ["AES-GCM", "XChaCha20-Poly1305"]
-
-[security.kdf]
-algorithm = "argon2id"
-version = 1
-
-[security.jwt]
-issuer = "fenrir"
-audience = "fenrir-clients"
-exp_seconds = 3600
 
 [security.http]
 control_tokens = []
 
 [security.identity]
-provider = "external"
 environment = "prod"
-instance_id = "local"
-
-[security.identity.embedded]
-store_path = "identity/store.json"
-audience = "fenrir-control-plane"
 
 [security.identity.external]
 base_url = "https://127.0.0.1:8081"
 jwks_url = "https://127.0.0.1:8081/jwks.json"
-auth_token = "env:FENRIR_IDENTITY_TOKEN"
-jwks_refresh_seconds = 300
-audience = "fenrir-control-plane"
 
 [security.identity.external.tls]
 ca_cert_path = "env:FENRIR_IDENTITY_TLS_CA"
@@ -72,77 +26,14 @@ client_cert_path = "env:FENRIR_IDENTITY_TLS_CERT"
 client_key_path = "env:FENRIR_IDENTITY_TLS_KEY"
 accept_invalid_certs = false
 
-[security.session]
-lifetime_seconds = 3600
-idle_timeout_seconds = 900
-cleanup_interval_seconds = 300
-
-[db]
-default_engine = "postgres"
-
-[db.connections.postgres]
-uri = "env:FENRIR_DB_POSTGRES_URI"
-
-[db.connections.postgres.pool]
-max = 16
-timeout_ms = 5000
-
 [telemetry.tracing]
 level = "error"
 
-[telemetry.metrics]
-enabled = true
-
-[telemetry.health]
-enabled = true
-
-[telemetry.system]
-enabled = true
-interval_ms = 5000
-
-[telemetry.history]
-retention_days = 1
-persist_interval_seconds = 60
-sample_interval_seconds = 30
-
-[audit]
-enabled = true
-buffer_capacity = 2048
-
-[audit.storage]
-path = "runtime/audit/fenrir-audit-history.json"
-retention_days = 2
-persist_interval_seconds = 30
-
-[cli]
-prompt_theme = "default"
-
 [modules]
 bootstrap = ["fenrir-api"]
-
-[modules.registry]
-url = "http://localhost:8443"
-allow_offline = false
-offline_dirs = []
-auth_token = "env:FENRIR_REGISTRY_TOKEN"
 
 [modules.registry.tls]
 ca_cert_path = "env:FENRIR_IDENTITY_TLS_CA"
 client_cert_path = "env:FENRIR_IDENTITY_TLS_CERT"
 client_key_path = "env:FENRIR_IDENTITY_TLS_KEY"
 accept_invalid_certs = true
-
-[modules.runtime]
-engine = "process"
-
-[modules.storage]
-install_dir = "/Users/jfurocket/Documents/personal/modules"
-cache_dir = "/Users/jfurocket/Documents/personal/modules/.cache"
-
-[modules.dev_sources]
-base_path = "/opt/fenrir/development/modules/"
-
-[modules.trust]
-require_signature = false
-allowed_signers = ["module-registry"]
-keyring_path = "config/modules/keyring.json"

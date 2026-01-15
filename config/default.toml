@@ -107,6 +107,16 @@ default_engine = "postgres"
 [db.runtime]
 mode = "embedded" # external | embedded
 
+[db.backup]
+enabled = true
+schedule = "daily"          # hourly | daily | weekly
+retention_count = 7         # Anzahl Backups behalten
+path = "backups"            # Backup-Verzeichnis
+pg_basebackup_path = "/opt/homebrew/Cellar/postgresql@16/16.11/bin/pg_basebackup"
+min_disk_space_mb = 500     # Min. freier Speicher
+require_healthy = true      # DB muss healthy sein
+verify_integrity = true     # Checksum prüfen
+
 [db.runtime.embedded]
 engine = "postgres" # sqlite | postgres
 
@@ -121,6 +131,12 @@ binary_path = "postgres"
 [db.runtime.embedded.postgres.port_range]
 min = 55432
 max = 55442
+
+# Security settings for embedded database
+[db.runtime.embedded.security]
+auth_method = "scram-sha-256"  # "trust" (legacy) or "scram-sha-256" (secure)
+prefer_unix_socket = true       # Use Unix socket instead of TCP (more secure)
+credential_rotation_hours = 0   # 0 = disabled, 24 = daily rotation
 
 [db.connections.postgres]
 uri = "env:FENRIR_DB_POSTGRES_URI"

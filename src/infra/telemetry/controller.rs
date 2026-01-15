@@ -560,6 +560,24 @@ pub fn set_counter(name: &str, value: u64) {
     }
 }
 
+/// Increment a counter by a delta (alias for record_counter)
+pub fn increment_counter(name: &str, delta: u64) {
+    record_counter(name, delta);
+}
+
+/// Decrement a counter by a delta (saturating subtraction)
+pub fn decrement_counter(name: &str, delta: u64) {
+    if let Some(state) = TELEMETRY.get() {
+        if !state.metrics_enabled.load(Ordering::Acquire) {
+            return;
+        }
+        if let Ok(mut metrics) = state.metrics.lock() {
+            let counter = metrics.entry(name.to_string()).or_insert(0);
+            *counter = counter.saturating_sub(delta);
+        }
+    }
+}
+
 pub fn update_service_resource(service_id: &str, sample: ServiceResourceSample) {
     if sample.cpu_percent.is_none()
         && sample.memory_bytes.is_none()

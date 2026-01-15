@@ -179,7 +179,12 @@ async fn stop_services(client: &Client, base_url: &str, token: &str) -> Result<(
     .await
 }
 
-async fn db_runtime_status(client: &Client, base_url: &str, token: &str, tail: usize) -> Result<()> {
+async fn db_runtime_status(
+    client: &Client,
+    base_url: &str,
+    token: &str,
+    tail: usize,
+) -> Result<()> {
     let url = format!("{base_url}/services/db-runtime/status?tail={tail}");
     let resp = client
         .get(&url)

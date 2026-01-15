@@ -1,51 +1,16 @@
-app = { name = "fenrir", version = "0.1.4" }
-
 [server]
-enable_http = false
-enable_grpc = false
-
-[server.ssh]
-host = "127.0.0.1"
-port = 2222
-user = "test"
-server_name = "fenrir-Test"
-host_key_path = "keys/server/ssh/host_ed25519"
-idle_close_seconds = 300
+enable_http = true
+enable_grpc = true
 
 [server.ssh.tls]
-allowed_ciphers = []
 host_key_reload_seconds = 600
 
-[server.http]
-host = "127.0.0.1"
-port = 8080
-
 [server.http.tls]
-enabled = false
-cert_path = "config/certs/server.crt"
-key_path = "config/certs/server.key"
-cipher_suites = ["TLS_AES_256_GCM_SHA384", "TLS_AES_128_GCM_SHA256"]
 reload_interval_seconds = 300
-
-[security]
-allowed_ciphers = ["AES-GCM", "XChaCha20-Poly1305"]
-
-[security.kdf]
-algorithm = "argon2id"
-version = 1
-
-[security.jwt]
-issuer = "fenrir"
-audience = "fenrir-clients"
-exp_seconds = 3600
-
-[security.http]
-control_tokens = []
 
 [security.identity]
 provider = "embedded"
 environment = "dev"
-instance_id = "local"
 
 # Password policy for first-time setup (relaxed for dev)
 [security.password_policy]
@@ -59,54 +24,10 @@ check_common_passwords = false
 
 [security.identity.embedded]
 store_path = "identity/store-dev.json"
-audience = "fenrir-control-plane"
-
-[security.identity.external]
-base_url = "https://127.0.0.1:8081"
-jwks_url = "https://127.0.0.1:8081/jwks.json"
-auth_token = "env:FENRIR_IDENTITY_TOKEN"
-jwks_refresh_seconds = 300
-audience = "fenrir-control-plane"
-
-[db]
-default_engine = "postgres"
-
-[db.connections.postgres]
-uri = "env:FENRIR_DB_POSTGRES_URI"
-
-[db.connections.postgres.pool]
-max = 16
-timeout_ms = 5000
-
-
-[telemetry.tracing]
-level = "info"
 
 [telemetry.metrics]
-enabled = false
-
-[telemetry.health]
 enabled = true
-
-[telemetry.system]
-enabled = true
-interval_ms = 5000
-
-[telemetry.history]
-retention_days = 1
-persist_interval_seconds = 60
-sample_interval_seconds = 30
 
 [audit]
 enabled = true
-
-[audit.storage]
-path = "runtime/audit/fenrir-audit-history.json"
-retention_days = 2
-persist_interval_seconds = 30
-
-[cli]
-prompt_theme = "default"
-
-[modules.dev_sources]
-base_path = "/opt/fenrir/development/modules/"
+buffer_capacity = 2048

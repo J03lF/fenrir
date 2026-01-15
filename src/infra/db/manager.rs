@@ -35,8 +35,7 @@ pub fn build_adapters(
     if let Some(override_cfg) = runtime_override {
         match override_cfg.engine {
             DbEngine::Sqlite => {
-                let adapter =
-                    adapters::sqlite::adapter::SqliteAdapter::new(&override_cfg.uri)?;
+                let adapter = adapters::sqlite::adapter::SqliteAdapter::new(&override_cfg.uri)?;
                 map.insert(DbEngine::Sqlite, Arc::new(adapter));
             }
             DbEngine::Postgres => {
@@ -92,7 +91,9 @@ fn build_postgres(settings: &DbConnectionSettings) -> Result<adapters::postgres:
     adapters::postgres::PostgresAdapter::new(&uri, settings.pool_max(), settings.pool_timeout())
 }
 
-fn build_sqlite(settings: &DbConnectionSettings) -> Result<adapters::sqlite::adapter::SqliteAdapter> {
+fn build_sqlite(
+    settings: &DbConnectionSettings,
+) -> Result<adapters::sqlite::adapter::SqliteAdapter> {
     let uri = settings.resolve_uri("db.connections.sqlite.uri")?;
     adapters::sqlite::adapter::SqliteAdapter::new(&uri)
 }

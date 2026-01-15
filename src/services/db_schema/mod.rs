@@ -42,8 +42,14 @@ pub struct ColumnBlueprint {
 pub enum MigrationOp {
     CreateTable(TableBlueprint),
     DropTable(String),
-    AddColumn { table: String, column: ColumnBlueprint },
-    DropColumn { table: String, column: String },
+    AddColumn {
+        table: String,
+        column: ColumnBlueprint,
+    },
+    DropColumn {
+        table: String,
+        column: String,
+    },
     AlterColumn {
         table: String,
         column: String,
@@ -108,7 +114,10 @@ impl DatabaseBlueprint {
                 kind: table.kind,
             });
         }
-        Ok(Self { engine, tables: out })
+        Ok(Self {
+            engine,
+            tables: out,
+        })
     }
 
     pub async fn export_staruml<P: AsRef<Path>>(&self, path: P) -> anyhow::Result<()> {
@@ -119,15 +128,22 @@ impl DatabaseBlueprint {
 
     /// Filter to a single table (and its related tables via FK).
     pub fn filter_table(&self, name: &str) -> Option<Self> {
-        let table = self.tables.iter().find(|t| t.name.eq_ignore_ascii_case(name))?;
-        
+        let table = self
+            .tables
+            .iter()
+            .find(|t| t.name.eq_ignore_ascii_case(name))?;
+
         // Collect referenced tables
         let mut included_tables = vec![table.clone()];
         for col in &table.columns {
             if let Some(ref fk) = col.references {
                 // FK format is usually "table(column)" or "table.column"
                 let ref_table = fk.split(['(', '.']).next().unwrap_or(fk);
-                if let Some(ref_t) = self.tables.iter().find(|t| t.name.eq_ignore_ascii_case(ref_table)) {
+                if let Some(ref_t) = self
+                    .tables
+                    .iter()
+                    .find(|t| t.name.eq_ignore_ascii_case(ref_table))
+                {
                     if !included_tables.iter().any(|t| t.name == ref_t.name) {
                         included_tables.push(ref_t.clone());
                     }
@@ -270,19 +286,23 @@ struct StarUmlRef {
 fn build_staruml_model(db: &DatabaseBlueprint) -> StarUmlModel {
     let model_id = Uuid::new_v4().to_string();
     let diagram_id = Uuid::new_v4().to_string();
-    let model_ref = StarUmlRef { ref_id: model_id.clone() };
-    let diagram_ref = StarUmlRef { ref_id: diagram_id.clone() };
+    let model_ref = StarUmlRef {
+        ref_id: model_id.clone(),
+    };
+    let diagram_ref = StarUmlRef {
+        ref_id: diagram_id.clone(),
+    };
 
     // Track class IDs for FK associations
     let mut class_ids: HashMap<String, String> = HashMap::new();
     let mut class_view_ids: HashMap<String, String> = HashMap::new();
-    
+
     // Build classes
     let mut classes: Vec<serde_json::Value> = Vec::new();
     let mut class_views: Vec<serde_json::Value> = Vec::new();
     let mut associations: Vec<serde_json::Value> = Vec::new();
     let mut association_views: Vec<serde_json::Value> = Vec::new();
-    
+
     // FK relationships to process after all classes are known
     let mut fk_relations: Vec<(String, String, String)> = Vec::new(); // (from_table, from_col, target_table)
 
@@ -295,7 +315,7 @@ fn build_staruml_model(db: &DatabaseBlueprint) -> StarUmlModel {
     for (idx, table) in db.tables.iter().enumerate() {
         let class_id = Uuid::new_v4().to_string();
         let view_id = Uuid::new_v4().to_string();
-        
+
         class_ids.insert(table.name.clone(), class_id.clone());
         class_view_ids.insert(table.name.clone(), view_id.clone());
 
@@ -375,9 +395,11 @@ fn build_staruml_model(db: &DatabaseBlueprint) -> StarUmlModel {
 
     // Create associations for FK relationships
     for (from_table, _from_col, target_table) in &fk_relations {
-        if let (Some(from_id), Some(to_id)) = (class_ids.get(from_table), class_ids.get(target_table)) {
+        if let (Some(from_id), Some(to_id)) =
+            (class_ids.get(from_table), class_ids.get(target_table))
+        {
             let assoc_id = Uuid::new_v4().to_string();
-            
+
             let association = StarUmlAssociation {
                 typ: "UMLAssociation",
                 id: assoc_id.clone(),
@@ -386,14 +408,18 @@ fn build_staruml_model(db: &DatabaseBlueprint) -> StarUmlModel {
                 end1: StarUmlAssociationEnd {
                     typ: "UMLAssociationEnd",
                     id: Uuid::new_v4().to_string(),
-                    reference: StarUmlRef { ref_id: from_id.clone() },
+                    reference: StarUmlRef {
+                        ref_id: from_id.clone(),
+                    },
                     multiplicity: Some("*"),
                     navigable: false,
                 },
                 end2: StarUmlAssociationEnd {
                     typ: "UMLAssociationEnd",
                     id: Uuid::new_v4().to_string(),
-                    reference: StarUmlRef { ref_id: to_id.clone() },
+                    reference: StarUmlRef {
+                        ref_id: to_id.clone(),
+                    },
                     multiplicity: Some("1"),
                     navigable: true,
                 },
@@ -401,16 +427,21 @@ fn build_staruml_model(db: &DatabaseBlueprint) -> StarUmlModel {
             associations.push(serde_json::to_value(&association).unwrap());
 
             // Association view
-            if let (Some(from_view), Some(to_view)) = 
-                (class_view_ids.get(from_table), class_view_ids.get(target_table)) 
-            {
+            if let (Some(from_view), Some(to_view)) = (
+                class_view_ids.get(from_table),
+                class_view_ids.get(target_table),
+            ) {
                 let assoc_view = StarUmlAssociationView {
                     typ: "UMLAssociationView",
                     id: Uuid::new_v4().to_string(),
                     parent: diagram_ref.clone(),
                     model: StarUmlRef { ref_id: assoc_id },
-                    head: StarUmlRef { ref_id: to_view.clone() },
-                    tail: StarUmlRef { ref_id: from_view.clone() },
+                    head: StarUmlRef {
+                        ref_id: to_view.clone(),
+                    },
+                    tail: StarUmlRef {
+                        ref_id: from_view.clone(),
+                    },
                 };
                 association_views.push(serde_json::to_value(&assoc_view).unwrap());
             }
@@ -504,7 +535,10 @@ async fn fetch_postgres_keys(
         JOIN information_schema.key_column_usage kcu \
         ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema \
         WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_name = $1";
-    if let Ok(res) = session.prepared_query(sql_pk, &[DbValue::Text(table.to_string())]).await {
+    if let Ok(res) = session
+        .prepared_query(sql_pk, &[DbValue::Text(table.to_string())])
+        .await
+    {
         for entry in res {
             if let DbExecutionResult::ResultSet(set) = entry {
                 for row in set.rows {
@@ -524,7 +558,10 @@ async fn fetch_postgres_keys(
         JOIN information_schema.constraint_column_usage ccu \
             ON ccu.constraint_name = tc.constraint_name AND ccu.table_schema = tc.table_schema \
         WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_name = $1";
-    if let Ok(res) = session.prepared_query(sql_fk, &[DbValue::Text(table.to_string())]).await {
+    if let Ok(res) = session
+        .prepared_query(sql_fk, &[DbValue::Text(table.to_string())])
+        .await
+    {
         for entry in res {
             if let DbExecutionResult::ResultSet(set) = entry {
                 for row in set.rows {
@@ -543,4 +580,3 @@ async fn fetch_postgres_keys(
 
     Ok((pk, fk))
 }
-

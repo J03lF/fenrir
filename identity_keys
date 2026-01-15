@@ -1,0 +1,444 @@
+{
+  "_type": "UMLModel",
+  "_id": "d8b966d3-d9cd-4736-a023-0e59c172dfcb",
+  "name": "db-postgres",
+  "ownedElements": [
+    {
+      "_id": "298d5071-d15d-4759-991e-cdfb95849035",
+      "_type": "UMLClass",
+      "attributes": [
+        {
+          "_id": "e6814c5a-7101-428b-bb08-b9decdcfce00",
+          "_type": "UMLAttribute",
+          "name": "key_id",
+          "stereotype": "pk",
+          "type": "text",
+          "visibility": "public"
+        },
+        {
+          "_id": "d8bc2932-3331-4cd7-9c4c-60842430cb42",
+          "_type": "UMLAttribute",
+          "name": "environment",
+          "stereotype": "not_null",
+          "type": "text",
+          "visibility": "public"
+        },
+        {
+          "_id": "1f37d98f-72a2-4862-b26d-98f3a326e3b6",
+          "_type": "UMLAttribute",
+          "name": "instance_id",
+          "stereotype": "not_null",
+          "type": "text",
+          "visibility": "public"
+        },
+        {
+          "_id": "9d40d639-8105-43b4-a974-a53f581c6cac",
+          "_type": "UMLAttribute",
+          "name": "secret_key",
+          "stereotype": "not_null",
+          "type": "text",
+          "visibility": "public"
+        },
+        {
+          "_id": "cf782b62-fb8f-4e25-a102-1f2cee539705",
+          "_type": "UMLAttribute",
+          "name": "public_key",
+          "stereotype": "not_null",
+          "type": "text",
+          "visibility": "public"
+        },
+        {
+          "_id": "0d60f309-8e04-405b-85bd-47e270c02820",
+          "_type": "UMLAttribute",
+          "name": "created_at",
+          "stereotype": "not_null",
+          "type": "timestamp with time zone",
+          "visibility": "public"
+        },
+        {
+          "_id": "a3cfe594-404a-498e-804e-758b8b80cff2",
+          "_type": "UMLAttribute",
+          "defaultValue": "false",
+          "name": "is_current",
+          "stereotype": "not_null",
+          "type": "boolean",
+          "visibility": "public"
+        }
+      ],
+      "name": "identity_keys",
+      "stereotypes": [
+        "table"
+      ]
+    },
+    {
+      "_id": "c030ba63-3121-432f-a7c8-bf415ad17470",
+      "_type": "UMLClass",
+      "attributes": [
+        {
+          "_id": "bc9b8b23-643d-4b4f-be78-3f2e027bda83",
+          "_type": "UMLAttribute",
+          "name": "token_id",
+          "stereotype": "pk",
+          "type": "text",
+          "visibility": "public"
+        },
+        {
+          "_id": "587ad4ea-94a7-4574-810e-9c0550179b96",
+          "_type": "UMLAttribute",
+          "name": "user_id",
+          "stereotype": "not_null",
+          "type": "text",
+          "visibility": "public"
+        },
+        {
+          "_id": "ce5bd641-dfd1-48be-a1e6-3b8342934ba3",
+          "_type": "UMLAttribute",
+          "name": "key_id",
+          "stereotype": "not_null",
+          "type": "text",
+          "visibility": "public"
+        },
+        {
+          "_id": "5dc622fb-b08b-41c7-8a43-f44654abe41c",
+          "_type": "UMLAttribute",
+          "name": "fingerprint",
+          "stereotype": "not_null",
+          "type": "text",
+          "visibility": "public"
+        },
+        {
+          "_id": "1fd7931b-e5cb-4c72-af97-13e0250e4e98",
+          "_type": "UMLAttribute",
+          "name": "issued_at",
+          "stereotype": "not_null",
+          "type": "timestamp with time zone",
+          "visibility": "public"
+        },
+        {
+          "_id": "f9164196-5396-4abe-9bbd-6f01e26d9f18",
+          "_type": "UMLAttribute",
+          "name": "expires_at",
+          "stereotype": "not_null",
+          "type": "timestamp with time zone",
+          "visibility": "public"
+        }
+      ],
+      "name": "identity_tokens",
+      "stereotypes": [
+        "table"
+      ]
+    },
+    {
+      "_id": "bf113e0c-21a0-4b35-948f-f251bd67c605",
+      "_type": "UMLClass",
+      "attributes": [
+        {
+          "_id": "06eadf39-a870-4dd2-88e0-a601dd998d87",
+          "_type": "UMLAttribute",
+          "name": "user_id",
+          "stereotype": "pk",
+          "type": "text",
+          "visibility": "public"
+        },
+        {
+          "_id": "ac9bc273-595b-4cb4-aa30-0d0c4320e461",
+          "_type": "UMLAttribute",
+          "name": "display_name",
+          "type": "text",
+          "visibility": "public"
+        },
+        {
+          "_id": "adcf876b-087c-4fc2-9d49-8e5696367166",
+          "_type": "UMLAttribute",
+          "name": "role",
+          "stereotype": "not_null",
+          "type": "text",
+          "visibility": "public"
+        },
+        {
+          "_id": "e002b26c-07b4-439d-9707-e95efa205bc8",
+          "_type": "UMLAttribute",
+          "name": "password_hash",
+          "type": "text",
+          "visibility": "public"
+        },
+        {
+          "_id": "bb2ea79a-41fe-4bb8-89d8-cdfc4bd053d7",
+          "_type": "UMLAttribute",
+          "name": "password_updated_at",
+          "type": "timestamp with time zone",
+          "visibility": "public"
+        },
+        {
+          "_id": "22bf2572-daad-437a-a4ab-204e7a19ce5a",
+          "_type": "UMLAttribute",
+          "name": "created_at",
+          "stereotype": "not_null",
+          "type": "timestamp with time zone",
+          "visibility": "public"
+        },
+        {
+          "_id": "ffb4e972-ab2e-4ff2-bc48-5acd0dc19ae0",
+          "_type": "UMLAttribute",
+          "name": "last_issued_at",
+          "type": "timestamp with time zone",
+          "visibility": "public"
+        },
+        {
+          "_id": "dc4970c1-9b8a-44ac-b206-ebb1e3c88cf8",
+          "_type": "UMLAttribute",
+          "defaultValue": "0",
+          "name": "token_count",
+          "stereotype": "not_null",
+          "type": "bigint",
+          "visibility": "public"
+        },
+        {
+          "_id": "8d519039-1c98-4815-94f6-5007bfae9422",
+          "_type": "UMLAttribute",
+          "name": "last_token_fingerprint",
+          "type": "text",
+          "visibility": "public"
+        },
+        {
+          "_id": "3a570bdd-18e0-4707-84fb-308140214c66",
+          "_type": "UMLAttribute",
+          "name": "last_login_at",
+          "type": "timestamp with time zone",
+          "visibility": "public"
+        }
+      ],
+      "name": "identity_users",
+      "stereotypes": [
+        "table"
+      ]
+    },
+    {
+      "_id": "bb5d9b19-f290-436b-9f5d-61dc5dd9081d",
+      "_type": "UMLClass",
+      "attributes": [
+        {
+          "_id": "b548cdf9-baf4-49ce-84c0-ab62d9657893",
+          "_type": "UMLAttribute",
+          "name": "id",
+          "stereotype": "pk",
+          "type": "text",
+          "visibility": "public"
+        },
+        {
+          "_id": "130ed5e4-eb23-436b-a57c-7b9f7deacdcc",
+          "_type": "UMLAttribute",
+          "name": "email",
+          "stereotype": "not_null",
+          "type": "text",
+          "visibility": "public"
+        },
+        {
+          "_id": "c777ce5d-dbf8-4a92-bc85-7f4c74ebc260",
+          "_type": "UMLAttribute",
+          "name": "pin_hash",
+          "stereotype": "not_null",
+          "type": "text",
+          "visibility": "public"
+        },
+        {
+          "_id": "c43f8f7a-573f-4325-902c-74d4dd163b46",
+          "_type": "UMLAttribute",
+          "name": "issued_at",
+          "stereotype": "not_null",
+          "type": "timestamp with time zone",
+          "visibility": "public"
+        },
+        {
+          "_id": "59728acd-eb04-40e8-bc5e-2a75bb0ddd29",
+          "_type": "UMLAttribute",
+          "name": "expires_at",
+          "stereotype": "not_null",
+          "type": "timestamp with time zone",
+          "visibility": "public"
+        },
+        {
+          "_id": "098c68c1-55d7-4502-84a1-881783fe3213",
+          "_type": "UMLAttribute",
+          "name": "consumed_at",
+          "type": "timestamp with time zone",
+          "visibility": "public"
+        },
+        {
+          "_id": "9d6955c8-dc3d-4883-8426-038a1e47ecbf",
+          "_type": "UMLAttribute",
+          "name": "status",
+          "stereotype": "not_null",
+          "type": "text",
+          "visibility": "public"
+        }
+      ],
+      "name": "verification_codes",
+      "stereotypes": [
+        "table"
+      ]
+    },
+    {
+      "_id": "b245b868-cfcf-4ce1-b8f7-dd56bc7e5f1a",
+      "_parent": {
+        "$ref": "d8b966d3-d9cd-4736-a023-0e59c172dfcb"
+      },
+      "_type": "UMLClassDiagram",
+      "name": "Schema Diagram",
+      "ownedViews": [
+        {
+          "_id": "d77ec625-5d5f-4416-9ce3-c25f796f50cb",
+          "_parent": {
+            "$ref": "b245b868-cfcf-4ce1-b8f7-dd56bc7e5f1a"
+          },
+          "_type": "UMLClassView",
+          "height": 150,
+          "left": 40,
+          "model": {
+            "$ref": "298d5071-d15d-4759-991e-cdfb95849035"
+          },
+          "showOperationSignature": false,
+          "showVisibility": false,
+          "stereotypeDisplay": "label",
+          "top": 40,
+          "width": 220
+        },
+        {
+          "_id": "57df9d7f-5dcf-4397-bc18-537216604c8a",
+          "_parent": {
+            "$ref": "b245b868-cfcf-4ce1-b8f7-dd56bc7e5f1a"
+          },
+          "_type": "UMLClassView",
+          "height": 150,
+          "left": 320,
+          "model": {
+            "$ref": "c030ba63-3121-432f-a7c8-bf415ad17470"
+          },
+          "showOperationSignature": false,
+          "showVisibility": false,
+          "stereotypeDisplay": "label",
+          "top": 40,
+          "width": 220
+        },
+        {
+          "_id": "697a2720-8659-4480-8ad2-cdebac09cfce",
+          "_parent": {
+            "$ref": "b245b868-cfcf-4ce1-b8f7-dd56bc7e5f1a"
+          },
+          "_type": "UMLClassView",
+          "height": 150,
+          "left": 600,
+          "model": {
+            "$ref": "bf113e0c-21a0-4b35-948f-f251bd67c605"
+          },
+          "showOperationSignature": false,
+          "showVisibility": false,
+          "stereotypeDisplay": "label",
+          "top": 40,
+          "width": 220
+        },
+        {
+          "_id": "9c0dbbd1-6e88-4f2f-b240-92f38f7388be",
+          "_parent": {
+            "$ref": "b245b868-cfcf-4ce1-b8f7-dd56bc7e5f1a"
+          },
+          "_type": "UMLClassView",
+          "height": 150,
+          "left": 40,
+          "model": {
+            "$ref": "bb5d9b19-f290-436b-9f5d-61dc5dd9081d"
+          },
+          "showOperationSignature": false,
+          "showVisibility": false,
+          "stereotypeDisplay": "label",
+          "top": 240,
+          "width": 220
+        },
+        {
+          "_id": "a6178eb0-b63b-44c9-98a6-7a62e888a458",
+          "_parent": {
+            "$ref": "b245b868-cfcf-4ce1-b8f7-dd56bc7e5f1a"
+          },
+          "_type": "UMLAssociationView",
+          "head": {
+            "$ref": "697a2720-8659-4480-8ad2-cdebac09cfce"
+          },
+          "model": {
+            "$ref": "556cd146-861f-45d8-a3ac-4ba895c0940b"
+          },
+          "tail": {
+            "$ref": "57df9d7f-5dcf-4397-bc18-537216604c8a"
+          }
+        },
+        {
+          "_id": "f70fde8f-c10b-4c12-bc9c-7f593799e11d",
+          "_parent": {
+            "$ref": "b245b868-cfcf-4ce1-b8f7-dd56bc7e5f1a"
+          },
+          "_type": "UMLAssociationView",
+          "head": {
+            "$ref": "d77ec625-5d5f-4416-9ce3-c25f796f50cb"
+          },
+          "model": {
+            "$ref": "50b02f3c-8d9c-4422-8d57-687369c3b315"
+          },
+          "tail": {
+            "$ref": "57df9d7f-5dcf-4397-bc18-537216604c8a"
+          }
+        }
+      ]
+    },
+    {
+      "_id": "556cd146-861f-45d8-a3ac-4ba895c0940b",
+      "_parent": {
+        "$ref": "d8b966d3-d9cd-4736-a023-0e59c172dfcb"
+      },
+      "_type": "UMLAssociation",
+      "end1": {
+        "_id": "fc608807-8e28-4e69-b00c-f8e5e7d77e6f",
+        "_type": "UMLAssociationEnd",
+        "multiplicity": "*",
+        "navigable": false,
+        "reference": {
+          "$ref": "c030ba63-3121-432f-a7c8-bf415ad17470"
+        }
+      },
+      "end2": {
+        "_id": "7e2e5d00-b9d8-4a33-9a1c-4a2628d9cb08",
+        "_type": "UMLAssociationEnd",
+        "multiplicity": "1",
+        "navigable": true,
+        "reference": {
+          "$ref": "bf113e0c-21a0-4b35-948f-f251bd67c605"
+        }
+      },
+      "name": "identity_tokens→identity_users"
+    },
+    {
+      "_id": "50b02f3c-8d9c-4422-8d57-687369c3b315",
+      "_parent": {
+        "$ref": "d8b966d3-d9cd-4736-a023-0e59c172dfcb"
+      },
+      "_type": "UMLAssociation",
+      "end1": {
+        "_id": "ad28db42-14c7-436f-b869-1eeb1cc18bcc",
+        "_type": "UMLAssociationEnd",
+        "multiplicity": "*",
+        "navigable": false,
+        "reference": {
+          "$ref": "c030ba63-3121-432f-a7c8-bf415ad17470"
+        }
+      },
+      "end2": {
+        "_id": "4f32bb7b-d580-4e98-86e3-7f12a5255768",
+        "_type": "UMLAssociationEnd",
+        "multiplicity": "1",
+        "navigable": true,
+        "reference": {
+          "$ref": "298d5071-d15d-4759-991e-cdfb95849035"
+        }
+      },
+      "name": "identity_tokens→identity_keys"
+    }
+  ]
+}

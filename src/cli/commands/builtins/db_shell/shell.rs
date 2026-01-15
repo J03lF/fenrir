@@ -31,18 +31,24 @@ pub fn run_local_db_shell(mut session: DbShellSession, prompt: String) -> io::Re
         .completion_type(CompletionType::Circular)
         .completion_prompt_limit(0) // Don't show rustyline's vertical list
         .build();
-    let mut editor = Editor::<ListCompleter, DefaultHistory>::with_config(config)
-        .map_err(map_readline_error)?;
+    let mut editor =
+        Editor::<ListCompleter, DefaultHistory>::with_config(config).map_err(map_readline_error)?;
     let executor = RuntimeExecutor::new()?;
-    
+
     // Build completion list with table names
-    let (completion_list, table_count) = build_completion_list_with_tables(&session, &executor, &mut stdout);
-    editor.set_helper(Some(ListCompleter::new(completion_list)));
-    
+    let completion_catalog = build_completion_list_with_tables(&session, &executor, &mut stdout);
+    let table_count = completion_catalog.table_names.len();
+    let mut helper = ListCompleter::new(completion_catalog.entries);
+    helper.set_table_names(&completion_catalog.table_names);
+    editor.set_helper(Some(helper));
+
     if table_count > 0 {
         writeln!(&mut stdout, "completion: {} tables loaded", table_count)?;
     } else {
-        writeln!(&mut stdout, "completion: no tables loaded (type \\d to see tables)")?;
+        writeln!(
+            &mut stdout,
+            "completion: no tables loaded (type \\d to see tables)"
+        )?;
     }
 
     // Multi-line buffer for SQL statements
@@ -50,62 +56,48 @@ pub fn run_local_db_shell(mut session: DbShellSession, prompt: String) -> io::Re
     let continuation_prompt = "...> ";
 
     loop {
-        let current_prompt = if buffer.is_empty() { &prompt } else { continuation_prompt };
-        
+        let current_prompt = if buffer.is_empty() {
+            &prompt
+        } else {
+            continuation_prompt
+        };
+
         match editor.readline(current_prompt) {
             Ok(line) => {
                 let trimmed = line.trim();
-                
-                // Empty line in continuation mode: execute buffer as-is
-                if trimmed.is_empty() && !buffer.is_empty() {
-                    let command = buffer.trim().to_string();
-                    buffer.clear();
-                    let _ = editor.add_history_entry(&command);
-                    let continue_session =
-                        apply_command(&mut session, &command, &executor, &mut stdout)?;
-                    maybe_refresh_completion(&command, &mut editor, &session, &executor);
-                    if !continue_session {
-                        break;
-                    }
-                    continue;
-                }
-                
+                let normalized = trimmed.trim_end_matches(';').trim();
+
                 if trimmed.is_empty() {
+                    // Don't auto-execute buffered statements; wait for explicit semicolon
                     continue;
                 }
 
                 // Handle refresh command (multiple variants for convenience)
-                let is_refresh = trimmed.eq_ignore_ascii_case(r"\refresh") 
-                    || trimmed.eq_ignore_ascii_case("/refresh")
-                    || trimmed.eq_ignore_ascii_case("refresh")
-                    || trimmed.to_lowercase() == "\\refresh"
-                    || trimmed.to_lowercase() == "/refresh";
-                    
+                let is_refresh = normalized.eq_ignore_ascii_case(r"\refresh")
+                    || normalized.eq_ignore_ascii_case("/refresh")
+                    || normalized.eq_ignore_ascii_case("refresh");
+
                 if buffer.is_empty() && is_refresh {
-                    let (words, count) = build_completion_list_with_tables(&session, &executor, &mut stdout);
-                    if let Some(helper) = editor.helper_mut() {
-                        helper.update(words);
-                    }
-                    writeln!(&mut stdout, "completion refreshed: {} tables", count)?;
+                    refresh_completions(&session, &executor, &mut editor, &mut stdout)?;
                     continue;
                 }
-                
+
                 // Backslash commands execute immediately (no semicolon needed)
-                if buffer.is_empty() && trimmed.starts_with('\\') {
+                if buffer.is_empty() && normalized.starts_with('\\') {
                     let _ = editor.add_history_entry(trimmed);
                     let continue_session =
-                        apply_command(&mut session, trimmed, &executor, &mut stdout)?;
+                        apply_command(&mut session, normalized, &executor, &mut stdout)?;
                     if !continue_session {
                         break;
                     }
                     continue;
                 }
-                
+
                 // Forward slash commands also execute immediately
-                if buffer.is_empty() && trimmed.starts_with('/') && !trimmed.contains(' ') {
+                if buffer.is_empty() && normalized.starts_with('/') && !normalized.contains(' ') {
                     let _ = editor.add_history_entry(trimmed);
                     let continue_session =
-                        apply_command(&mut session, trimmed, &executor, &mut stdout)?;
+                        apply_command(&mut session, normalized, &executor, &mut stdout)?;
                     if !continue_session {
                         break;
                     }
@@ -113,10 +105,13 @@ pub fn run_local_db_shell(mut session: DbShellSession, prompt: String) -> io::Re
                 }
 
                 // Built-in commands execute immediately
-                if buffer.is_empty() && matches!(trimmed.to_lowercase().as_str(), "help" | "exit" | "quit") {
+                let normalized_lower = normalized.to_lowercase();
+                if buffer.is_empty()
+                    && matches!(normalized_lower.as_str(), "help" | "exit" | "quit")
+                {
                     let _ = editor.add_history_entry(trimmed);
                     let continue_session =
-                        apply_command(&mut session, trimmed, &executor, &mut stdout)?;
+                        apply_command(&mut session, normalized, &executor, &mut stdout)?;
                     if !continue_session {
                         break;
                     }
@@ -307,26 +302,48 @@ pub fn fetch_table_names(
 
 /// Build a comprehensive completion list including table names
 /// Returns (completion_list, table_count)
+pub struct DbCompletionCatalog {
+    pub entries: Vec<String>,
+    pub table_names: Vec<String>,
+}
+
 pub fn build_completion_list_with_tables(
     session: &DbShellSession,
     executor: &RuntimeExecutor,
     out: &mut dyn Write,
-) -> (Vec<String>, usize) {
+) -> DbCompletionCatalog {
     let mut words = completion_words(Some(session));
-    
-    // Fetch and add table names
-    let tables = fetch_table_names(session, executor, out);
-    let table_count = tables.len();
-    
-    for table in tables {
-        if !words.contains(&table) {
+    let mut table_names = fetch_table_names(session, executor, out);
+
+    for table in &table_names {
+        if !words.contains(table) {
             words.push(table.clone());
         }
     }
-    
+
     words.sort();
     words.dedup();
-    (words, table_count)
+    table_names.sort();
+    table_names.dedup();
+
+    DbCompletionCatalog {
+        entries: words,
+        table_names,
+    }
+}
+
+fn refresh_completions(
+    session: &DbShellSession,
+    executor: &RuntimeExecutor,
+    editor: &mut Editor<ListCompleter, DefaultHistory>,
+    out: &mut dyn Write,
+) -> io::Result<()> {
+    let catalog = build_completion_list_with_tables(session, executor, out);
+    let table_count = catalog.table_names.len();
+    if let Some(helper) = editor.helper_mut() {
+        helper.update_catalog(catalog.entries, catalog.table_names);
+    }
+    writeln!(out, "completion refreshed: {} tables", table_count)
 }
 
 /// Refresh completion list (called after DDL commands)
@@ -337,9 +354,9 @@ pub fn refresh_completion(
 ) {
     // Use a sink for errors during refresh (we don't want to interrupt the user)
     let mut sink = std::io::sink();
-    let (words, _) = build_completion_list_with_tables(session, executor, &mut sink);
+    let catalog = build_completion_list_with_tables(session, executor, &mut sink);
     if let Some(helper) = editor.helper_mut() {
-        helper.update(words);
+        helper.update_catalog(catalog.entries, catalog.table_names);
     }
 }
 

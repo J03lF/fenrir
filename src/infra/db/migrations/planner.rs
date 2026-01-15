@@ -87,9 +87,7 @@ fn map_pg(op: &MigrationOp, opts: &PlanOptions) -> anyhow::Result<Vec<String>> {
                     .find(|c| c.references.as_ref() == Some(fk))
                     .map(|c| (c.name.clone(), fk.clone()))
                 {
-                    table_parts.push(format!(
-                        "FOREIGN KEY (\"{col}\") REFERENCES {target}"
-                    ));
+                    table_parts.push(format!("FOREIGN KEY (\"{col}\") REFERENCES {target}"));
                 }
             }
             let sql = format!(
@@ -106,7 +104,10 @@ fn map_pg(op: &MigrationOp, opts: &PlanOptions) -> anyhow::Result<Vec<String>> {
             Ok(vec![format!("DROP TABLE IF EXISTS \"{name}\";")])
         }
         MigrationOp::AddColumn { table, column } => {
-            let mut def = format!("ALTER TABLE \"{table}\" ADD COLUMN \"{}\" {}", column.name, column.data_type);
+            let mut def = format!(
+                "ALTER TABLE \"{table}\" ADD COLUMN \"{}\" {}",
+                column.name, column.data_type
+            );
             if !column.nullable {
                 def.push_str(" NOT NULL");
             }
@@ -119,7 +120,9 @@ fn map_pg(op: &MigrationOp, opts: &PlanOptions) -> anyhow::Result<Vec<String>> {
             if !opts.force {
                 return Err(anyhow!("drop column `{table}.{column}` requires --force"));
             }
-            Ok(vec![format!("ALTER TABLE \"{table}\" DROP COLUMN IF EXISTS \"{column}\";")])
+            Ok(vec![format!(
+                "ALTER TABLE \"{table}\" DROP COLUMN IF EXISTS \"{column}\";"
+            )])
         }
         MigrationOp::AlterColumn {
             table,
@@ -210,7 +213,10 @@ fn map_sqlite(op: &MigrationOp, opts: &PlanOptions) -> anyhow::Result<Vec<String
             Ok(vec![format!("DROP TABLE IF EXISTS \"{name}\";")])
         }
         MigrationOp::AddColumn { table, column } => {
-            let mut def = format!("ALTER TABLE \"{table}\" ADD COLUMN \"{}\" {}", column.name, column.data_type);
+            let mut def = format!(
+                "ALTER TABLE \"{table}\" ADD COLUMN \"{}\" {}",
+                column.name, column.data_type
+            );
             if let Some(d) = &column.default_value {
                 def.push_str(&format!(" DEFAULT {}", d));
             }
@@ -224,12 +230,11 @@ fn map_sqlite(op: &MigrationOp, opts: &PlanOptions) -> anyhow::Result<Vec<String
                 "-- SQLite drop column not supported directly; would require table rebuild for {table}.{column}"
             )])
         }
-        MigrationOp::AlterColumn { .. } => {
-            Ok(vec!["-- SQLite alter column not supported; requires manual table rebuild".into()])
-        }
+        MigrationOp::AlterColumn { .. } => Ok(vec![
+            "-- SQLite alter column not supported; requires manual table rebuild".into(),
+        ]),
         MigrationOp::AddForeignKey { .. } | MigrationOp::DropForeignKey { .. } => {
             Ok(vec!["-- SQLite FK alter not supported post-creation".into()])
         }
     }
 }
-

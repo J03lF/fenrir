@@ -19,7 +19,7 @@ use tracing::warn;
 #[derive(Debug, Clone)]
 pub struct FilesystemModuleStorage {
     install_dir: PathBuf,
-    _cache_dir: Option<PathBuf>,
+    cache_dir: Option<PathBuf>,
 }
 
 impl FilesystemModuleStorage {
@@ -48,7 +48,7 @@ impl FilesystemModuleStorage {
         };
         Ok(Self {
             install_dir,
-            _cache_dir: cache_dir,
+            cache_dir: cache_dir,
         })
     }
 
@@ -294,7 +294,8 @@ impl ModuleStoragePort for FilesystemModuleStorage {
             ))
         })?;
 
-        extract_module_archive(&module_dir, &bundle.archive).await?;
+        let archive_bytes = self.cache_archive_bytes(&bundle).await?;
+        extract_module_archive(&module_dir, &archive_bytes).await?;
 
         let metadata_dir = self.metadata_dir(&id);
         fs::create_dir_all(&metadata_dir).await.map_err(|err| {
@@ -322,7 +323,7 @@ impl ModuleStoragePort for FilesystemModuleStorage {
             })?;
 
         let artifact_path = self.archive_path(&id, &bundle.manifest);
-        fs::write(&artifact_path, &bundle.archive)
+        fs::write(&artifact_path, &archive_bytes)
             .await
             .map_err(|err| {
                 ModuleStorageError::Io(messages::infra::modules::storage::artifact_write_failed(
@@ -388,6 +389,40 @@ impl ModuleStoragePort for FilesystemModuleStorage {
             Err(err) => Err(ModuleStorageError::Io(
                 messages::infra::modules::storage::remove_dir_failed(module_dir.display(), err),
             )),
+        }
+    }
+}
+
+impl FilesystemModuleStorage {
+    async fn cache_archive_bytes(
+        &self,
+        bundle: &ModuleBundle,
+    ) -> Result<Vec<u8>, ModuleStorageError> {
+        let Some(cache_dir) = &self.cache_dir else {
+            return Ok(bundle.archive.clone());
+        };
+        let checksum = hex::encode(&bundle.checksum);
+        let cache_path = cache_dir.join(format!("{checksum}.module.tgz"));
+        match fs::read(&cache_path).await {
+            Ok(bytes) => Ok(bytes),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                if let Err(err) = fs::write(&cache_path, &bundle.archive).await {
+                    warn!(
+                        path = %cache_path.display(),
+                        error = %err,
+                        "failed to write module archive to cache"
+                    );
+                }
+                Ok(bundle.archive.clone())
+            }
+            Err(err) => {
+                warn!(
+                    path = %cache_path.display(),
+                    error = %err,
+                    "failed to read module archive cache"
+                );
+                Ok(bundle.archive.clone())
+            }
         }
     }
 }

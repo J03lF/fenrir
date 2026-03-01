@@ -1300,6 +1300,25 @@ fn read_process_io() -> Result<ProcessIoSnapshot> {
 
 #[cfg(target_os = "macos")]
 fn read_process_io() -> Result<ProcessIoSnapshot> {
+    let pid = Pid::from_u32(std::process::id());
+    let system_lock = process_system_handle();
+    let mut system = match system_lock.lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            return Ok(ProcessIoSnapshot {
+                read_bytes: 0,
+                write_bytes: 0,
+            })
+        }
+    };
+    system.refresh_process(pid);
+    if let Some(process) = system.process(pid) {
+        let usage = process.disk_usage();
+        return Ok(ProcessIoSnapshot {
+            read_bytes: usage.total_read_bytes,
+            write_bytes: usage.total_written_bytes,
+        });
+    }
     Ok(ProcessIoSnapshot {
         read_bytes: 0,
         write_bytes: 0,

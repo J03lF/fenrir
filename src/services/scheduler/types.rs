@@ -50,6 +50,10 @@ pub struct ScheduledJobSnapshot {
     pub paused: bool,
 }
 
+pub fn job_metrics_id(job_id: &str) -> String {
+    format!("job:{job_id}")
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JobControlOutcome {
     Restarted,

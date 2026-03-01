@@ -5,8 +5,12 @@ use std::time::Duration;
 
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD as BASE64_ENGINE, Engine as _};
+use serde_json::{Number as JsonNumber, Value as JsonValue};
 use tokio::time;
-use tokio_postgres::{types::ToSql, NoTls, Row, SimpleQueryMessage};
+use tokio_postgres::{
+    types::{Json, ToSql, Type},
+    NoTls, Row, SimpleQueryMessage,
+};
 
 use crate::domain::db::{
     DbAdminPort, DbColumn, DbError, DbExecutionResult, DbResult, DbResultSet, DbTable, DbTableKind,
@@ -36,17 +40,17 @@ impl PostgresAdapter {
             anyhow::bail!(infra_db_messages::postgres::uri_empty());
         }
         let timeout = timeout_ms.map(Duration::from_millis);
-        
+
         // Detect if URI uses Unix socket (host parameter points to a directory)
         let connection_mode = Self::detect_connection_mode(uri);
-        
+
         Ok(Self {
             uri: Arc::new(uri.to_string()),
             query_timeout: timeout,
             connection_mode,
         })
     }
-    
+
     /// Detect if the URI uses a Unix socket or TCP connection
     fn detect_connection_mode(uri: &str) -> ConnectionMode {
         // Parse the URI to check for Unix socket indicators
@@ -74,7 +78,7 @@ impl PostgresAdapter {
             .uri
             .parse()
             .map_err(|err| DbError::connection(infra_db_messages::postgres::invalid_config(err)))?;
-        
+
         match &self.connection_mode {
             ConnectionMode::Tcp => {
                 // Standard TCP connection
@@ -98,7 +102,7 @@ impl PostgresAdapter {
             }
         }
     }
-    
+
     /// Connect via Unix socket
     async fn connect_unix_socket(
         &self,
@@ -106,36 +110,32 @@ impl PostgresAdapter {
         socket_dir: &Path,
     ) -> DbResult<tokio_postgres::Client> {
         use tokio::net::UnixStream;
-        
+
         // PostgreSQL socket naming convention: .s.PGSQL.<port>
         // Default port is 5432 if not specified
         let port = config.get_ports().first().copied().unwrap_or(5432);
         let socket_path = socket_dir.join(format!(".s.PGSQL.{}", port));
-        
+
         // Connect to the Unix socket
-        let socket = UnixStream::connect(&socket_path)
-            .await
-            .map_err(|err| DbError::connection(format!(
+        let socket = UnixStream::connect(&socket_path).await.map_err(|err| {
+            DbError::connection(format!(
                 "failed to connect to Unix socket at {}: {}",
                 socket_path.display(),
                 err
-            )))?;
-        
+            ))
+        })?;
+
         // Use connect_raw with the socket
-        let (client, connection) = config
-            .connect_raw(socket, NoTls)
-            .await
-            .map_err(|err| DbError::connection(format!(
-                "postgres handshake failed on Unix socket: {}",
-                err
-            )))?;
-        
+        let (client, connection) = config.connect_raw(socket, NoTls).await.map_err(|err| {
+            DbError::connection(format!("postgres handshake failed on Unix socket: {}", err))
+        })?;
+
         tokio::spawn(async move {
             if let Err(err) = connection.await {
                 tracing::error!(error = %err, "postgres unix socket connection terminated");
             }
         });
-        
+
         Ok(client)
     }
 
@@ -229,20 +229,202 @@ impl PostgresAdapter {
         Ok(results)
     }
 
+    fn prepare_param(value: &DbValue) -> PreparedParamBinding {
+        match value {
+            DbValue::Null => PreparedParamBinding::NullText(None),
+            DbValue::NullTimestamp => PreparedParamBinding::NullTimestamp(None),
+            DbValue::NullUuid => PreparedParamBinding::NullUuid(None),
+            DbValue::NullInet => PreparedParamBinding::NullInet(None),
+            DbValue::Text(text) => PreparedParamBinding::Text(text.clone()),
+            DbValue::TextArray(items) => PreparedParamBinding::TextArray(items.clone()),
+            DbValue::Integer32(num) => PreparedParamBinding::Integer32(*num),
+            DbValue::Integer(num) => PreparedParamBinding::Integer(*num),
+            DbValue::Float(num) => PreparedParamBinding::Float(*num),
+            DbValue::Bool(flag) => PreparedParamBinding::Bool(*flag),
+            DbValue::Json(json) => PreparedParamBinding::Json(json.clone()),
+            DbValue::Uuid(uuid) => PreparedParamBinding::Uuid(*uuid),
+            DbValue::Inet(ip) => PreparedParamBinding::Inet(*ip),
+            DbValue::Timestamp(dt) => PreparedParamBinding::Timestamp(*dt),
+            DbValue::TimestampStr(s) => PreparedParamBinding::TimestampStr(s.clone()),
+        }
+    }
+
     fn prepare_params(params: &[DbValue]) -> Vec<PreparedParamBinding> {
+        params.iter().map(Self::prepare_param).collect()
+    }
+
+    fn prepare_typed_params(
+        params: &[DbValue],
+        expected: &[Type],
+    ) -> DbResult<Vec<PreparedParamBinding>> {
+        if expected.len() != params.len() {
+            return Ok(Self::prepare_params(params));
+        }
         params
             .iter()
-            .map(|value| match value {
-                DbValue::Null => PreparedParamBinding::Null(None),
-                DbValue::Text(text) => PreparedParamBinding::Text(text.clone()),
-                DbValue::Integer(num) => PreparedParamBinding::Integer(*num),
-                DbValue::Float(num) => PreparedParamBinding::Float(*num),
-                DbValue::Bool(flag) => PreparedParamBinding::Bool(*flag),
-                DbValue::Json(json) => PreparedParamBinding::Json(json.clone()),
-                DbValue::Timestamp(dt) => PreparedParamBinding::Timestamp(*dt),
-                DbValue::TimestampStr(s) => PreparedParamBinding::TimestampStr(s.clone()),
-            })
+            .enumerate()
+            .map(|(idx, value)| Self::coerce_param(value, &expected[idx]))
             .collect()
+    }
+
+    fn is_null_value(value: &DbValue) -> bool {
+        matches!(
+            value,
+            DbValue::Null | DbValue::NullTimestamp | DbValue::NullUuid | DbValue::NullInet
+        )
+    }
+
+    fn null_for_type(expected: &Type) -> PreparedParamBinding {
+        match *expected {
+            Type::INT2 => PreparedParamBinding::NullSmallInt(None),
+            Type::INT4 => PreparedParamBinding::NullInt(None),
+            Type::INT8 => PreparedParamBinding::NullBigInt(None),
+            Type::BOOL => PreparedParamBinding::NullBool(None),
+            Type::TIMESTAMPTZ => PreparedParamBinding::NullTimestamp(None),
+            Type::UUID => PreparedParamBinding::NullUuid(None),
+            Type::INET => PreparedParamBinding::NullInet(None),
+            Type::JSON | Type::JSONB => PreparedParamBinding::NullJson(None),
+            Type::TEXT_ARRAY | Type::VARCHAR_ARRAY | Type::BPCHAR_ARRAY | Type::NAME_ARRAY => {
+                PreparedParamBinding::NullTextArray(None)
+            }
+            Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME => {
+                PreparedParamBinding::NullText(None)
+            }
+            _ => PreparedParamBinding::NullText(None),
+        }
+    }
+
+    fn coerce_param(value: &DbValue, expected: &Type) -> DbResult<PreparedParamBinding> {
+        if Self::is_null_value(value) {
+            return Ok(Self::null_for_type(expected));
+        }
+        match *expected {
+            Type::INT4 => Self::coerce_int4(value),
+            Type::INT8 => Self::coerce_int8(value),
+            Type::JSON | Type::JSONB => Self::coerce_json(value),
+            Type::TEXT_ARRAY | Type::VARCHAR_ARRAY | Type::BPCHAR_ARRAY | Type::NAME_ARRAY => {
+                Self::coerce_text_array(value)
+            }
+            _ => Ok(Self::prepare_param(value)),
+        }
+    }
+
+    fn coerce_int4(value: &DbValue) -> DbResult<PreparedParamBinding> {
+        match value {
+            DbValue::Integer32(num) => Ok(PreparedParamBinding::Integer32(*num)),
+            DbValue::Integer(num) => {
+                if *num >= i32::MIN as i64 && *num <= i32::MAX as i64 {
+                    Ok(PreparedParamBinding::Integer32(*num as i32))
+                } else {
+                    Err(DbError::invalid_input(format!(
+                        "integer value {num} exceeds INT4 range"
+                    )))
+                }
+            }
+            DbValue::Text(text) => text
+                .parse::<i32>()
+                .map(PreparedParamBinding::Integer32)
+                .map_err(|_| {
+                    DbError::invalid_input(format!("cannot parse '{}' as INT4 parameter", text))
+                }),
+            _ => Ok(Self::prepare_param(value)),
+        }
+    }
+
+    fn coerce_int8(value: &DbValue) -> DbResult<PreparedParamBinding> {
+        match value {
+            DbValue::Integer32(num) => Ok(PreparedParamBinding::Integer(*num as i64)),
+            DbValue::Integer(num) => Ok(PreparedParamBinding::Integer(*num)),
+            DbValue::Text(text) => text
+                .parse::<i64>()
+                .map(PreparedParamBinding::Integer)
+                .map_err(|_| {
+                    DbError::invalid_input(format!("cannot parse '{}' as INT8 parameter", text))
+                }),
+            _ => Ok(Self::prepare_param(value)),
+        }
+    }
+
+    fn parse_json_value(text: &str) -> JsonValue {
+        serde_json::from_str(text).unwrap_or_else(|_| JsonValue::String(text.to_string()))
+    }
+
+    fn coerce_json(value: &DbValue) -> DbResult<PreparedParamBinding> {
+        let json_value = match value {
+            DbValue::Json(text) => Self::parse_json_value(text),
+            DbValue::Text(text) => Self::parse_json_value(text),
+            DbValue::TextArray(items) => JsonValue::Array(
+                items
+                    .iter()
+                    .map(|item| JsonValue::String(item.clone()))
+                    .collect(),
+            ),
+            DbValue::Bool(flag) => JsonValue::Bool(*flag),
+            DbValue::Integer(num) => JsonValue::Number(JsonNumber::from(*num)),
+            DbValue::Integer32(num) => JsonValue::Number(JsonNumber::from(*num)),
+            DbValue::Float(num) => {
+                let Some(number) = JsonNumber::from_f64(*num) else {
+                    return Err(DbError::invalid_input(format!(
+                        "invalid float value for JSON parameter: {num}"
+                    )));
+                };
+                JsonValue::Number(number)
+            }
+            DbValue::Uuid(uuid) => JsonValue::String(uuid.to_string()),
+            DbValue::Inet(ip) => JsonValue::String(ip.to_string()),
+            DbValue::Timestamp(dt) => JsonValue::String(dt.to_string()),
+            DbValue::TimestampStr(text) => JsonValue::String(text.clone()),
+            other => JsonValue::String(format!("{other:?}")),
+        };
+        Ok(PreparedParamBinding::JsonParam(Json(json_value)))
+    }
+
+    fn coerce_text_array(value: &DbValue) -> DbResult<PreparedParamBinding> {
+        let json_value = match value {
+            DbValue::TextArray(items) => return Ok(PreparedParamBinding::TextArray(items.clone())),
+            DbValue::Json(text) => Self::parse_json_value(text),
+            DbValue::Text(text) => {
+                if text.trim().is_empty() {
+                    JsonValue::Array(Vec::new())
+                } else {
+                    Self::parse_json_value(text)
+                }
+            }
+            DbValue::Bool(flag) => JsonValue::Bool(*flag),
+            DbValue::Integer(num) => JsonValue::Number(JsonNumber::from(*num)),
+            DbValue::Integer32(num) => JsonValue::Number(JsonNumber::from(*num)),
+            DbValue::Float(num) => {
+                let Some(number) = JsonNumber::from_f64(*num) else {
+                    return Err(DbError::invalid_input(format!(
+                        "invalid float value for text array parameter: {num}"
+                    )));
+                };
+                JsonValue::Number(number)
+            }
+            DbValue::Uuid(uuid) => JsonValue::String(uuid.to_string()),
+            DbValue::Inet(ip) => JsonValue::String(ip.to_string()),
+            DbValue::Timestamp(dt) => JsonValue::String(dt.to_string()),
+            DbValue::TimestampStr(text) => JsonValue::String(text.clone()),
+            other => JsonValue::String(format!("{other:?}")),
+        };
+
+        let items = match json_value {
+            JsonValue::Array(values) => values
+                .into_iter()
+                .filter_map(|value| match value {
+                    JsonValue::String(text) => Some(text),
+                    JsonValue::Number(num) => Some(num.to_string()),
+                    JsonValue::Bool(flag) => Some(flag.to_string()),
+                    JsonValue::Null => None,
+                    other => Some(other.to_string()),
+                })
+                .collect::<Vec<_>>(),
+            JsonValue::String(text) => vec![text],
+            JsonValue::Null => Vec::new(),
+            other => vec![other.to_string()],
+        };
+
+        Ok(PreparedParamBinding::TextArray(items))
     }
 
     fn map_rows(rows: Vec<Row>) -> DbResult<Vec<DbExecutionResult>> {
@@ -271,7 +453,39 @@ impl PostgresAdapter {
         if let Ok(value) = row.try_get::<usize, Option<String>>(idx) {
             return value.unwrap_or_else(|| "NULL".to_string());
         }
+        if let Ok(value) = row.try_get::<usize, Option<uuid::Uuid>>(idx) {
+            return value
+                .map(|u| u.to_string())
+                .unwrap_or_else(|| "NULL".to_string());
+        }
+        if let Ok(value) = row.try_get::<usize, Option<Vec<String>>>(idx) {
+            if let Some(values) = value {
+                if let Ok(json) = serde_json::to_string(&values) {
+                    return json;
+                }
+            } else {
+                return "NULL".to_string();
+            }
+        }
+        if let Ok(value) = row.try_get::<usize, Option<Vec<Option<String>>>>(idx) {
+            if let Some(values) = value {
+                let normalized = values.into_iter().flatten().collect::<Vec<_>>();
+                if let Ok(json) = serde_json::to_string(&normalized) {
+                    return json;
+                }
+            } else {
+                return "NULL".to_string();
+            }
+        }
+        if let Ok(value) = row.try_get::<usize, Option<std::net::IpAddr>>(idx) {
+            return value
+                .map(|ip| ip.to_string())
+                .unwrap_or_else(|| "NULL".to_string());
+        }
         if let Ok(value) = row.try_get::<usize, i64>(idx) {
+            return value.to_string();
+        }
+        if let Ok(value) = row.try_get::<usize, i32>(idx) {
             return value.to_string();
         }
         if let Ok(value) = row.try_get::<usize, f64>(idx) {
@@ -279,6 +493,12 @@ impl PostgresAdapter {
         }
         if let Ok(value) = row.try_get::<usize, bool>(idx) {
             return value.to_string();
+        }
+        // Timestamps - try OffsetDateTime first, then use to_string()
+        if let Ok(value) = row.try_get::<usize, Option<::time::OffsetDateTime>>(idx) {
+            return value
+                .map(|dt| dt.to_string())
+                .unwrap_or_else(|| "NULL".to_string());
         }
         if let Ok(value) = row.try_get::<usize, Vec<u8>>(idx) {
             return BASE64_ENGINE.encode(value);
@@ -288,12 +508,26 @@ impl PostgresAdapter {
 }
 
 enum PreparedParamBinding {
-    Null(Option<String>),
+    NullText(Option<String>),
+    NullSmallInt(Option<i16>),
+    NullInt(Option<i32>),
+    NullBigInt(Option<i64>),
+    NullTimestamp(Option<::time::OffsetDateTime>),
+    NullBool(Option<bool>),
+    NullJson(Option<JsonValue>),
+    NullTextArray(Option<Vec<String>>),
+    NullUuid(Option<uuid::Uuid>),
+    NullInet(Option<std::net::IpAddr>),
     Text(String),
+    TextArray(Vec<String>),
+    Integer32(i32),
     Integer(i64),
     Float(f64),
     Bool(bool),
     Json(String),
+    JsonParam(Json<JsonValue>),
+    Uuid(uuid::Uuid),
+    Inet(std::net::IpAddr),
     Timestamp(::time::OffsetDateTime),
     /// Timestamp as string - will be cast to TIMESTAMPTZ by Postgres
     TimestampStr(String),
@@ -302,12 +536,26 @@ enum PreparedParamBinding {
 impl PreparedParamBinding {
     fn as_binding(&self) -> &(dyn ToSql + Sync) {
         match self {
-            PreparedParamBinding::Null(value) => value,
+            PreparedParamBinding::NullText(value) => value,
+            PreparedParamBinding::NullSmallInt(value) => value,
+            PreparedParamBinding::NullInt(value) => value,
+            PreparedParamBinding::NullBigInt(value) => value,
+            PreparedParamBinding::NullTimestamp(value) => value,
+            PreparedParamBinding::NullBool(value) => value,
+            PreparedParamBinding::NullJson(value) => value,
+            PreparedParamBinding::NullTextArray(value) => value,
+            PreparedParamBinding::NullUuid(value) => value,
+            PreparedParamBinding::NullInet(value) => value,
             PreparedParamBinding::Text(value) => value,
+            PreparedParamBinding::TextArray(value) => value,
+            PreparedParamBinding::Integer32(value) => value,
             PreparedParamBinding::Integer(value) => value,
             PreparedParamBinding::Float(value) => value,
             PreparedParamBinding::Bool(value) => value,
             PreparedParamBinding::Json(value) => value,
+            PreparedParamBinding::JsonParam(value) => value,
+            PreparedParamBinding::Uuid(value) => value,
+            PreparedParamBinding::Inet(value) => value,
             PreparedParamBinding::Timestamp(value) => value,
             // For TimestampStr, we bind as text - the query should cast it
             PreparedParamBinding::TimestampStr(value) => value,
@@ -438,12 +686,19 @@ impl DbAdminPort for PostgresAdapter {
         params: &[DbValue],
     ) -> DbResult<Vec<DbExecutionResult>> {
         let client = self.connect().await?;
-        let bindings = Self::prepare_params(params);
+        let stmt = Self::await_pg(
+            self.query_timeout,
+            client.prepare(statement),
+            || DbError::query(infra_db_messages::postgres::query_timeout()),
+            DbError::query,
+        )
+        .await?;
+        let bindings = Self::prepare_typed_params(params, stmt.params())?;
         let refs: Vec<&(dyn ToSql + Sync)> = bindings
             .iter()
             .map(|binding| binding.as_binding())
             .collect();
-        let fut = client.query(statement, &refs);
+        let fut = client.query(&stmt, &refs);
         let rows = Self::await_pg(
             self.query_timeout,
             fut,
@@ -456,12 +711,19 @@ impl DbAdminPort for PostgresAdapter {
 
     async fn prepared_execute(&self, statement: &str, params: &[DbValue]) -> DbResult<u64> {
         let client = self.connect().await?;
-        let bindings = Self::prepare_params(params);
+        let stmt = Self::await_pg(
+            self.query_timeout,
+            client.prepare(statement),
+            || DbError::query(infra_db_messages::postgres::query_timeout()),
+            DbError::query,
+        )
+        .await?;
+        let bindings = Self::prepare_typed_params(params, stmt.params())?;
         let refs: Vec<&(dyn ToSql + Sync)> = bindings
             .iter()
             .map(|binding| binding.as_binding())
             .collect();
-        let fut = client.execute(statement, &refs);
+        let fut = client.execute(&stmt, &refs);
         let affected = Self::await_pg(
             self.query_timeout,
             fut,

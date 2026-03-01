@@ -11,4 +11,3 @@ mod types;
 
 pub use service::BackupService;
 pub use types::{BackupError, BackupResult, BackupStatus, BackupTrigger};
-

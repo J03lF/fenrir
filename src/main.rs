@@ -180,7 +180,7 @@ fn handle_migrate() {
             db_dir,
             embedded.security.clone(),
         );
-        
+
         // Attach early SecurityManager if password auth is required
         if embedded.security.auth_method.requires_password() {
             use fenrir::security::manager::{NoopAuditSink, SecurityManager};
@@ -195,7 +195,7 @@ fn handle_migrate() {
                 }
             }
         }
-        
+
         match rt.block_on(supervisor.clone().start()) {
             Ok(_) => Some(supervisor),
             Err(e) => {

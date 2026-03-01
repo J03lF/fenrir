@@ -214,7 +214,11 @@ impl StatusBox {
 
             // Separator between sections (not after last, only if next section has no title)
             if i < section_count - 1 {
-                let next_has_title = self.sections.get(i + 1).map(|s| s.title.is_some()).unwrap_or(false);
+                let next_has_title = self
+                    .sections
+                    .get(i + 1)
+                    .map(|s| s.title.is_some())
+                    .unwrap_or(false);
                 if !next_has_title {
                     renderer.separator(out)?;
                 }

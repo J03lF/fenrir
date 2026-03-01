@@ -214,8 +214,11 @@ async fn execute_backup(
         Ok(Ok(artifact)) => {
             writeln!(out)?;
 
-            let mut status = StatusBox::new("Backup Complete")
-                .field_styled("Status", format!("{} Success", SYM_SUCCESS), FieldStyle::Success);
+            let mut status = StatusBox::new("Backup Complete").field_styled(
+                "Status",
+                format!("{} Success", SYM_SUCCESS),
+                FieldStyle::Success,
+            );
 
             // Get file size if possible
             let size_bytes = std::fs::metadata(&artifact.artifact_path)
@@ -456,7 +459,10 @@ struct BackupAuditContext {
     base_metadata: AuditMetadata,
 }
 
-fn build_backup_audit_ctx(deps: &CliDependencies, label: Option<&str>) -> Option<BackupAuditContext> {
+fn build_backup_audit_ctx(
+    deps: &CliDependencies,
+    label: Option<&str>,
+) -> Option<BackupAuditContext> {
     if !deps.config.audit.enabled {
         return None;
     }

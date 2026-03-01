@@ -4,6 +4,7 @@ use anyhow::Result;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use rusqlite::{params_from_iter, types::ValueRef, Connection, Row};
+use serde_json;
 use tokio::task;
 
 use crate::domain::db::{
@@ -225,11 +226,22 @@ fn prepare_params(params: &[DbValue]) -> DbResult<Vec<rusqlite::types::Value>> {
     for p in params {
         let v = match p {
             DbValue::Null => rusqlite::types::Value::Null,
+            DbValue::NullTimestamp => rusqlite::types::Value::Null,
+            DbValue::NullUuid => rusqlite::types::Value::Null,
+            DbValue::NullInet => rusqlite::types::Value::Null,
             DbValue::Text(t) => rusqlite::types::Value::Text(t.clone()),
+            DbValue::TextArray(items) => rusqlite::types::Value::Text(
+                serde_json::to_string(items).unwrap_or_else(|_| "[]".to_string()),
+            ),
+            DbValue::Integer32(i) => rusqlite::types::Value::Integer(*i as i64),
             DbValue::Integer(i) => rusqlite::types::Value::Integer(*i),
             DbValue::Float(f) => rusqlite::types::Value::Real(*f),
             DbValue::Bool(b) => rusqlite::types::Value::Integer(if *b { 1 } else { 0 }),
             DbValue::Json(j) => rusqlite::types::Value::Text(j.clone()),
+            // SQLite stores UUIDs as TEXT (hyphenated format)
+            DbValue::Uuid(u) => rusqlite::types::Value::Text(u.to_string()),
+            // SQLite stores IP addresses as TEXT
+            DbValue::Inet(ip) => rusqlite::types::Value::Text(ip.to_string()),
             // SQLite stores timestamps as TEXT in ISO 8601 format
             DbValue::Timestamp(dt) => {
                 let iso = dt

@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::env;
 use std::str::FromStr;
 
-use crate::config::{ConfigError, ModuleServiceOverride, ModuleServiceProfile, ModuleServiceTenantMode};
+use crate::config::{
+    ConfigError, ModuleServiceOverride, ModuleServiceProfile, ModuleServiceTenantMode,
+};
 use crate::security::service::{ServiceRole, ServiceScope};
 use crate::services::types::{ServiceIngressAccess, ServiceRateLimit, ServiceTenantGuard};
 use crate::services::{ServiceDescriptorOwned, ServiceIngressMetadata, ServiceSecurityMetadata};
@@ -356,7 +358,9 @@ impl ModuleServiceProfileResolved {
                         .expect("tenant value validated");
                     ServiceTenantGuard::fixed(value)
                 }
-                ModuleServiceTenantMode::AllowList => ServiceTenantGuard::allow_list(tenant.allow.clone()),
+                ModuleServiceTenantMode::AllowList => {
+                    ServiceTenantGuard::allow_list(tenant.allow.clone())
+                }
             };
             resolved.tenant_guard = Some(guard);
         }

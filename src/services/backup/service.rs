@@ -119,7 +119,10 @@ impl BackupService {
         if self.config.anomaly_threshold_pct > 0 {
             if let Some(last_size) = checks.last_backup_size_mb {
                 // We'll check after backup is created
-                info!("Anomaly detection enabled, last backup was {} MB", last_size);
+                info!(
+                    "Anomaly detection enabled, last backup was {} MB",
+                    last_size
+                );
             }
         }
 
@@ -157,10 +160,15 @@ impl BackupService {
         // === Phase 4: Post-Backup ===
         // Refresh and copy db_state.json snapshot for restore compatibility
         info!("Refreshing DB state snapshot");
-        self.db_runtime.refresh_state_snapshot(Some(time::OffsetDateTime::now_utc())).await;
-        
+        self.db_runtime
+            .refresh_state_snapshot(Some(time::OffsetDateTime::now_utc()))
+            .await;
+
         if let Err(err) = self.db_runtime.copy_snapshot_to_backup(&backup_path).await {
-            warn!("Failed to copy db state snapshot: {} (restore may require manual intervention)", err);
+            warn!(
+                "Failed to copy db state snapshot: {} (restore may require manual intervention)",
+                err
+            );
         } else {
             info!("DB state snapshot copied to backup");
         }
@@ -184,7 +192,10 @@ impl BackupService {
         self.write_metadata(&backup_path, &metadata).await?;
 
         // Rotate old backups
-        info!("Rotating old backups (keeping {})", self.config.retention_count);
+        info!(
+            "Rotating old backups (keeping {})",
+            self.config.retention_count
+        );
         self.rotate_backups().await?;
 
         let status = BackupStatus {
@@ -289,10 +300,10 @@ impl BackupService {
 
         // Build pg_basebackup command based on connection mode
         let mut cmd = Command::new(&pg_basebackup);
-        
+
         // Set PGPASSWORD environment variable for authentication
         cmd.env("PGPASSWORD", &credentials.password);
-        
+
         cmd.arg("-D")
             .arg(&target_dir)
             .arg("-X")
@@ -312,7 +323,10 @@ impl BackupService {
                 BackupError::BackupFailed("embedded postgres not running - no port assigned".into())
             })?;
             info!("Using TCP for backup: 127.0.0.1:{}", port);
-            cmd.arg("-h").arg("127.0.0.1").arg("-p").arg(port.to_string());
+            cmd.arg("-h")
+                .arg("127.0.0.1")
+                .arg("-p")
+                .arg(port.to_string());
         }
 
         let output = cmd
@@ -391,9 +405,9 @@ impl BackupService {
         let db_path = self.runtime_dir.join("db").join("fenrir.db");
         let backup_path = backup_dir.join(format!("{}.db", backup_name));
 
-        fs::copy(&db_path, &backup_path).await.map_err(|e| {
-            BackupError::BackupFailed(format!("sqlite copy failed: {}", e))
-        })?;
+        fs::copy(&db_path, &backup_path)
+            .await
+            .map_err(|e| BackupError::BackupFailed(format!("sqlite copy failed: {}", e)))?;
 
         Ok(backup_path)
     }
@@ -446,7 +460,11 @@ impl BackupService {
     }
 
     /// Write metadata file alongside backup
-    async fn write_metadata(&self, backup_path: &Path, metadata: &BackupMetadata) -> BackupResult<()> {
+    async fn write_metadata(
+        &self,
+        backup_path: &Path,
+        metadata: &BackupMetadata,
+    ) -> BackupResult<()> {
         let meta_path = if backup_path.is_dir() {
             backup_path.join("backup.json")
         } else {
@@ -645,4 +663,3 @@ impl BackupService {
         &self.config
     }
 }
-

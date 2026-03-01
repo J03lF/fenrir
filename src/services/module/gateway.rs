@@ -18,6 +18,8 @@ use tokio::time::sleep;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+const SERVICE_TOKEN_HEADER: &str = "x-fenrir-service-token";
+
 use super::clients::ModuleClientSettings;
 use super::types::ModuleIngressError;
 use super::{ModuleIngressTarget, ModuleService};
@@ -266,7 +268,7 @@ impl RuntimeGatewayContext {
         if let Some(timeout) = timeout_override_ms {
             request = request.timeout(Duration::from_millis(timeout));
         }
-        request = request.header("Authorization", format!("Bearer {token}"));
+        let has_user_service_token = headers.contains_key(SERVICE_TOKEN_HEADER);
         let mut has_content_type = false;
         for (key, value) in headers {
             let name = HeaderName::try_from(key.as_str())
@@ -277,6 +279,9 @@ impl RuntimeGatewayContext {
             let header_value = HeaderValue::try_from(value.as_str())
                 .map_err(|_| GatewayError::InvalidHeader(key.clone()))?;
             request = request.header(name, header_value);
+        }
+        if !has_user_service_token {
+            request = request.header(SERVICE_TOKEN_HEADER, format!("Bearer {token}"));
         }
         if let Some(body) = body {
             let serialized = serde_json::to_vec(body)

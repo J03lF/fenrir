@@ -3,11 +3,13 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
 const MAX_LATENCY_SAMPLES: usize = 64;
+pub const DEFAULT_STALE_AFTER_SECS: u64 = 180;
 
 #[derive(Default)]
 struct ServiceMetricEntry {
     last_heartbeat: Option<SystemTime>,
     last_failure: Option<SystemTime>,
+    last_success: Option<SystemTime>,
     latencies_ms: VecDeque<f64>,
     successes: u64,
     failures: u64,
@@ -24,6 +26,7 @@ impl ServiceMetricEntry {
         }
         if success {
             self.successes = self.successes.saturating_add(1);
+            self.last_success = Some(SystemTime::now());
         } else {
             self.failures = self.failures.saturating_add(1);
             self.last_failure = Some(SystemTime::now());
@@ -48,6 +51,7 @@ impl ServiceMetricEntry {
         ServiceMetricSnapshot {
             last_heartbeat: self.last_heartbeat,
             last_failure: self.last_failure,
+            last_success: self.last_success,
             latency_p50_ms: p50,
             latency_p95_ms: p95,
             error_rate_pct: error_rate,
@@ -115,6 +119,7 @@ impl ServiceDiagnostics {
 pub struct ServiceMetricSnapshot {
     pub last_heartbeat: Option<SystemTime>,
     pub last_failure: Option<SystemTime>,
+    pub last_success: Option<SystemTime>,
     pub latency_p50_ms: Option<f64>,
     pub latency_p95_ms: Option<f64>,
     pub error_rate_pct: Option<f64>,
@@ -128,5 +133,15 @@ impl ServiceMetricSnapshot {
 
     pub fn last_failure_elapsed(&self) -> Option<Duration> {
         self.last_failure.and_then(|ts| ts.elapsed().ok())
+    }
+
+    pub fn last_success_elapsed(&self) -> Option<Duration> {
+        self.last_success.and_then(|ts| ts.elapsed().ok())
+    }
+
+    pub fn is_stale(&self, threshold: Duration) -> bool {
+        self.last_heartbeat_elapsed()
+            .map(|elapsed| elapsed >= threshold)
+            .unwrap_or(false)
     }
 }

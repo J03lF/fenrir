@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use tracing::warn;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
+use tracing::warn;
 
 use crate::audit::{AuditActor, AuditEvent, AuditEventBuilder, AuditMetadata, AuditOutcome};
 use crate::config::SecuritySection;
@@ -367,8 +367,8 @@ fn sign_manifest_hmac(token: &str, payload: &[u8]) -> String {
 }
 
 fn sign_manifest_hmac_bytes(token: &str, payload: &[u8]) -> Vec<u8> {
-    let mut mac = Hmac::<Sha256>::new_from_slice(token.as_bytes())
-        .expect("hmac key length is valid");
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(token.as_bytes()).expect("hmac key length is valid");
     mac.update(payload);
     mac.finalize().into_bytes().to_vec()
 }

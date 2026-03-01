@@ -292,16 +292,28 @@ fn cycles_short_prefix_through_commands_before_subcommands() {
     let line = "s";
     let pos = line.len();
     let (_, suggestions) = completer.suggestions_for(line, pos);
-    
+
     // Commands starting with 's' should be suggested
-    assert!(suggestions.contains(&"start".to_string()), "start should be suggested");
-    assert!(suggestions.contains(&"stop".to_string()), "stop should be suggested");
-    assert!(suggestions.contains(&"status".to_string()), "status should be suggested");
-    
+    assert!(
+        suggestions.contains(&"start".to_string()),
+        "start should be suggested"
+    );
+    assert!(
+        suggestions.contains(&"stop".to_string()),
+        "stop should be suggested"
+    );
+    assert!(
+        suggestions.contains(&"status".to_string()),
+        "status should be suggested"
+    );
+
     // Verify cycling works (returns at least one suggestion)
     let cycle_results = completer.cycle_suggestions(line, pos);
-    assert!(!cycle_results.1.is_empty(), "cycle should return suggestions");
-    
+    assert!(
+        !cycle_results.1.is_empty(),
+        "cycle should return suggestions"
+    );
+
     // First suggestion should be one of the s-commands (alphabetically sorted)
     let first = cycle_results.1.first().expect("cycle suggestion");
     assert!(

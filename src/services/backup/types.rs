@@ -72,12 +72,14 @@ pub struct BackupStatus {
 #[derive(Debug, Clone, Copy)]
 pub enum BackupTrigger {
     Auto,
+    Manual,
 }
 
 impl BackupTrigger {
     pub fn as_str(self) -> &'static str {
         match self {
             BackupTrigger::Auto => "auto",
+            BackupTrigger::Manual => "manual",
         }
     }
 }
@@ -110,4 +112,3 @@ pub struct PreBackupChecks {
     pub has_active_locks: bool,
     pub last_backup_size_mb: Option<u64>,
 }
-

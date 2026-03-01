@@ -1,5 +1,10 @@
 [server.ssh]
-idle_close_seconds = 3000
+idle_close_seconds = 99999
+
+# Dev-friendly session timeouts (default: 3600/900 is too short for development)
+[security.session]
+lifetime_seconds = 86400      # 24h
+idle_timeout_seconds = 14400  # 4h
 
 [security.identity]
 provider = "embedded"

@@ -123,6 +123,8 @@ accept_invalid_certs = false
 
 `[modules.runtime.clients]` steuert Timeouts, Retry-/Backoff-Strategien sowie den Health-Probe-Intervall des ModuleService. Der `.tls`-Block erlaubt optionales mTLS gegenüber der Control-Plane. Mit `[modules.services."<service-id>"]` lassen sich pro Service zusätzliche Env-Variablen (`.env`) und Secrets (`.secrets`, nur `env:...`) injizieren sowie die Security-Policy (`.policy`, inkl. `tenant.mode = any|fixed|allow_list`) überschreiben.
 
+`modules.runtime.env_passthrough_prefixes` erlaubt zusätzlich globales Prefix-Passthrough aus Fenrirs Prozess-Umgebung (z. B. `["ATHENE_", "AUTH_"]`). Unabhängig davon leitet Fenrir pro Modul automatisch abgeleitete Prefixes weiter (z. B. für `athene-api`: `ATHENE_API_` und `ATHENE_`; für `auth-service`: `AUTH_SERVICE_` und `AUTH_`), damit neue Modulvariablen ohne Fenrir-Codeänderung verfügbar sind.
+
 Runtime Env Injection
 - Every managed module process receives:
   - `FENRIR_MODULE_ID` (`ticket-domain`, ...),

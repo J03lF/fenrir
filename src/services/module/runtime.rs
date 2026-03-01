@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     env,
     str::FromStr,
     sync::Arc,
@@ -582,6 +583,7 @@ impl ModuleService {
         self.append_service_snapshot_env(&mut env);
         self.append_client_env(&mut env);
         self.append_otel_env(&mut env, module_id, &service_id);
+        self.append_env_passthrough(&mut env, module_id);
         self.append_configured_env(&mut env, &service_id)?;
         Ok(env)
     }
@@ -731,6 +733,62 @@ impl ModuleService {
                 }
             }
         }
+    }
+
+    fn append_env_passthrough(&self, env: &mut Vec<(String, String)>, module_id: &ModuleId) {
+        let mut prefixes: Vec<String> = self
+            .env_passthrough_prefixes
+            .iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect();
+        prefixes.extend(Self::derived_env_prefixes(module_id));
+        if prefixes.is_empty() {
+            return;
+        }
+
+        let mut seen = HashSet::new();
+        prefixes.retain(|prefix| seen.insert(prefix.to_ascii_uppercase()));
+
+        for (key, value) in env::vars() {
+            if key.starts_with("FENRIR_") || RESERVED_ENV_KEYS.contains(&key.as_str()) {
+                continue;
+            }
+            if !prefixes.iter().any(|prefix| key.starts_with(prefix)) {
+                continue;
+            }
+            if env.iter().any(|(existing, _)| existing == &key) {
+                continue;
+            }
+            env.push((key, value));
+        }
+    }
+
+    fn derived_env_prefixes(module_id: &ModuleId) -> Vec<String> {
+        let normalized: String = module_id
+            .to_string()
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() {
+                    ch.to_ascii_uppercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let normalized = normalized.trim_matches('_').to_string();
+        if normalized.is_empty() {
+            return Vec::new();
+        }
+
+        let mut prefixes = vec![format!("{normalized}_")];
+        if let Some(first_segment) = normalized.split('_').find(|segment| !segment.is_empty()) {
+            let short = format!("{first_segment}_");
+            if short != prefixes[0] {
+                prefixes.push(short);
+            }
+        }
+        prefixes
     }
 
     fn map_env_error(err: ModuleEnvResolutionError) -> ModuleRuntimeError {

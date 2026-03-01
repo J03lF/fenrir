@@ -103,8 +103,7 @@ pub fn handle(
 
             let services = Arc::clone(&deps.services);
             let config = Arc::clone(&deps.config);
-            let future =
-                async move { execute_export(sink, services, config, engine, mode).await };
+            let future = async move { execute_export(sink, services, config, engine, mode).await };
 
             Ok(CommandOutcome::AsyncTask(Box::pin(future)))
         }
@@ -117,7 +116,7 @@ pub fn handle(
                 return Ok(CommandOutcome::Continue);
             }
 
-            let path = PathBuf::from(tail[0]);
+            let path = resolve_schema_path(&deps.config, tail[0]);
             let engine = parse_engine(tail.get(1).filter(|v| !v.starts_with("--")).copied());
             let dry_run = tail.contains(&"--dry-run");
             let force = tail.contains(&"--force");
@@ -137,8 +136,9 @@ pub fn handle(
             };
 
             let services = Arc::clone(&deps.services);
+            let config = Arc::clone(&deps.config);
             let future = async move {
-                execute_import(sink, services, path, engine, dry_run, force).await
+                execute_import(sink, services, config, path, engine, dry_run, force).await
             };
 
             Ok(CommandOutcome::AsyncTask(Box::pin(future)))
@@ -270,10 +270,16 @@ async fn execute_export(
             writeln!(out)?;
 
             let mut status = StatusBox::new("Export Complete")
-                .field_styled("Status", format!("{} Success", SYM_SUCCESS), FieldStyle::Success)
+                .field_styled(
+                    "Status",
+                    format!("{} Success", SYM_SUCCESS),
+                    FieldStyle::Success,
+                )
                 .field("Tables", export_result.table_count.to_string());
 
-            status = status.section().field("Path", export_result.path.to_string_lossy());
+            status = status
+                .section()
+                .field("Path", export_result.path.to_string_lossy());
 
             status.render(&mut out)?;
         }
@@ -300,6 +306,7 @@ async fn execute_export(
 async fn execute_import(
     sink: Arc<dyn CommandOutput>,
     services: Arc<AppServices>,
+    config: Arc<AppConfig>,
     path: PathBuf,
     engine: Option<DbEngine>,
     dry_run: bool,
@@ -320,6 +327,31 @@ async fn execute_import(
     )?;
     writeln!(out)?;
 
+    if !dry_run && config.db.schema.backup_before_import {
+        if let Some(backup_service) = services.backup_service() {
+            if backup_service.is_enabled() {
+                match backup_service
+                    .run_backup(crate::services::backup::BackupTrigger::Manual)
+                    .await
+                {
+                    Ok(status) => {
+                        writeln!(
+                            out,
+                            "  \x1b[38;5;81m▸\x1b[0m Backup created at {}",
+                            status.path.display()
+                        )?;
+                    }
+                    Err(err) => {
+                        MessageBox::error("Backup Failed")
+                            .message(err.to_string())
+                            .render(&mut out)?;
+                        return Ok(CommandOutcome::Continue);
+                    }
+                }
+            }
+        }
+    }
+
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<ImportProgress>();
 
     let services_clone = Arc::clone(&services);
@@ -328,8 +360,15 @@ async fn execute_import(
         let callback = move |progress: ImportProgress| {
             let _ = progress_tx.send(progress);
         };
-        run_import_with_progress(&services_clone, path_clone, engine, dry_run, force, Some(callback))
-            .await
+        run_import_with_progress(
+            &services_clone,
+            path_clone,
+            engine,
+            dry_run,
+            force,
+            Some(callback),
+        )
+        .await
     });
 
     let mut last_step = 0u8;
@@ -403,8 +442,11 @@ async fn execute_import(
         Ok(Ok(import_result)) => {
             writeln!(out)?;
 
-            let mut status = StatusBox::new("Import Complete")
-                .field_styled("Status", format!("{} Success", SYM_SUCCESS), FieldStyle::Success);
+            let mut status = StatusBox::new("Import Complete").field_styled(
+                "Status",
+                format!("{} Success", SYM_SUCCESS),
+                FieldStyle::Success,
+            );
 
             if import_result.dry_run {
                 status = status.field("Mode", "dry-run");
@@ -436,4 +478,21 @@ async fn execute_import(
     }
 
     Ok(CommandOutcome::Continue)
+}
+
+fn resolve_schema_path(config: &AppConfig, raw: &str) -> PathBuf {
+    let path = PathBuf::from(raw);
+    if path.is_absolute() {
+        return path;
+    }
+    if path.exists() {
+        return path;
+    }
+    let import_dir = PathBuf::from(&config.db.schema.import_dir);
+    let candidate = import_dir.join(&path);
+    if candidate.exists() {
+        candidate
+    } else {
+        path
+    }
 }

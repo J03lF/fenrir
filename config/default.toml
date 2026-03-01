@@ -199,6 +199,9 @@ accept_invalid_certs = false
 # stub = expiremtel (fake engine)
 engine = "process"
 default_service_scopes = ["db:read"]
+# Optional global passthrough prefixes for module env injection.
+# Fenrir also derives module-local prefixes automatically (e.g. `ATHENE_`, `AUTH_`).
+env_passthrough_prefixes = []
 
 [modules.runtime.ports]
 strategy = "dynamic"

@@ -14,7 +14,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0"
 tokio = { version = "1.39", features = ["rt-multi-thread", "macros", "signal", "fs"] }
-tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-time-0_3"] }
+tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-time-0_3", "with-serde_json-1"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 tracing-appender = "0.2"
@@ -60,6 +60,7 @@ rand_core = "0.6"
 fenrir-module-kit = { git = "https://github.com/J03lF/module-kit.git" }
 rusqlite = { version = "0.31", features = ["bundled"] }
 chrono = { version = "0.4", features = ["clock"] }
+tower-http = { version = "0.6.8", features = ["cors", "fs", "trace"] }
 
 [patch."https://github.com/J03lF/module-kit.git"]
 fenrir-module-kit = { path = "../module-kit" }

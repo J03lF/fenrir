@@ -136,15 +136,28 @@ fn enforce_guard(input: &str) -> DbResult<String> {
         return Ok(input.to_string());
     }
     let trimmed = input.trim_end();
-    let lower = trimmed.to_ascii_lowercase();
+    let trimmed_no_semicolons = trimmed.trim_end_matches(';').trim_end();
+    let lower = trimmed_no_semicolons.to_ascii_lowercase();
     if lower.ends_with("--force") {
-        let without_force = trimmed[..trimmed.len() - "--force".len()].trim_end();
-        Ok(without_force.to_string())
-    } else {
-        Err(DbError::InvalidInput {
-            message: DESTRUCTIVE_FORCE_WARNING.to_string(),
-        })
+        let force_start = trimmed_no_semicolons.len() - "--force".len();
+        let prefix = &trimmed_no_semicolons[..force_start];
+        let has_boundary = if force_start == 0 {
+            true
+        } else {
+            prefix
+                .chars()
+                .last()
+                .map(|ch| ch.is_whitespace())
+                .unwrap_or(false)
+        };
+        if has_boundary {
+            let without_force = prefix.trim_end();
+            return Ok(without_force.to_string());
+        }
     }
+    Err(DbError::InvalidInput {
+        message: DESTRUCTIVE_FORCE_WARNING.to_string(),
+    })
 }
 
 fn requires_guard(statement: &str) -> bool {

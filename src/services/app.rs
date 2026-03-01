@@ -11,6 +11,7 @@ use futures::future::BoxFuture;
 use once_cell::sync::OnceCell;
 use tokio::sync::broadcast;
 
+use super::backup::BackupService;
 use super::db_shell::DbShellService;
 use super::diagnostics::{ServiceDiagnostics, ServiceMetricSnapshot};
 use super::jobs::{JobLogError, JobLogSnapshot};
@@ -40,6 +41,7 @@ pub struct AppServices {
     session: OnceCell<Arc<SessionService>>,
     identity: OnceCell<Arc<dyn IdentityProvider>>,
     db_runtime: OnceCell<Arc<crate::infra::db::runtime::DbRuntimeSupervisor>>,
+    backup_service: OnceCell<Arc<BackupService>>,
 }
 
 impl AppServices {
@@ -66,6 +68,7 @@ impl AppServices {
             session: OnceCell::new(),
             identity: OnceCell::new(),
             db_runtime: OnceCell::new(),
+            backup_service: OnceCell::new(),
         }
     }
 
@@ -133,6 +136,16 @@ impl AppServices {
 
     pub fn db_runtime(&self) -> Option<Arc<crate::infra::db::runtime::DbRuntimeSupervisor>> {
         self.db_runtime.get().cloned()
+    }
+
+    pub fn attach_backup_service(&self, service: Arc<BackupService>) -> Result<(), &'static str> {
+        self.backup_service
+            .set(service)
+            .map_err(|_| attach::BACKUP_SERVICE_ALREADY_ATTACHED)
+    }
+
+    pub fn backup_service(&self) -> Option<Arc<BackupService>> {
+        self.backup_service.get().cloned()
     }
 
     pub fn session_service(&self) -> Option<Arc<SessionService>> {

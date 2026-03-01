@@ -105,6 +105,15 @@ pub mod errors {
         format!("dev service {id} in {path} has an invalid endpoint {endpoint}: {err}")
     }
 
+    pub fn dev_service_runtime_port_missing(
+        module: impl fmt::Display,
+        service: impl fmt::Display,
+    ) -> String {
+        format!(
+            "dev service {service} for module {module} requires a runtime port, but none is assigned"
+        )
+    }
+
     pub fn dev_service_invalid_role(
         path: impl fmt::Display,
         id: impl fmt::Display,

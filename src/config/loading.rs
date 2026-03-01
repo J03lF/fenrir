@@ -233,6 +233,16 @@ pub fn validate(cfg: &AppConfig) -> Result<(), ConfigError> {
             "server.ssh.host_key_path must not be empty",
         ));
     }
+    if cfg.db.schema.export_dir.trim().is_empty() {
+        return Err(ConfigError::Invalid(
+            "db.schema.export_dir must not be empty",
+        ));
+    }
+    if cfg.db.schema.import_dir.trim().is_empty() {
+        return Err(ConfigError::Invalid(
+            "db.schema.import_dir must not be empty",
+        ));
+    }
     validate_http_tls(&cfg.server.http)?;
     validate_ssh_tls(&cfg.server.ssh)?;
     validate_module_registry_tls(&cfg.modules.registry)?;

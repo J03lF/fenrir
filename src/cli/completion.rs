@@ -673,21 +673,18 @@ pub fn longest_common_prefix(strings: &[String]) -> Option<String> {
 
 /// Get context-aware SQL completions using the SqlCompletionEngine
 pub fn db_shell_completion_matches(
-    _entries: &[String],  // Legacy parameter, kept for API compatibility
+    _entries: &[String], // Legacy parameter, kept for API compatibility
     table_names: &HashSet<String>,
     line: &str,
     pos: usize,
 ) -> (usize, Vec<String>) {
     // Create engine with current schema
     let columns: HashMap<String, Vec<String>> = HashMap::new();
-    let engine = SqlCompletionEngine::with_tables_and_columns(
-        table_names.iter().cloned(),
-        columns,
-    );
-    
+    let engine = SqlCompletionEngine::with_tables_and_columns(table_names.iter().cloned(), columns);
+
     // Get completions
     let result = engine.complete(line, pos);
-    
+
     (result.start, result.suggestions)
 }
 

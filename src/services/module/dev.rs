@@ -32,10 +32,13 @@ use crate::utils::messages::services::module::{
 };
 
 use super::types::{
-    ModuleDevRunState, ModuleDevServices, ModuleSyncOutcome, ModuleSyncPackage,
-    RegisteredDevService,
+    ModuleDevRunState, ModuleDevServices, ModuleServiceJsonEntry, ModuleServicesJson,
+    ModuleSyncOutcome, ModuleSyncPackage, RegisteredDevService,
 };
 use super::ModuleService;
+
+/// Path to the services JSON manifest within the module directory.
+const SERVICES_JSON_PATH: &str = ".fenrir/services.json";
 
 #[derive(Clone)]
 pub(super) struct DevSourceConfig {
@@ -275,6 +278,14 @@ impl ModuleService {
             ));
         }
 
+        let assigned_port = self
+            .port_allocator
+            .assigned_port(module_id)
+            .await
+            .map_err(|err| {
+                ModuleServiceError::Storage(ModuleStorageError::InvalidState(err.to_string()))
+            })?;
+
         let mut registered = Vec::new();
         let mut remembered = Vec::new();
 
@@ -300,7 +311,22 @@ impl ModuleService {
             descriptor = self.apply_descriptor_overrides(descriptor);
             let adjusted_security = descriptor.security.clone();
             let adjusted_ingress = descriptor.ingress.clone();
-            let endpoint = binding.endpoint;
+            let endpoint = if binding.endpoint.port() == 0 {
+                if let Some(port) = assigned_port {
+                    SocketAddr::from(([127, 0, 0, 1], port))
+                } else {
+                    return Err(ModuleServiceError::Storage(
+                        ModuleStorageError::InvalidState(
+                            module_dev_errors::dev_service_runtime_port_missing(
+                                module_id,
+                                &binding.id,
+                            ),
+                        ),
+                    ));
+                }
+            } else {
+                binding.endpoint
+            };
             self.service_registry.register(
                 descriptor,
                 ServiceStatus::Active,
@@ -352,27 +378,65 @@ impl ModuleService {
             return Ok(());
         }
 
+        // Get the runtime port for this module (if using dynamic ports)
+        let runtime_port = self
+            .port_allocator
+            .assigned_port(module_id)
+            .await
+            .ok()
+            .flatten();
+
         let mut remembered = Vec::new();
         for binding in declared {
-            let service_id = binding.id.clone();
+            // Build the full service ID with module prefix: module:<module_id>::<service_id>
+            let full_service_id = format!("module:{}::{}", module_id, binding.id);
             let name = binding.name.clone().unwrap_or_else(|| binding.id.clone());
             let description = binding
                 .description
                 .clone()
                 .unwrap_or_else(|| module_dev_names::binding(&name, module_id));
-            let endpoint = binding.endpoint;
-            let mut descriptor =
-                ServiceDescriptorOwned::new(service_id.clone(), name, description, binding.kind)
-                    .with_tags(vec![ServiceTag::Auxiliary])
-                    .with_security(binding.security.clone())
-                    .with_ingress(binding.ingress.clone());
+
+            // Resolve endpoint: use runtime port if binding has placeholder port (0)
+            let endpoint = if binding.endpoint.port() == 0 {
+                if let Some(port) = runtime_port {
+                    SocketAddr::from(([127, 0, 0, 1], port))
+                } else {
+                    // Fallback: skip this service if no port is available
+                    tracing::warn!(
+                        module = %module_id,
+                        service = %binding.id,
+                        "skipping service registration: no runtime port available"
+                    );
+                    continue;
+                }
+            } else {
+                binding.endpoint
+            };
+
+            let mut descriptor = ServiceDescriptorOwned::new(
+                full_service_id.clone(),
+                name,
+                description,
+                binding.kind,
+            )
+            .with_tags(vec![ServiceTag::Auxiliary])
+            .with_security(binding.security.clone())
+            .with_ingress(binding.ingress.clone());
             descriptor = self.apply_descriptor_overrides(descriptor);
             self.service_registry.register(
                 descriptor,
                 ServiceStatus::Active,
                 Some(module_dev_notes::endpoint(endpoint)),
             );
-            remembered.push((service_id, endpoint));
+            remembered.push((full_service_id, endpoint));
+
+            tracing::debug!(
+                module = %module_id,
+                service_id = %binding.id,
+                full_service_id = %remembered.last().unwrap().0,
+                endpoint = %endpoint,
+                "registered declared service from services.json"
+            );
         }
 
         self.remember_declared_services(module_id, remembered).await;
@@ -520,7 +584,9 @@ impl ModuleService {
 
         let override_definition = load_dev_override(&module_root)?;
         let config_path = override_definition.config_path.clone();
-        let services = parse_dev_services(&override_definition.services, &config_path)?;
+        let json_services = load_services_json(&module_root)?;
+        let override_services = parse_dev_services(&override_definition.services, &config_path)?;
+        let services = merge_dev_services(json_services, override_services);
         let allow_missing_output = !services.is_empty();
         let package_source = detect_package_source(
             &module_root,
@@ -704,7 +770,229 @@ fn load_dev_override(module_root: &Path) -> ModuleResult<DevOverrideDefinition> 
     })
 }
 
+/// Load services from `.fenrir/services.json` if it exists.
+/// Returns an empty vector if the file doesn't exist.
+fn load_services_json(module_root: &Path) -> ModuleResult<Vec<DevServiceBinding>> {
+    let json_path = module_root.join(SERVICES_JSON_PATH);
+    if !json_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let contents = fs::read_to_string(&json_path).map_err(|err| {
+        ModuleServiceError::Storage(ModuleStorageError::Io(format!(
+            "failed to read {}: {}",
+            json_path.display(),
+            err
+        )))
+    })?;
+
+    let manifest: ModuleServicesJson = serde_json::from_str(&contents).map_err(|err| {
+        ModuleServiceError::Storage(ModuleStorageError::InvalidState(format!(
+            "invalid JSON in {}: {}",
+            json_path.display(),
+            err
+        )))
+    })?;
+
+    tracing::debug!(
+        path = %json_path.display(),
+        schema_version = %manifest.schema_version,
+        services = manifest.services.len(),
+        "loaded services.json manifest"
+    );
+
+    parse_json_services(&manifest.services, &json_path)
+}
+
+fn merge_dev_services(
+    base: Vec<DevServiceBinding>,
+    overrides: Vec<DevServiceBinding>,
+) -> Vec<DevServiceBinding> {
+    if overrides.is_empty() {
+        return base;
+    }
+    let mut merged = Vec::with_capacity(base.len() + overrides.len());
+    let mut index = HashMap::new();
+    for service in base {
+        index.insert(service.id.clone(), merged.len());
+        merged.push(service);
+    }
+    for service in overrides {
+        if let Some(pos) = index.get(&service.id).copied() {
+            merged[pos] = service;
+        } else {
+            index.insert(service.id.clone(), merged.len());
+            merged.push(service);
+        }
+    }
+    merged
+}
+
+/// Parse JSON service entries into DevServiceBinding format.
+fn parse_json_services(
+    entries: &[ModuleServiceJsonEntry],
+    json_path: &Path,
+) -> ModuleResult<Vec<DevServiceBinding>> {
+    let mut services = Vec::new();
+
+    for entry in entries {
+        let service_id = entry.service_id.trim();
+        if service_id.is_empty() {
+            return Err(ModuleServiceError::Storage(
+                ModuleStorageError::InvalidState(format!(
+                    "{}: service entry has empty service_id",
+                    json_path.display()
+                )),
+            ));
+        }
+
+        // Parse allowed roles
+        let allowed_roles = if entry.allowed_roles.is_empty() {
+            ServiceSecurityMetadata::default_allowed_roles()
+        } else {
+            let mut roles = Vec::new();
+            for role in &entry.allowed_roles {
+                match ServiceRole::from_str(role) {
+                    Ok(parsed) => roles.push(parsed),
+                    Err(_) => {
+                        return Err(ModuleServiceError::Storage(
+                            ModuleStorageError::InvalidState(format!(
+                                "{}: service '{}' has invalid role '{}'",
+                                json_path.display(),
+                                service_id,
+                                role
+                            )),
+                        ));
+                    }
+                }
+            }
+            roles
+        };
+
+        // Parse required scopes
+        let mut scopes = Vec::new();
+        for scope in &entry.required_scopes {
+            match ServiceScope::new(scope) {
+                Ok(parsed) => scopes.push(parsed),
+                Err(err) => {
+                    return Err(ModuleServiceError::Storage(
+                        ModuleStorageError::InvalidState(format!(
+                            "{}: service '{}' has invalid scope '{}': {}",
+                            json_path.display(),
+                            service_id,
+                            scope,
+                            err
+                        )),
+                    ));
+                }
+            }
+        }
+
+        // Determine internal_only from either field
+        let internal_only = entry.internal_only.unwrap_or_else(|| {
+            match entry.ingress_access.as_deref() {
+                Some("public") => false,
+                _ => true, // default to internal
+            }
+        });
+
+        let security = ServiceSecurityMetadata {
+            internal_only,
+            allowed_roles,
+            required_scopes: scopes,
+            tenant: ServiceTenantGuard::any(),
+        };
+
+        // Build ingress metadata
+        let mut ingress = if internal_only {
+            ServiceIngressMetadata::internal()
+        } else {
+            ServiceIngressMetadata::public()
+        };
+
+        if let Some(prefix) = entry.route_prefix.as_deref() {
+            ingress = ingress.with_route_prefix(prefix);
+        }
+        if let Some(health) = entry.health_path.as_deref() {
+            ingress = ingress.with_health_endpoint(health);
+        }
+
+        // Rate limiting
+        let rate_limit = if entry.disable_rate_limit.unwrap_or(false) {
+            ServiceRateLimit::Unlimited
+        } else if let Some(limit) = entry.rate_limit_per_second {
+            if limit == 0 {
+                return Err(ModuleServiceError::Storage(
+                    ModuleStorageError::InvalidState(format!(
+                        "{}: service '{}' has invalid rate_limit_per_second: 0",
+                        json_path.display(),
+                        service_id
+                    )),
+                ));
+            }
+            ServiceRateLimit::CustomPerSecond(limit)
+        } else {
+            ServiceRateLimit::Default
+        };
+        ingress = ingress.with_rate_limit(rate_limit);
+
+        // Protocols
+        let protocols: Vec<ServiceIngressProtocol> = if entry.protocols.is_empty() {
+            vec![ServiceIngressProtocol::Http]
+        } else {
+            entry
+                .protocols
+                .iter()
+                .map(|p| match p.to_lowercase().as_str() {
+                    "grpc" => ServiceIngressProtocol::Grpc,
+                    _ => ServiceIngressProtocol::Http,
+                })
+                .collect()
+        };
+        ingress = ingress.with_protocols(protocols);
+
+        // Service kind
+        let kind = match entry.kind.as_deref() {
+            Some("transport") => ServiceKind::Transport,
+            Some("infrastructure") => ServiceKind::Infrastructure,
+            Some("background_job") | Some("background-job") => ServiceKind::BackgroundJob,
+            Some("cli") => ServiceKind::Cli,
+            Some("security") => ServiceKind::Security,
+            Some("storage") => ServiceKind::Storage,
+            _ => ServiceKind::Other,
+        };
+
+        // Note: endpoint is set to a placeholder - will be resolved at runtime
+        // when the module starts and Fenrir assigns a port
+        let placeholder_endpoint = SocketAddr::from(([127, 0, 0, 1], 0));
+
+        services.push(DevServiceBinding {
+            id: service_id.to_string(),
+            endpoint: placeholder_endpoint,
+            name: entry.name.clone(),
+            description: entry.description.clone(),
+            kind,
+            security,
+            ingress,
+        });
+    }
+
+    Ok(services)
+}
+
 fn load_declared_services(module_root: &Path) -> ModuleResult<Vec<DevServiceBinding>> {
+    // 1. Try to load from .fenrir/services.json first (new format)
+    let json_services = load_services_json(module_root)?;
+    if !json_services.is_empty() {
+        tracing::debug!(
+            path = %module_root.display(),
+            count = json_services.len(),
+            "using services from .fenrir/services.json"
+        );
+        return Ok(json_services);
+    }
+
+    // 2. Fallback to .fenrir-dev.toml / .fenrir/config.toml (legacy format)
     let definition = load_dev_override(module_root)?;
     parse_dev_services(&definition.services, &definition.config_path)
 }

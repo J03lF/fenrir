@@ -124,8 +124,8 @@ pub fn run_local_db_shell(mut session: DbShellSession, prompt: String) -> io::Re
                 }
                 buffer.push_str(&line);
 
-                // Check if statement is complete (ends with ;)
-                if trimmed.ends_with(';') {
+                // Check if statement is complete
+                if is_statement_complete(trimmed) {
                     let command = buffer.trim().to_string();
                     buffer.clear();
                     let _ = editor.add_history_entry(&command);
@@ -280,6 +280,20 @@ pub fn completion_words(session: Option<&DbShellSession>) -> Vec<String> {
     words
 }
 
+fn is_statement_complete(line: &str) -> bool {
+    let trimmed = line.trim_end();
+    if trimmed.ends_with(';') {
+        return true;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.ends_with("--force") {
+        return false;
+    }
+    let force_start = lower.len() - "--force".len();
+    let before_force = &lower[..force_start];
+    before_force.contains(';')
+}
+
 /// Fetch table names from the database for completion
 pub fn fetch_table_names(
     session: &DbShellSession,
@@ -427,6 +441,10 @@ pub struct RuntimeExecutor {
     handle: Handle,
     _runtime: Option<Runtime>,
 }
+
+#[cfg(test)]
+#[path = "../../../../../tests/unit/cli/commands/builtins/db_shell/shell_tests.rs"]
+mod shell_tests;
 
 impl RuntimeExecutor {
     pub fn new() -> io::Result<Self> {

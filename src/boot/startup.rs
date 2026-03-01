@@ -66,20 +66,26 @@ pub fn boot() -> Result<BootContext, BootError> {
 
     // Early SecurityManager for DB credential sealing (before real audit store exists).
     // Uses NoopAuditSink since credential operations aren't audit-critical.
-    let early_security_manager: Option<Arc<SecurityManager>> =
-        if cfg.db.runtime.mode == DbRuntimeMode::Embedded
-            && cfg.db.runtime.embedded.security.auth_method.requires_password()
-        {
-            use crate::security::manager::NoopAuditSink;
-            let noop_audit = Arc::new(NoopAuditSink);
-            Some(Arc::new(wrap_boot(
-                SecurityManager::new(&cfg.security, noop_audit),
-                BootErrorCode::SecurityInit,
-                boot_errors::SECURITY_MANAGER_INIT_FAILED,
-            )?))
-        } else {
-            None
-        };
+    let early_security_manager: Option<Arc<SecurityManager>> = if cfg.db.runtime.mode
+        == DbRuntimeMode::Embedded
+        && cfg
+            .db
+            .runtime
+            .embedded
+            .security
+            .auth_method
+            .requires_password()
+    {
+        use crate::security::manager::NoopAuditSink;
+        let noop_audit = Arc::new(NoopAuditSink);
+        Some(Arc::new(wrap_boot(
+            SecurityManager::new(&cfg.security, noop_audit),
+            BootErrorCode::SecurityInit,
+            boot_errors::SECURITY_MANAGER_INIT_FAILED,
+        )?))
+    } else {
+        None
+    };
 
     // Early supervisor creation for embedded postgres (needs to start before adapters are built).
     let early_db_runtime: Option<Arc<DbRuntimeSupervisor>> =
@@ -93,12 +99,12 @@ pub fn boot() -> Result<BootContext, BootError> {
                 db_dir,
                 cfg.db.runtime.embedded.security.clone(),
             );
-            
+
             // Attach early security manager if password auth is required
             if let Some(ref security) = early_security_manager {
                 sup.attach_security(Arc::clone(security));
             }
-            
+
             // Start the supervisor (blocking) to get connector URI before building adapters.
             let sup_clone = Arc::clone(&sup);
             let start_result = block_on_managed(async move { sup_clone.start().await });
@@ -598,6 +604,7 @@ pub fn boot() -> Result<BootContext, BootError> {
         client_settings,
         health_client,
         default_service_scopes,
+        env_passthrough_prefixes: cfg.modules.runtime.env_passthrough_prefixes.clone(),
         control_plane_url,
         service_snapshot_path: Some(runtime_state_dir.join("services.json")),
         diagnostics: services.diagnostics(),
@@ -647,27 +654,29 @@ pub fn boot() -> Result<BootContext, BootError> {
     }
 
     // Create backup service if backup is enabled and db runtime is embedded
-    let backup_service = if cfg.db.backup.enabled
-        && cfg.db.runtime.mode == crate::config::DbRuntimeMode::Embedded
-    {
-        // Get db_runtime from services (already attached above)
-        match services.db_runtime() {
-            Some(db_runtime) => Some(Arc::new(crate::services::backup::BackupService::new(
-                cfg.db.backup.clone(),
-                cfg.db.runtime.embedded.engine,
-                Arc::clone(&db_shell_service),
-                db_runtime,
-                services.audit_store(),
-                runtime_dir.clone(),
-            ))),
-            None => {
-                warn!("backup service not created: db_runtime not available");
-                None
+    let backup_service =
+        if cfg.db.backup.enabled && cfg.db.runtime.mode == crate::config::DbRuntimeMode::Embedded {
+            // Get db_runtime from services (already attached above)
+            match services.db_runtime() {
+                Some(db_runtime) => Some(Arc::new(crate::services::backup::BackupService::new(
+                    cfg.db.backup.clone(),
+                    cfg.db.runtime.embedded.engine,
+                    Arc::clone(&db_shell_service),
+                    db_runtime,
+                    services.audit_store(),
+                    runtime_dir.clone(),
+                ))),
+                None => {
+                    warn!("backup service not created: db_runtime not available");
+                    None
+                }
             }
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
+    if let Some(backup_service) = backup_service.as_ref() {
+        let _ = services.attach_backup_service(Arc::clone(backup_service));
+    }
 
     wrap_boot(
         install_default_jobs(

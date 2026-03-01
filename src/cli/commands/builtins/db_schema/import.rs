@@ -41,9 +41,16 @@ pub async fn run_import(
     dry_run: bool,
     force: bool,
 ) -> Result<String, String> {
-    run_import_with_progress(services, path, engine, dry_run, force, None::<fn(ImportProgress)>)
-        .await
-        .map(|r| r.message)
+    run_import_with_progress(
+        services,
+        path,
+        engine,
+        dry_run,
+        force,
+        None::<fn(ImportProgress)>,
+    )
+    .await
+    .map(|r| r.message)
 }
 
 pub async fn run_import_with_progress<F>(

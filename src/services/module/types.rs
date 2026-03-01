@@ -212,3 +212,62 @@ pub struct ModuleScaffoldSummary {
     pub root: PathBuf,
     pub files: Vec<PathBuf>,
 }
+
+// ============================================================================
+// Services JSON Support
+// ============================================================================
+
+/// JSON manifest for module services (`.fenrir/services.json`).
+/// This format is compatible with `fenrir-module-kit` and allows modules
+/// to declare their services statically.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ModuleServicesJson {
+    /// Schema version (e.g., "1.0")
+    pub schema_version: String,
+    /// List of services provided by this module
+    #[serde(default)]
+    pub services: Vec<ModuleServiceJsonEntry>,
+}
+
+/// A single service entry in the services JSON manifest.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ModuleServiceJsonEntry {
+    /// Service identifier (e.g., "api-gateway", "core", "auth")
+    pub service_id: String,
+    /// Human-readable service name
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Service description
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Service kind (e.g., "http", "grpc", "transport")
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Route prefix for gateway routing (e.g., "/api/v1")
+    #[serde(default)]
+    pub route_prefix: Option<String>,
+    /// Health check endpoint path (e.g., "/health")
+    #[serde(default)]
+    pub health_path: Option<String>,
+    /// Whether service is internal-only (not exposed via gateway)
+    #[serde(default)]
+    pub internal_only: Option<bool>,
+    /// Ingress access level ("internal" or "public")
+    #[serde(default)]
+    pub ingress_access: Option<String>,
+    /// Supported protocols (e.g., ["http", "grpc"])
+    #[serde(default)]
+    pub protocols: Vec<String>,
+    /// Required scopes for access (e.g., ["athene:read", "athene:write"])
+    #[serde(default)]
+    pub required_scopes: Vec<String>,
+    /// Allowed roles for access (e.g., ["admin", "operator"])
+    #[serde(default)]
+    pub allowed_roles: Vec<String>,
+    /// Rate limit per second (if specified)
+    #[serde(default)]
+    pub rate_limit_per_second: Option<u32>,
+    /// Whether to disable rate limiting entirely
+    #[serde(default)]
+    pub disable_rate_limit: Option<bool>,
+}

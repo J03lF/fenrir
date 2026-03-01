@@ -13,7 +13,12 @@ const SERVICE_ARGUMENT: CommandArgument = CommandArgument::required("service_id"
     .with_completion(CompletionKind::Dynamic(complete_service_ids));
 
 const STATUS_SUBCOMMANDS: &[CommandSubcommand] = &[
-    CommandSubcommand::new("fenrir", &["system", "server"], &[], "Show Fenrir system overview"),
+    CommandSubcommand::new(
+        "fenrir",
+        &["system", "server"],
+        &[],
+        "Show Fenrir system overview",
+    ),
     CommandSubcommand::new("db", &["database"], &[], "Show embedded db-runtime status"),
     CommandSubcommand::new(
         "service",

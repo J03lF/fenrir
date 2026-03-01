@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use once_cell::sync::Lazy;
 use serde_json::Value as JsonValue;
-use tracing::{info, warn};
+use tracing::warn;
 
 use crate::domain::db::{DbEngine, DbError, DbExecutionResult, DbValue};
 use crate::security::manager::{SecurityError, SecurityManager};
@@ -91,14 +91,7 @@ impl DbConnectorService {
         let result = self.process(request).await;
         let success = result.is_ok();
         let response = match result {
-            Ok(results) => {
-                info!(
-                    tenant = results.tenant_id.as_str(),
-                    "{}",
-                    db_connector_logs::REQUEST_OK
-                );
-                DbConnectorResponse::ok(results.payload)
-            }
+            Ok(results) => DbConnectorResponse::ok(results.payload),
             Err(err) => {
                 warn!(error = %err, "{}", db_connector_logs::REQUEST_FAILED);
                 DbConnectorResponse::err(err.to_string())
@@ -160,10 +153,7 @@ impl DbConnectorService {
         let payload = self
             .execute_command(&mut session, command, exec_intent)
             .await?;
-        Ok(DbConnectorResult {
-            tenant_id: claims.tenant_id.clone(),
-            payload,
-        })
+        Ok(DbConnectorResult { payload })
     }
 
     fn record_metrics(&self, started_at: Instant, success: bool) {
@@ -279,16 +269,41 @@ impl DbConnectorService {
     ) -> Result<Vec<DbValue>, DbConnectorError> {
         params
             .into_iter()
-            .map(|param| Self::parse_param_value(param.value))
+            .map(|param| Self::parse_param_value_with_name(&param.name, param.value))
             .collect()
     }
 
-    fn parse_param_value(value: JsonValue) -> Result<DbValue, DbConnectorError> {
+    fn parse_param_value_with_name(
+        name: &str,
+        value: JsonValue,
+    ) -> Result<DbValue, DbConnectorError> {
         match value {
-            JsonValue::Null => Ok(DbValue::Null),
+            JsonValue::Null => {
+                // Detect column type by name convention
+                if Self::looks_like_timestamp_column(name) {
+                    Ok(DbValue::NullTimestamp)
+                } else if Self::looks_like_uuid_column(name) {
+                    Ok(DbValue::NullUuid)
+                } else {
+                    // Default to generic NULL (works for TEXT, VARCHAR, etc.)
+                    // INET columns are rare - treat IP addresses as text by default
+                    Ok(DbValue::Null)
+                }
+            }
             JsonValue::Bool(flag) => Ok(DbValue::Bool(flag)),
             JsonValue::Number(num) => {
                 if let Some(int) = num.as_i64() {
+                    if Self::looks_like_bool_column(name) {
+                        return match int {
+                            0 => Ok(DbValue::Bool(false)),
+                            1 => Ok(DbValue::Bool(true)),
+                            _ => Err(DbConnectorError::InvalidRequest(format!(
+                                "invalid boolean value for {name}: {int}",
+                            ))),
+                        };
+                    }
+                    // Always use i64 - Postgres will accept it for both INT4 and INT8 columns
+                    // The database will handle overflow errors if the value is too large for INT4
                     Ok(DbValue::Integer(int))
                 } else if let Some(float) = num.as_f64() {
                     Ok(DbValue::Float(float))
@@ -299,6 +314,15 @@ impl DbConnectorService {
                 }
             }
             JsonValue::String(text) => {
+                if Self::looks_like_text_array_column(name) {
+                    return Ok(Self::parse_text_array_value(&text));
+                }
+                // Try to detect UUID strings (e.g., "550e8400-e29b-41d4-a716-446655440000")
+                if Self::looks_like_uuid(&text) {
+                    if let Ok(uuid) = uuid::Uuid::parse_str(&text) {
+                        return Ok(DbValue::Uuid(uuid));
+                    }
+                }
                 // Try to detect ISO 8601 timestamps (e.g., "2024-01-01T12:00:00Z" or with timezone)
                 if Self::looks_like_timestamp(&text) {
                     // Try to parse as RFC 3339 timestamp
@@ -311,12 +335,98 @@ impl DbConnectorService {
                     // Fall back to timestamp string for Postgres to parse
                     return Ok(DbValue::TimestampStr(text));
                 }
+                // Default: treat as text (works for VARCHAR, TEXT, and IP addresses stored as text)
                 Ok(DbValue::Text(text))
+            }
+            JsonValue::Array(values) => {
+                if Self::looks_like_text_array_column(name) {
+                    Ok(Self::parse_text_array_items(values))
+                } else {
+                    serde_json::to_string(&JsonValue::Array(values))
+                        .map(DbValue::Json)
+                        .map_err(|err| DbConnectorError::InvalidRequest(err.to_string()))
+                }
             }
             other => serde_json::to_string(&other)
                 .map(DbValue::Json)
                 .map_err(|err| DbConnectorError::InvalidRequest(err.to_string())),
         }
+    }
+
+    /// Heuristic to detect if a column name refers to a timestamp
+    fn looks_like_timestamp_column(name: &str) -> bool {
+        let lower = name.to_lowercase();
+        lower.ends_with("_at")
+            || lower.ends_with("_until")
+            || lower.ends_with("_date")
+            || lower.ends_with("_time")
+            || lower == "created"
+            || lower == "updated"
+            || lower == "timestamp"
+    }
+
+    /// Heuristic to detect if a column stores a boolean flag
+    fn looks_like_bool_column(name: &str) -> bool {
+        let lower = name.to_lowercase();
+        matches!(
+            lower.as_str(),
+            "enabled" | "requires_api_key" | "maintenance_mode" | "email_verified" | "success"
+        ) || lower.starts_with("is_")
+            || lower.starts_with("has_")
+            || lower.ends_with("_enabled")
+            || lower.ends_with("_active")
+            || lower.ends_with("_verified")
+            || lower.ends_with("_required")
+    }
+
+    /// Heuristic to detect if a column stores a text array
+    fn looks_like_text_array_column(name: &str) -> bool {
+        let lower = name.to_lowercase();
+        matches!(lower.as_str(), "allowed_email_domains" | "scopes")
+            || lower.ends_with("_domains")
+            || lower.ends_with("_scopes")
+    }
+
+    fn parse_text_array_items(values: Vec<JsonValue>) -> DbValue {
+        let items = values
+            .into_iter()
+            .filter_map(|value| match value {
+                JsonValue::String(text) => Some(text),
+                JsonValue::Number(num) => Some(num.to_string()),
+                JsonValue::Bool(flag) => Some(flag.to_string()),
+                JsonValue::Null => None,
+                other => Some(other.to_string()),
+            })
+            .collect::<Vec<_>>();
+        DbValue::TextArray(items)
+    }
+
+    fn parse_text_array_value(text: &str) -> DbValue {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return DbValue::TextArray(Vec::new());
+        }
+        if let Ok(JsonValue::Array(values)) = serde_json::from_str::<JsonValue>(trimmed) {
+            return Self::parse_text_array_items(values);
+        }
+        DbValue::TextArray(vec![text.to_string()])
+    }
+
+    /// Heuristic to detect if a column is a UUID
+    fn looks_like_uuid_column(name: &str) -> bool {
+        let lower = name.to_lowercase();
+        lower.ends_with("_id") || lower == "id" || lower == "uuid" || lower.ends_with("_uuid")
+    }
+
+    /// Heuristic to detect if a string looks like a UUID
+    fn looks_like_uuid(s: &str) -> bool {
+        // Standard UUID format: 8-4-4-4-12 = 36 chars with hyphens
+        if s.len() != 36 {
+            return false;
+        }
+        let bytes = s.as_bytes();
+        // Check for hyphens at expected positions
+        bytes[8] == b'-' && bytes[13] == b'-' && bytes[18] == b'-' && bytes[23] == b'-'
     }
 
     /// Heuristic to detect if a string looks like an ISO 8601 timestamp
@@ -338,7 +448,6 @@ impl DbConnectorService {
 
 #[derive(Debug)]
 struct DbConnectorResult {
-    tenant_id: String,
     payload: Vec<DbConnectorResultView>,
 }
 

@@ -1,13 +1,16 @@
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
+use russh::cipher;
+use russh::server::{Auth, Handle as SessionHandle, Msg, Server, Session};
+use russh::{server, Channel, ChannelId, CryptoVec, Preferred};
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use russh::server::{Auth, Handle as SessionHandle, Server, Session, Msg};
-use russh::{server, Channel, ChannelId, CryptoVec};
+use tokio::net::TcpListener;
 use tokio::runtime::Handle as TokioHandle;
 use tokio::sync::mpsc;
 
@@ -46,6 +49,28 @@ const SSH_TRANSPORT: &str = "ssh";
 const SSH_DEFAULT_ROLE: &str = "ssh";
 const SSH_PASSWORD_ENV: &str = "FENRIR_SSH_PASSWORD";
 
+/// Calculate the visible character width of a string, stripping ANSI escape sequences.
+fn visible_width(s: &str) -> usize {
+    let mut width = 0;
+    let mut in_escape = false;
+    for ch in s.chars() {
+        if in_escape {
+            if ch.is_ascii_alphabetic() {
+                in_escape = false;
+            }
+            continue;
+        }
+        if ch == '\x1b' {
+            in_escape = true;
+            continue;
+        }
+        if !ch.is_control() {
+            width += 1;
+        }
+    }
+    width
+}
+
 struct Handler {
     username: String,
     password_env: Option<String>,
@@ -72,6 +97,8 @@ struct Handler {
     db_completion_tables: HashSet<String>,
     db_multiline_buffer: String,
     cursor: usize,
+    rendered_line_count: usize,
+    rendered_cursor_row: usize,
     pending_confirmation: Option<ConfirmationRequest>,
     channel: Option<Channel<Msg>>,
 }
@@ -190,7 +217,9 @@ impl server::Handler for Handler {
                     "login rejected: user not authorized"
                 );
                 self.record_login_audit(user, false, Some("user not authorized"));
-                return Ok(Auth::Reject { proceed_with_methods: None });
+                return Ok(Auth::Reject {
+                    proceed_with_methods: None,
+                });
             }
 
             match self.authenticate_identity(user, password) {
@@ -207,7 +236,9 @@ impl server::Handler for Handler {
                 Err(err) => {
                     warn!(ssh_user = %user, error = %err, "identity authentication rejected");
                     self.record_login_audit(user, false, Some(&err.to_string()));
-                    Ok(Auth::Reject { proceed_with_methods: None })
+                    Ok(Auth::Reject {
+                        proceed_with_methods: None,
+                    })
                 }
             }
         } else if self.password_env_accepts(user, password) {
@@ -215,7 +246,9 @@ impl server::Handler for Handler {
             Ok(Auth::Accept)
         } else {
             self.record_login_audit(user, false, Some("invalid credentials"));
-            Ok(Auth::Reject { proceed_with_methods: None })
+            Ok(Auth::Reject {
+                proceed_with_methods: None,
+            })
         }
     }
 
@@ -307,13 +340,20 @@ impl server::Handler for Handler {
                 }
                 '\r' => {
                     self.skip_next_lf = true;
+                    // Move to the last rendered line before advancing
+                    self.move_to_last_rendered_line(session, channel);
                     session.data(channel, CryptoVec::from_slice(b"\r\n"));
+                    self.rendered_line_count = 1;
+                    self.rendered_cursor_row = 0;
                     if !self.process_buffer(channel, session) {
                         return Ok(());
                     }
                 }
                 '\n' => {
+                    self.move_to_last_rendered_line(session, channel);
                     session.data(channel, CryptoVec::from_slice(b"\r\n"));
+                    self.rendered_line_count = 1;
+                    self.rendered_cursor_row = 0;
                     if !self.process_buffer(channel, session) {
                         return Ok(());
                     }
@@ -332,10 +372,14 @@ impl server::Handler for Handler {
                     }
                 }
                 '\u{3}' => {
+                    self.move_to_last_rendered_line(session, channel);
                     self.buffer.clear();
                     self.cursor = 0;
+                    self.rendered_line_count = 1;
+                    self.rendered_cursor_row = 0;
                     session.data(channel, CryptoVec::from_slice(b"^C\r\n"));
                     self.history_index = None;
+                    self.db_multiline_buffer.clear();
                     Handler::send_prompt(session, channel, self.current_prompt());
                 }
                 ch => {
@@ -1029,7 +1073,85 @@ impl Handler {
         }
     }
 
+    /// Returns the 0-based line index the cursor currently sits on.
+    fn cursor_line(&self) -> usize {
+        self.buffer[..self.cursor].matches('\n').count()
+    }
+
+    /// Returns the total number of lines in the buffer (0-based last index).
+    fn buffer_last_line(&self) -> usize {
+        self.buffer.matches('\n').count()
+    }
+
+    /// Move cursor one line up inside a multi-line buffer, keeping roughly
+    /// the same column. Returns `true` if the cursor actually moved.
+    fn move_cursor_up_in_buffer(&mut self, session: &mut Session, channel: ChannelId) -> bool {
+        if !self.buffer.contains('\n') {
+            return false;
+        }
+        let cur_line = self.cursor_line();
+        if cur_line == 0 {
+            return false; // already on first line
+        }
+
+        // Column on the current line
+        let before = &self.buffer[..self.cursor];
+        let col = before
+            .rfind('\n')
+            .map(|p| self.cursor - p - 1)
+            .unwrap_or(self.cursor);
+
+        // Find the start of the previous line
+        let cur_line_start = before.rfind('\n').unwrap(); // guaranteed since cur_line > 0
+        let prev_content = &self.buffer[..cur_line_start];
+        let prev_line_start = prev_content.rfind('\n').map(|p| p + 1).unwrap_or(0);
+        let prev_line_len = cur_line_start - prev_line_start;
+
+        self.cursor = prev_line_start + col.min(prev_line_len);
+        self.render_buffer(session, channel);
+        true
+    }
+
+    /// Move cursor one line down inside a multi-line buffer, keeping roughly
+    /// the same column. Returns `true` if the cursor actually moved.
+    fn move_cursor_down_in_buffer(&mut self, session: &mut Session, channel: ChannelId) -> bool {
+        if !self.buffer.contains('\n') {
+            return false;
+        }
+        let cur_line = self.cursor_line();
+        let last_line = self.buffer_last_line();
+        if cur_line >= last_line {
+            return false; // already on last line
+        }
+
+        // Column on the current line
+        let before = &self.buffer[..self.cursor];
+        let col = before
+            .rfind('\n')
+            .map(|p| self.cursor - p - 1)
+            .unwrap_or(self.cursor);
+
+        // Find the start of the next line
+        let next_line_start = self.buffer[self.cursor..].find('\n').unwrap() + self.cursor + 1;
+        let next_line_end = self.buffer[next_line_start..]
+            .find('\n')
+            .map(|p| next_line_start + p)
+            .unwrap_or(self.buffer.len());
+        let next_line_len = next_line_end - next_line_start;
+
+        self.cursor = next_line_start + col.min(next_line_len);
+        self.render_buffer(session, channel);
+        true
+    }
+
     fn history_prev(&mut self, session: &mut Session, channel: ChannelId) {
+        // If the buffer is multi-line and cursor is not on the first line,
+        // move the cursor up instead of navigating history.
+        if self.buffer.contains('\n') && self.cursor_line() > 0 {
+            self.move_cursor_up_in_buffer(session, channel);
+            return;
+        }
+
         if self.history.is_empty() {
             return;
         }
@@ -1046,6 +1168,13 @@ impl Handler {
     }
 
     fn history_next(&mut self, session: &mut Session, channel: ChannelId) {
+        // If the buffer is multi-line and cursor is not on the last line,
+        // move the cursor down instead of navigating history.
+        if self.buffer.contains('\n') && self.cursor_line() < self.buffer_last_line() {
+            self.move_cursor_down_in_buffer(session, channel);
+            return;
+        }
+
         if self.history.is_empty() {
             return;
         }
@@ -1070,16 +1199,98 @@ impl Handler {
         if self.cursor > self.buffer.len() {
             self.cursor = self.buffer.len();
         }
-        session.data(channel, CryptoVec::from_slice(b"\r"));
-        Handler::send_prompt(session, channel, self.current_prompt());
-        session.data(channel, CryptoVec::from_slice(b"\x1b[K"));
-        if !self.buffer.is_empty() {
-            session.data(channel, CryptoVec::from_slice(self.buffer.as_bytes()));
+
+        let is_multiline = matches!(self.mode, ShellMode::DbShell) && self.buffer.contains('\n');
+
+        // Move terminal cursor back to row 0 of the rendered block.
+        // Use rendered_cursor_row (the actual row the terminal cursor is on).
+        if self.rendered_cursor_row > 0 {
+            let up = format!("\x1b[{}A", self.rendered_cursor_row);
+            session.data(channel, CryptoVec::from_slice(up.as_bytes()));
         }
-        let tail_len = self.buffer[self.cursor..].chars().count();
-        if tail_len > 0 {
-            let seq = format!("\x1b[{}D", tail_len);
-            session.data(channel, CryptoVec::from_slice(seq.as_bytes()));
+
+        if is_multiline {
+            let lines: Vec<&str> = self.buffer.split('\n').collect();
+            let prompt = self.current_prompt().to_string();
+            let cont_prompt = DB_CONTINUATION_PROMPT;
+
+            // Render each line with proper prompt
+            for (i, line) in lines.iter().enumerate() {
+                session.data(channel, CryptoVec::from_slice(b"\r\x1b[K"));
+                let p = if i == 0 { prompt.as_str() } else { cont_prompt };
+                Handler::send_prompt(session, channel, p);
+                if !line.is_empty() {
+                    session.data(channel, CryptoVec::from_slice(line.as_bytes()));
+                }
+                if i < lines.len() - 1 {
+                    session.data(channel, CryptoVec::from_slice(b"\r\n"));
+                }
+            }
+
+            // Clear any leftover lines from a previous longer render
+            let new_count = lines.len();
+            if self.rendered_line_count > new_count {
+                let extra = self.rendered_line_count - new_count;
+                for _ in 0..extra {
+                    session.data(channel, CryptoVec::from_slice(b"\r\n\x1b[K"));
+                }
+                let up = format!("\x1b[{}A", extra);
+                session.data(channel, CryptoVec::from_slice(up.as_bytes()));
+            }
+            self.rendered_line_count = new_count;
+
+            // Position cursor correctly within the multi-line display.
+            // After rendering, terminal cursor sits on the last content line.
+            let before_cursor = &self.buffer[..self.cursor];
+            let cursor_line = before_cursor.matches('\n').count();
+            let cursor_col = before_cursor
+                .rfind('\n')
+                .map(|pos| before_cursor[pos + 1..].chars().count())
+                .unwrap_or(before_cursor.chars().count());
+            let last_line = lines.len() - 1;
+
+            // Move up from the last rendered line to the cursor's line
+            if last_line > cursor_line {
+                let up = format!("\x1b[{}A", last_line - cursor_line);
+                session.data(channel, CryptoVec::from_slice(up.as_bytes()));
+            }
+
+            // Move to the correct column (prompt width + text offset)
+            let prompt_width = if cursor_line == 0 {
+                visible_width(&prompt)
+            } else {
+                cont_prompt.len()
+            };
+            session.data(channel, CryptoVec::from_slice(b"\r"));
+            let target_col = prompt_width + cursor_col;
+            if target_col > 0 {
+                let right = format!("\x1b[{}C", target_col);
+                session.data(channel, CryptoVec::from_slice(right.as_bytes()));
+            }
+
+            // Track which row the terminal cursor actually ended up on
+            self.rendered_cursor_row = cursor_line;
+        } else {
+            // Single-line rendering (original path)
+            session.data(channel, CryptoVec::from_slice(b"\r\x1b[K"));
+            Handler::send_prompt(session, channel, self.current_prompt());
+            if !self.buffer.is_empty() {
+                session.data(channel, CryptoVec::from_slice(self.buffer.as_bytes()));
+            }
+
+            // Clear leftover lines from a previous multi-line render.
+            // \x1b[J erases from cursor to end of display without moving the cursor.
+            if self.rendered_line_count > 1 {
+                session.data(channel, CryptoVec::from_slice(b"\x1b[J"));
+            }
+            self.rendered_line_count = 1;
+            self.rendered_cursor_row = 0;
+
+            let tail_len = self.buffer[self.cursor..].chars().count();
+            if tail_len > 0 {
+                let seq = format!("\x1b[{}D", tail_len);
+                session.data(channel, CryptoVec::from_slice(seq.as_bytes()));
+            }
         }
     }
 
@@ -1353,14 +1564,35 @@ impl Handler {
     fn move_cursor_left(&mut self, session: &mut Session, channel: ChannelId) {
         if let Some(prev) = self.buffer[..self.cursor].chars().next_back() {
             self.cursor = self.cursor.saturating_sub(prev.len_utf8());
-            session.data(channel, CryptoVec::from_slice(b"\x1b[D"));
+            if self.buffer.contains('\n') {
+                self.render_buffer(session, channel);
+            } else {
+                session.data(channel, CryptoVec::from_slice(b"\x1b[D"));
+            }
         }
     }
 
     fn move_cursor_right(&mut self, session: &mut Session, channel: ChannelId) {
         if let Some(next) = self.buffer[self.cursor..].chars().next() {
             self.cursor = (self.cursor + next.len_utf8()).min(self.buffer.len());
-            session.data(channel, CryptoVec::from_slice(b"\x1b[C"));
+            if self.buffer.contains('\n') {
+                self.render_buffer(session, channel);
+            } else {
+                session.data(channel, CryptoVec::from_slice(b"\x1b[C"));
+            }
+        }
+    }
+
+    /// Move the terminal cursor to the last rendered line of a multi-line display.
+    /// This must be called before Enter/Ctrl+C so the next output appears below all
+    /// rendered lines, not in the middle of them.
+    fn move_to_last_rendered_line(&self, session: &mut Session, channel: ChannelId) {
+        if self.rendered_line_count > 1 {
+            let last_row = self.rendered_line_count - 1;
+            if last_row > self.rendered_cursor_row {
+                let down = format!("\x1b[{}B", last_row - self.rendered_cursor_row);
+                session.data(channel, CryptoVec::from_slice(down.as_bytes()));
+            }
         }
     }
 
@@ -1380,18 +1612,22 @@ impl Handler {
 
 pub async fn start(cfg: &Arc<AppConfig>, services: &Arc<AppServices>) -> Result<()> {
     use russh::MethodSet;
-    
-    let config = server::Config {
+
+    let mut base_config = server::Config {
         auth_rejection_time: Duration::from_secs(1),
         // Enable password authentication
         methods: MethodSet::PASSWORD,
         ..Default::default()
     };
-    let mut config = config;
     let host_key = load_or_create_host_key(&cfg.server.ssh.host_key_path)
         .with_context(|| format!("loading ssh host key from {}", cfg.server.ssh.host_key_path))?;
-    config.keys.push(host_key);
-    let config = Arc::new(config);
+    let host_key_path = cfg.server.ssh.host_key_path.clone();
+    base_config.keys.push(host_key.clone());
+    if let Some(idle_seconds) = cfg.server.ssh.idle_close_seconds {
+        base_config.inactivity_timeout = Some(Duration::from_secs(idle_seconds));
+    }
+    apply_allowed_ciphers(&mut base_config, &cfg.server.ssh.tls.allowed_ciphers);
+    let base_config = Arc::new(base_config);
 
     struct Factory {
         username: String,
@@ -1444,6 +1680,8 @@ pub async fn start(cfg: &Arc<AppConfig>, services: &Arc<AppServices>) -> Result<
                 db_completion_tables: HashSet::new(),
                 db_multiline_buffer: String::new(),
                 cursor: 0,
+                rendered_line_count: 1,
+                rendered_cursor_row: 0,
                 pending_confirmation: None,
                 channel: None,
             };
@@ -1472,22 +1710,82 @@ pub async fn start(cfg: &Arc<AppConfig>, services: &Arc<AppServices>) -> Result<
         config: Arc::clone(cfg),
         services: Arc::clone(services),
     };
-    match server.run_on_address(config, &bind_addr).await {
-        Ok(()) => {
-            services.registry().set_status(
-                "ssh-server",
-                ServiceStatus::Stopped,
-                Some("listener stopped".to_string()),
-            );
-            Ok(())
+    if let Some(reload_seconds) = cfg.server.ssh.tls.host_key_reload_seconds {
+        let mut cached_host_key = host_key;
+        let reload_interval = Duration::from_secs(reload_seconds);
+        let mut last_reload = Instant::now();
+        let listener = TcpListener::bind(&bind_addr).await?;
+        let (error_tx, mut error_rx) = mpsc::unbounded_channel();
+        loop {
+            tokio::select! {
+                accept_result = listener.accept() => {
+                    match accept_result {
+                        Ok((socket, _addr)) => {
+                            if last_reload.elapsed() >= reload_interval {
+                                match load_or_create_host_key(&host_key_path) {
+                                    Ok(key) => {
+                                        cached_host_key = key;
+                                        last_reload = Instant::now();
+                                    }
+                                    Err(err) => {
+                                        tracing::warn!(
+                                            path = %host_key_path,
+                                            error = %err,
+                                            "failed to reload SSH host key"
+                                        );
+                                    }
+                                }
+                            }
+                            let mut config = build_server_config(cfg, cached_host_key.clone());
+                            apply_allowed_ciphers(&mut config, &cfg.server.ssh.tls.allowed_ciphers);
+                            let config = Arc::new(config);
+                            let handler = server.new_client(socket.peer_addr().ok());
+                            let error_tx = error_tx.clone();
+                            tokio::spawn(async move {
+                                let session = match server::run_stream(config, socket, handler).await {
+                                    Ok(session) => session,
+                                    Err(err) => {
+                                        let _ = error_tx.send(err);
+                                        return;
+                                    }
+                                };
+                                if let Err(err) = session.await {
+                                    let _ = error_tx.send(err);
+                                }
+                            });
+                        }
+                        _ => break,
+                    }
+                }
+                Some(error) = error_rx.recv() => {
+                    server.handle_session_error(error);
+                }
+            }
         }
-        Err(err) => {
-            services.registry().set_status(
-                "ssh-server",
-                ServiceStatus::Failed,
-                Some(ssh_messages::service_failure_note(err.to_string())),
-            );
-            Err(err.into())
+        services.registry().set_status(
+            "ssh-server",
+            ServiceStatus::Stopped,
+            Some("listener stopped".to_string()),
+        );
+        Ok(())
+    } else {
+        match server.run_on_address(base_config, &bind_addr).await {
+            Ok(()) => {
+                services.registry().set_status(
+                    "ssh-server",
+                    ServiceStatus::Stopped,
+                    Some("listener stopped".to_string()),
+                );
+                Ok(())
+            }
+            Err(err) => {
+                services.registry().set_status(
+                    "ssh-server",
+                    ServiceStatus::Failed,
+                    Some(ssh_messages::service_failure_note(err.to_string())),
+                );
+                Err(err.into())
+            }
         }
     }
 }
@@ -1530,10 +1828,10 @@ fn load_or_create_host_key(path: &str) -> Result<russh_keys::key::KeyPair> {
     if let Some(parent) = key_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    
+
     let key = russh_keys::key::KeyPair::generate_ed25519()
         .ok_or_else(|| anyhow!("failed to generate ed25519 host key"))?;
-    
+
     // Save the key in PKCS8 PEM format
     let mut file = OpenOptions::new()
         .write(true)
@@ -1548,8 +1846,66 @@ fn load_or_create_host_key(path: &str) -> Result<russh_keys::key::KeyPair> {
     russh_keys::encode_pkcs8_pem(&key, &mut file)
         .map_err(|e| anyhow!("failed to write host key: {}", e))?;
     tracing::info!(path = %key_path.display(), "generated new SSH host key");
-    
+
     Ok(key)
+}
+
+fn build_server_config(cfg: &AppConfig, host_key: russh_keys::key::KeyPair) -> server::Config {
+    use russh::MethodSet;
+
+    let mut config = server::Config {
+        auth_rejection_time: Duration::from_secs(1),
+        methods: MethodSet::PASSWORD,
+        ..Default::default()
+    };
+    config.keys.push(host_key);
+    if let Some(idle_seconds) = cfg.server.ssh.idle_close_seconds {
+        config.inactivity_timeout = Some(Duration::from_secs(idle_seconds));
+    }
+    config
+}
+
+fn apply_allowed_ciphers(config: &mut server::Config, allowed: &[String]) {
+    let resolved = resolve_allowed_ciphers(allowed);
+    if let Some(cipher_list) = resolved {
+        let mut preferred = Preferred::DEFAULT;
+        preferred.cipher = Cow::Owned(cipher_list);
+        config.preferred = preferred;
+    }
+}
+
+fn resolve_allowed_ciphers(allowed: &[String]) -> Option<Vec<cipher::Name>> {
+    if allowed.is_empty() {
+        return None;
+    }
+    let mut resolved = Vec::new();
+    for cipher_name in allowed {
+        let normalized = cipher_name.trim().to_ascii_lowercase();
+        let cipher = match normalized.as_str() {
+            "chacha20-poly1305" | "chacha20-poly1305@openssh.com" => cipher::CHACHA20_POLY1305,
+            "aes256-gcm" | "aes-256-gcm" | "aes_256_gcm" | "aes256-gcm@openssh.com" => {
+                cipher::AES_256_GCM
+            }
+            "aes256-ctr" | "aes-256-ctr" | "aes_256_ctr" => cipher::AES_256_CTR,
+            "aes192-ctr" | "aes-192-ctr" | "aes_192_ctr" => cipher::AES_192_CTR,
+            "aes128-ctr" | "aes-128-ctr" | "aes_128_ctr" => cipher::AES_128_CTR,
+            _ => {
+                tracing::warn!(
+                    cipher = %cipher_name,
+                    "unknown SSH cipher in server.ssh.tls.allowed_ciphers"
+                );
+                continue;
+            }
+        };
+        if !resolved.contains(&cipher) {
+            resolved.push(cipher);
+        }
+    }
+    if resolved.is_empty() {
+        None
+    } else {
+        Some(resolved)
+    }
 }
 
 #[derive(Clone)]

@@ -449,8 +449,11 @@ pub struct DbSchemaSection {
     /// Directory for exported StarUML schemas
     #[serde(default = "default_schema_export_dir")]
     pub export_dir: String,
+    /// Directory for importing StarUML schemas
+    #[serde(default = "default_schema_import_dir")]
+    pub import_dir: String,
     /// Create backup before import
-    #[serde(default = "default_true")]
+    #[serde(default = "default_true", alias = "auto_backup")]
     pub backup_before_import: bool,
 }
 
@@ -458,12 +461,17 @@ impl Default for DbSchemaSection {
     fn default() -> Self {
         Self {
             export_dir: default_schema_export_dir(),
+            import_dir: default_schema_import_dir(),
             backup_before_import: true,
         }
     }
 }
 
 fn default_schema_export_dir() -> String {
+    "runtime/schemas".to_string()
+}
+
+fn default_schema_import_dir() -> String {
     "runtime/schemas".to_string()
 }
 
@@ -906,6 +914,8 @@ pub struct ModuleRuntimeSection {
     pub default_service_scopes: Vec<String>,
     #[serde(default)]
     pub clients: ModuleRuntimeClientSection,
+    #[serde(default)]
+    pub env_passthrough_prefixes: Vec<String>,
 }
 
 impl Default for ModuleRuntimeSection {
@@ -915,6 +925,7 @@ impl Default for ModuleRuntimeSection {
             ports: ModuleRuntimePortSection::default(),
             default_service_scopes: Vec::new(),
             clients: ModuleRuntimeClientSection::default(),
+            env_passthrough_prefixes: Vec::new(),
         }
     }
 }
@@ -1622,7 +1633,29 @@ impl ModuleRuntimeSection {
             ModuleRuntimeEngine::Process | ModuleRuntimeEngine::Stub => {}
         }
         self.ports.validate()?;
-        self.clients.validate()
+        self.clients.validate()?;
+        for prefix in &self.env_passthrough_prefixes {
+            let value = prefix.trim();
+            if value.is_empty() {
+                return Err(ConfigError::Invalid(
+                    "modules.runtime.env_passthrough_prefixes must not contain empty values",
+                ));
+            }
+            if !value.ends_with('_') {
+                return Err(ConfigError::InvalidMessage(format!(
+                    "modules.runtime.env_passthrough_prefixes entry '{value}' must end with '_'"
+                )));
+            }
+            if value
+                .chars()
+                .any(|ch| !ch.is_ascii_uppercase() && !ch.is_ascii_digit() && ch != '_')
+            {
+                return Err(ConfigError::InvalidMessage(format!(
+                    "modules.runtime.env_passthrough_prefixes entry '{value}' must contain only A-Z, 0-9 and '_'"
+                )));
+            }
+        }
+        Ok(())
     }
 }
 

@@ -15,7 +15,9 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
-use super::types::{JobControlOutcome, ScheduledJobSnapshot, ScheduledJobSpec, SchedulerError};
+use super::types::{
+    job_metrics_id, JobControlOutcome, ScheduledJobSnapshot, ScheduledJobSpec, SchedulerError,
+};
 use crate::audit::{AuditActor, AuditEvent, AuditMetadata, AuditOutcome};
 use crate::infra::telemetry;
 use crate::services::{
@@ -258,7 +260,14 @@ impl SchedulerService {
         }
 
         let registry = Arc::clone(&self.registry);
-        let handle = Self::spawn_job(&entry.spec, Arc::clone(&entry.task), registry, true);
+        let diagnostics = Arc::clone(&self.diagnostics);
+        let handle = Self::spawn_job(
+            &entry.spec,
+            Arc::clone(&entry.task),
+            registry,
+            diagnostics,
+            true,
+        );
         entry.handle = Some(handle);
         Ok(JobControlOutcome::Restarted)
     }
@@ -314,7 +323,14 @@ impl SchedulerService {
             handle.stop();
         }
         let registry = Arc::clone(&self.registry);
-        let handle = Self::spawn_job(&entry.spec, Arc::clone(&entry.task), registry, true);
+        let diagnostics = Arc::clone(&self.diagnostics);
+        let handle = Self::spawn_job(
+            &entry.spec,
+            Arc::clone(&entry.task),
+            registry,
+            diagnostics,
+            true,
+        );
         entry.handle = Some(handle);
         self.registry
             .update_note("scheduler", Some(scheduler_notes::job_resumed(id)));
@@ -346,6 +362,7 @@ impl SchedulerService {
         }
 
         let registry = Arc::clone(&self.registry);
+        let diagnostics = Arc::clone(&self.diagnostics);
         let interval = spec.interval;
         let is_paused = {
             let paused = self.paused_jobs.lock().expect("scheduler paused jobs lock");
@@ -358,6 +375,7 @@ impl SchedulerService {
                 &spec,
                 Arc::clone(&task),
                 registry,
+                diagnostics,
                 skip_initial_delay,
             ))
         };
@@ -386,6 +404,7 @@ impl SchedulerService {
         spec: &ScheduledJobSpec,
         task: JobTaskHandle,
         registry: Arc<ServiceRegistry>,
+        diagnostics: Arc<ServiceDiagnostics>,
         skip_initial_delay: bool,
     ) -> JobHandle {
         let stop_flag = Arc::new(AtomicBool::new(false));
@@ -401,6 +420,8 @@ impl SchedulerService {
         let notifier_clone = Arc::clone(&notifier);
         let task_runner = Arc::clone(&task);
         let registry_for_errors = Arc::clone(&registry);
+        let diagnostics_for_job = Arc::clone(&diagnostics);
+        let job_metrics = job_metrics_id(&job_id);
 
         let join = tokio::spawn(async move {
             if let Some(delay) = initial_delay {
@@ -414,7 +435,14 @@ impl SchedulerService {
                 if stop_clone.load(Ordering::Acquire) {
                     break;
                 }
-                if let Err(err) = task_runner.invoke().await {
+                let started_at = Instant::now();
+                let result = task_runner.invoke().await;
+                diagnostics_for_job.record_probe(
+                    &job_metrics,
+                    started_at.elapsed().as_secs_f64() * 1000.0,
+                    result.is_ok(),
+                );
+                if let Err(err) = result {
                     error!(
                         job = %job_id,
                         error = %err,
@@ -707,7 +735,10 @@ pub fn install_default_jobs(
                     let registry = Arc::clone(&registry_for_backup);
                     async move {
                         info!("Running scheduled database backup");
-                        match backup_svc.run_backup(crate::services::backup::BackupTrigger::Auto).await {
+                        match backup_svc
+                            .run_backup(crate::services::backup::BackupTrigger::Auto)
+                            .await
+                        {
                             Ok(status) => {
                                 info!(
                                     path = %status.path.display(),

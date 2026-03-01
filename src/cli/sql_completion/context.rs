@@ -8,8 +8,8 @@
 //! - Table aliases for qualified completions
 //! - Tables in current FROM clause
 
+use super::tokenizer::{SqlKeywordKind, Token, TokenKind};
 use std::collections::HashMap;
-use super::tokenizer::{Token, TokenKind, SqlKeywordKind};
 
 /// The current SQL context at cursor position
 #[derive(Debug, Clone)]
@@ -54,29 +54,29 @@ impl SqlContext {
             prev_token: None,
         }
     }
-    
+
     /// Analyze tokens and build context
     pub fn from_tokens(tokens: &[Token]) -> Self {
         let mut ctx = Self::new();
         ctx.analyze(tokens);
         ctx
     }
-    
+
     /// Analyze the token sequence to determine context
     pub fn analyze(&mut self, tokens: &[Token]) {
         if tokens.is_empty() {
             self.expecting = Expecting::Statement;
             return;
         }
-        
+
         let mut i = 0;
         while i < tokens.len() {
             let token = &tokens[i];
-            
+
             // Update lookback tokens
             self.prev_token = self.last_token.clone();
             self.last_token = Some(token.clone());
-            
+
             // Handle parentheses
             match token.kind {
                 TokenKind::OpenParen => {
@@ -94,23 +94,23 @@ impl SqlContext {
                 }
                 _ => {}
             }
-            
+
             // Handle semicolon - reset context for new statement
             if token.kind == TokenKind::Semicolon {
                 self.reset_for_new_statement();
                 i += 1;
                 continue;
             }
-            
+
             // Process based on current state
             self.process_token(token, tokens, i);
             i += 1;
         }
-        
+
         // Determine final expectation based on context
         self.determine_expectation();
     }
-    
+
     fn reset_for_new_statement(&mut self) {
         self.statement = None;
         self.clause = ClauseKind::None;
@@ -122,10 +122,10 @@ impl SqlContext {
         self.last_token = None;
         self.prev_token = None;
     }
-    
+
     fn process_token(&mut self, token: &Token, tokens: &[Token], idx: usize) {
         let upper = token.upper();
-        
+
         match token.kind {
             TokenKind::Keyword(SqlKeywordKind::Statement) => {
                 self.process_statement_keyword(&upper);
@@ -148,7 +148,7 @@ impl SqlContext {
             _ => {}
         }
     }
-    
+
     fn process_statement_keyword(&mut self, kw: &str) {
         match kw {
             "SELECT" => {
@@ -183,7 +183,7 @@ impl SqlContext {
             _ => {}
         }
     }
-    
+
     fn process_clause_keyword(&mut self, kw: &str, tokens: &[Token], idx: usize) {
         match kw {
             "FROM" => {
@@ -251,7 +251,7 @@ impl SqlContext {
             _ => {}
         }
     }
-    
+
     fn process_join_keyword(&mut self, kw: &str) {
         match kw {
             "JOIN" => {
@@ -265,10 +265,10 @@ impl SqlContext {
             _ => {}
         }
     }
-    
+
     fn process_identifier(&mut self, token: &Token, tokens: &[Token], idx: usize) {
         let name = token.text.clone();
-        
+
         // Check for table context based on statement type when clause is None
         let is_table_context = match self.clause {
             ClauseKind::From | ClauseKind::Join | ClauseKind::InsertInto => true,
@@ -279,11 +279,11 @@ impl SqlContext {
             }
             _ => false,
         };
-        
+
         if is_table_context {
             // This is a table name
             self.tables.push(name.clone());
-            
+
             // Check for alias (next token is identifier or AS + identifier)
             if idx + 1 < tokens.len() {
                 let next = &tokens[idx + 1];
@@ -297,7 +297,7 @@ impl SqlContext {
                     self.aliases.insert(next.text.clone(), name);
                 }
             }
-            
+
             // Update expectation based on context
             match self.clause {
                 ClauseKind::From => {
@@ -339,27 +339,25 @@ impl SqlContext {
             }
         }
     }
-    
+
     fn determine_expectation(&mut self) {
         // Adjust expectation based on last token
         if let Some(ref token) = self.last_token {
             match token.kind {
-                TokenKind::Comma => {
-                    match self.clause {
-                        ClauseKind::SelectColumns => self.expecting = Expecting::ColumnOrStar,
-                        ClauseKind::From => self.expecting = Expecting::TableName,
-                        ClauseKind::OrderBy | ClauseKind::GroupBy => self.expecting = Expecting::ColumnName,
-                        ClauseKind::Set => self.expecting = Expecting::ColumnName,
-                        _ => {}
+                TokenKind::Comma => match self.clause {
+                    ClauseKind::SelectColumns => self.expecting = Expecting::ColumnOrStar,
+                    ClauseKind::From => self.expecting = Expecting::TableName,
+                    ClauseKind::OrderBy | ClauseKind::GroupBy => {
+                        self.expecting = Expecting::ColumnName
                     }
-                }
-                TokenKind::Operator if token.text == "=" => {
-                    match self.clause {
-                        ClauseKind::Where | ClauseKind::JoinOn => self.expecting = Expecting::Value,
-                        ClauseKind::Set => self.expecting = Expecting::Value,
-                        _ => {}
-                    }
-                }
+                    ClauseKind::Set => self.expecting = Expecting::ColumnName,
+                    _ => {}
+                },
+                TokenKind::Operator if token.text == "=" => match self.clause {
+                    ClauseKind::Where | ClauseKind::JoinOn => self.expecting = Expecting::Value,
+                    ClauseKind::Set => self.expecting = Expecting::Value,
+                    _ => {}
+                },
                 TokenKind::Keyword(SqlKeywordKind::Logical) => {
                     if self.clause == ClauseKind::Where {
                         self.expecting = Expecting::ColumnOrExpression;
@@ -372,23 +370,22 @@ impl SqlContext {
                 _ => {}
             }
         }
-        
+
         // If no statement yet, expect statement keyword
         if self.statement.is_none() && !self.in_subquery {
             self.expecting = Expecting::Statement;
         }
     }
-    
+
     /// Get the table name for an alias
     pub fn resolve_alias(&self, alias: &str) -> Option<&String> {
         self.aliases.get(alias)
     }
-    
+
     /// Check if a table is in scope
     pub fn has_table(&self, name: &str) -> bool {
         let lower = name.to_lowercase();
-        self.tables.iter().any(|t| t.to_lowercase() == lower)
-            || self.aliases.contains_key(name)
+        self.tables.iter().any(|t| t.to_lowercase() == lower) || self.aliases.contains_key(name)
     }
 }
 
@@ -410,7 +407,7 @@ pub enum ClauseKind {
     From,
     Where,
     Join,
-    JoinPending,  // After LEFT/RIGHT/etc, waiting for JOIN
+    JoinPending, // After LEFT/RIGHT/etc, waiting for JOIN
     JoinOn,
     GroupBy,
     OrderBy,
@@ -478,191 +475,190 @@ pub enum Expecting {
 mod tests {
     use super::*;
     use crate::cli::sql_completion::tokenizer::SqlTokenizer;
-    
+
     fn analyze(sql: &str) -> SqlContext {
         let tokens = SqlTokenizer::tokenize(sql);
         SqlContext::from_tokens(&tokens)
     }
-    
+
     #[test]
     fn test_empty_input() {
         let ctx = analyze("");
         assert_eq!(ctx.statement, None);
         assert_eq!(ctx.expecting, Expecting::Statement);
     }
-    
+
     #[test]
     fn test_select_start() {
         let ctx = analyze("SELECT");
         assert_eq!(ctx.statement, Some(StatementKind::Select));
         assert_eq!(ctx.expecting, Expecting::ColumnOrStar);
     }
-    
+
     #[test]
     fn test_select_star() {
         let ctx = analyze("SELECT *");
         assert_eq!(ctx.statement, Some(StatementKind::Select));
         assert_eq!(ctx.expecting, Expecting::FromKeyword);
     }
-    
+
     #[test]
     fn test_select_star_from() {
         let ctx = analyze("SELECT * FROM");
         assert_eq!(ctx.clause, ClauseKind::From);
         assert_eq!(ctx.expecting, Expecting::TableName);
     }
-    
+
     #[test]
     fn test_select_from_table() {
         let ctx = analyze("SELECT * FROM users");
         assert!(ctx.tables.contains(&"users".to_string()));
         assert_eq!(ctx.expecting, Expecting::ClauseOrJoin);
     }
-    
+
     #[test]
     fn test_select_from_table_where() {
         let ctx = analyze("SELECT * FROM users WHERE");
         assert_eq!(ctx.clause, ClauseKind::Where);
         assert_eq!(ctx.expecting, Expecting::ColumnOrExpression);
     }
-    
+
     #[test]
     fn test_where_column() {
         let ctx = analyze("SELECT * FROM users WHERE id");
         assert_eq!(ctx.expecting, Expecting::Operator);
     }
-    
+
     #[test]
     fn test_where_operator() {
         let ctx = analyze("SELECT * FROM users WHERE id =");
         assert_eq!(ctx.expecting, Expecting::Value);
     }
-    
+
     #[test]
     fn test_table_alias() {
         let ctx = analyze("SELECT * FROM users u");
         assert!(ctx.aliases.contains_key("u"));
         assert_eq!(ctx.aliases.get("u"), Some(&"users".to_string()));
     }
-    
+
     #[test]
     fn test_table_alias_with_as() {
         let ctx = analyze("SELECT * FROM users AS u");
         assert!(ctx.aliases.contains_key("u"));
         assert_eq!(ctx.aliases.get("u"), Some(&"users".to_string()));
     }
-    
+
     #[test]
     fn test_insert() {
         let ctx = analyze("INSERT");
         assert_eq!(ctx.statement, Some(StatementKind::Insert));
         assert_eq!(ctx.expecting, Expecting::IntoKeyword);
     }
-    
+
     #[test]
     fn test_insert_into() {
         let ctx = analyze("INSERT INTO");
         assert_eq!(ctx.clause, ClauseKind::InsertInto);
         assert_eq!(ctx.expecting, Expecting::TableName);
     }
-    
+
     #[test]
     fn test_insert_into_table() {
         let ctx = analyze("INSERT INTO users");
         assert!(ctx.tables.contains(&"users".to_string()));
         assert_eq!(ctx.expecting, Expecting::ValuesOrColumns);
     }
-    
+
     #[test]
     fn test_update() {
         let ctx = analyze("UPDATE");
         assert_eq!(ctx.statement, Some(StatementKind::Update));
         assert_eq!(ctx.expecting, Expecting::TableName);
     }
-    
+
     #[test]
     fn test_update_table() {
         let ctx = analyze("UPDATE users");
         assert!(ctx.tables.contains(&"users".to_string()));
     }
-    
+
     #[test]
     fn test_update_set() {
         let ctx = analyze("UPDATE users SET");
         assert_eq!(ctx.clause, ClauseKind::Set);
         assert_eq!(ctx.expecting, Expecting::ColumnName);
     }
-    
+
     #[test]
     fn test_delete() {
         let ctx = analyze("DELETE");
         assert_eq!(ctx.statement, Some(StatementKind::Delete));
         assert_eq!(ctx.expecting, Expecting::FromKeyword);
     }
-    
+
     #[test]
     fn test_delete_from() {
         let ctx = analyze("DELETE FROM");
         assert_eq!(ctx.clause, ClauseKind::From);
         assert_eq!(ctx.expecting, Expecting::TableName);
     }
-    
+
     #[test]
     fn test_join() {
         let ctx = analyze("SELECT * FROM users JOIN");
         assert_eq!(ctx.clause, ClauseKind::Join);
         assert_eq!(ctx.expecting, Expecting::TableName);
     }
-    
+
     #[test]
     fn test_join_table_on() {
         let ctx = analyze("SELECT * FROM users JOIN tickets ON");
         assert_eq!(ctx.clause, ClauseKind::JoinOn);
         assert_eq!(ctx.expecting, Expecting::JoinCondition);
     }
-    
+
     #[test]
     fn test_order_by() {
         let ctx = analyze("SELECT * FROM users ORDER BY");
         assert_eq!(ctx.clause, ClauseKind::OrderBy);
         assert_eq!(ctx.expecting, Expecting::ColumnName);
     }
-    
+
     #[test]
     fn test_semicolon_resets() {
         let ctx = analyze("SELECT * FROM users; SELECT");
         assert_eq!(ctx.statement, Some(StatementKind::Select));
-        assert!(ctx.tables.is_empty());  // Tables from previous statement cleared
+        assert!(ctx.tables.is_empty()); // Tables from previous statement cleared
     }
-    
+
     #[test]
     fn test_paren_depth() {
         let ctx = analyze("SELECT * FROM users WHERE id IN (");
         assert_eq!(ctx.paren_depth, 1);
     }
-    
+
     #[test]
     fn test_resolve_alias() {
         let ctx = analyze("SELECT u.id FROM users u WHERE");
         assert_eq!(ctx.resolve_alias("u"), Some(&"users".to_string()));
     }
-    
+
     #[test]
     fn test_select_column_comma() {
         let ctx = analyze("SELECT id,");
         assert_eq!(ctx.expecting, Expecting::ColumnOrStar);
     }
-    
+
     #[test]
     fn test_qualified_name() {
         let ctx = analyze("SELECT u.");
         assert_eq!(ctx.expecting, Expecting::QualifiedColumn);
     }
-    
+
     #[test]
     fn test_where_and() {
         let ctx = analyze("SELECT * FROM users WHERE id = 1 AND");
         assert_eq!(ctx.expecting, Expecting::ColumnOrExpression);
     }
 }
-

@@ -3,7 +3,9 @@ use crate::cli::commands::builtins::jobs::show_job_status;
 use crate::cli::commands::registry::{
     CliDependencies, CommandOutcome, CommandRegistry, ShellEnvironment,
 };
-use crate::cli::output::{FieldStyle, MessageBox, StatusBox, SYM_ACTIVE, SYM_INACTIVE, SYM_SUCCESS};
+use crate::cli::output::{
+    FieldStyle, MessageBox, StatusBox, SYM_ACTIVE, SYM_INACTIVE, SYM_SUCCESS,
+};
 use crate::infra::telemetry;
 use crate::services::{ServiceIngressProtocol, ServiceMetricSnapshot, ServiceStatus, ServiceTag};
 use crate::utils;
@@ -275,9 +277,10 @@ fn show_fenrir_status(deps: &CliDependencies, out: &mut dyn Write) -> io::Result
     } else {
         FieldStyle::Error
     };
-    box_builder = box_builder
-        .field("Engine", db_engine)
-        .field_styled("Status", &db_status_text, db_style);
+    box_builder =
+        box_builder
+            .field("Engine", db_engine)
+            .field_styled("Status", &db_status_text, db_style);
 
     // Connection mode
     let db_mode = if config.db.runtime.embedded.security.prefer_unix_socket {
@@ -353,8 +356,11 @@ fn show_fenrir_status(deps: &CliDependencies, out: &mut dyn Write) -> io::Result
     } else {
         FieldStyle::Error
     };
-    box_builder =
-        box_builder.field_styled("Failed", format!("{} (24h)", failed_logins_24h), failed_style);
+    box_builder = box_builder.field_styled(
+        "Failed",
+        format!("{} (24h)", failed_logins_24h),
+        failed_style,
+    );
 
     let identity_provider = config.security.identity.provider.as_str();
     box_builder = box_builder.field("Identity", identity_provider);

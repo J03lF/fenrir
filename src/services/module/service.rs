@@ -159,6 +159,7 @@ pub struct ModuleServiceInit {
     pub client_settings: ModuleClientSettings,
     pub health_client: ModuleHealthHttpClient,
     pub default_service_scopes: Vec<ServiceScope>,
+    pub env_passthrough_prefixes: Vec<String>,
     pub control_plane_url: Option<String>,
     pub service_snapshot_path: Option<PathBuf>,
     pub diagnostics: Arc<ServiceDiagnostics>,
@@ -189,6 +190,7 @@ pub struct ModuleService {
     pub(super) service_tokens: Arc<RwLock<HashMap<ModuleId, ModuleTokenLease>>>,
     pub(super) db_connector_endpoint: SyncRwLock<Option<DbConnectorEndpoint>>,
     pub(super) default_service_scopes: Vec<ServiceScope>,
+    pub(super) env_passthrough_prefixes: Vec<String>,
     pub(super) control_plane_url: SyncRwLock<Option<String>>,
     pub(super) health: SyncRwLock<HashMap<ModuleId, ModuleHealth>>,
     pub(super) manifest_client: Client,
@@ -203,6 +205,39 @@ impl ModuleService {
         self.dev_sources
             .as_ref()
             .map(|config| config.module_root(module_id))
+    }
+
+    pub async fn list_installed_modules(
+        &self,
+    ) -> Result<Vec<crate::domain::module::InstalledModule>, ModuleServiceError> {
+        self.storage
+            .list()
+            .await
+            .map_err(ModuleServiceError::Storage)
+    }
+
+    pub async fn install_module(
+        &self,
+        id: &ModuleId,
+    ) -> ModuleResult<crate::domain::module::ModuleInstallResult> {
+        let manifest = self.module_registry.fetch_manifest(id, None).await?;
+        let bundle = self.module_registry.download(&manifest).await?;
+        self.verifier.verify(&bundle).await?;
+        self.storage
+            .stage_and_activate(
+                bundle,
+                crate::domain::module::ModuleInstallSource::Distribution,
+            )
+            .await
+            .map_err(ModuleServiceError::Storage)
+    }
+
+    pub async fn uninstall_module(&self, id: &ModuleId) -> ModuleResult<()> {
+        let _ = self.stop(id).await;
+        self.storage
+            .remove(id)
+            .await
+            .map_err(ModuleServiceError::Storage)
     }
 
     pub async fn scaffold_module(
@@ -226,7 +261,7 @@ impl ModuleService {
         generate_module_scaffold(module_id, root, options).await
     }
 
-    pub(super) async fn issue_module_service_token(
+    pub async fn issue_module_service_token(
         &self,
         module_id: &ModuleId,
     ) -> Result<Option<DelegatedToken>, ModuleRuntimeError> {
@@ -813,6 +848,7 @@ impl ModuleService {
                 client_settings,
                 health_client,
                 default_service_scopes,
+                env_passthrough_prefixes,
                 control_plane_url,
                 service_snapshot_path,
                 diagnostics,
@@ -851,6 +887,7 @@ impl ModuleService {
                 service_tokens: Arc::new(RwLock::new(HashMap::new())),
                 db_connector_endpoint: SyncRwLock::new(None),
                 default_service_scopes,
+                env_passthrough_prefixes,
                 control_plane_url: SyncRwLock::new(control_plane_url),
                 health: SyncRwLock::new(HashMap::new()),
                 manifest_client,
@@ -1292,6 +1329,13 @@ impl ModuleService {
 
         if !should_preserve {
             if let Ok(module_id) = ModuleId::new(&result.manifest.id) {
+                if !was_installed {
+                    tracing::info!(
+                        module = %module_id,
+                        "fresh install detected, forcing runtime stop before start"
+                    );
+                    self.stop_module_process(&module_id).await;
+                }
                 self.update_module_service_status(
                     &module_id,
                     &result.manifest,

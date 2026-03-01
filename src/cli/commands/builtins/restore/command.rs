@@ -130,7 +130,10 @@ async fn execute_restore(
     let mut out = StreamedWriter::new(sink);
 
     writeln!(out)?;
-    writeln!(out, "  \x1b[38;5;81m▸\x1b[0m Restoring database from backup...")?;
+    writeln!(
+        out,
+        "  \x1b[38;5;81m▸\x1b[0m Restoring database from backup..."
+    )?;
     writeln!(out)?;
 
     // Create progress channel
@@ -208,8 +211,11 @@ async fn execute_restore(
             writeln!(out)?;
 
             // Show success box
-            let mut status = StatusBox::new("Restore Complete")
-                .field_styled("Status", format!("{} Success", SYM_SUCCESS), FieldStyle::Success);
+            let mut status = StatusBox::new("Restore Complete").field_styled(
+                "Status",
+                format!("{} Success", SYM_SUCCESS),
+                FieldStyle::Success,
+            );
 
             // Get backup size
             if let Ok(metadata) = std::fs::metadata(&backup_path) {
@@ -222,7 +228,9 @@ async fn execute_restore(
             }
 
             // Put full backup path in its own section
-            status = status.section().field("Source", backup_path.to_string_lossy());
+            status = status
+                .section()
+                .field("Source", backup_path.to_string_lossy());
 
             status.render(&mut out)?;
         }

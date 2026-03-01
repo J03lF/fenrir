@@ -88,8 +88,7 @@ fn handle(
 
             let services = Arc::clone(&deps.services);
             let config = Arc::clone(&deps.config);
-            let future =
-                async move { execute_export(sink, services, config, engine, mode).await };
+            let future = async move { execute_export(sink, services, config, engine, mode).await };
 
             Ok(CommandOutcome::AsyncTask(Box::pin(future)))
         }
@@ -211,10 +210,16 @@ async fn execute_export(
             writeln!(out)?;
 
             let mut status = StatusBox::new("Export Complete")
-                .field_styled("Status", format!("{} Success", SYM_SUCCESS), FieldStyle::Success)
+                .field_styled(
+                    "Status",
+                    format!("{} Success", SYM_SUCCESS),
+                    FieldStyle::Success,
+                )
                 .field("Tables", export_result.table_count.to_string());
 
-            status = status.section().field("Path", export_result.path.to_string_lossy());
+            status = status
+                .section()
+                .field("Path", export_result.path.to_string_lossy());
 
             status.render(&mut out)?;
         }

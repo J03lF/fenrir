@@ -25,9 +25,9 @@ use reqwest::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json;
+use time::format_description::well_known::Rfc3339;
 use time::Duration as TimeDuration;
 use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
 use tokio_stream::{
     wrappers::{errors::BroadcastStreamRecvError, BroadcastStream},
     StreamExt,
@@ -53,8 +53,8 @@ use crate::services::module::token_audit::{record_module_token_exchange, ModuleT
 use crate::services::scheduler::ScheduledJobSnapshot;
 use crate::services::{
     module::{
-        ModuleIngressError, ModuleIngressTarget, ModuleServicesPublishRequest, ReportedServiceEntry,
-        ReportedServicesPayload,
+        ModuleIngressError, ModuleIngressTarget, ModuleServicesPublishRequest,
+        ReportedServiceEntry, ReportedServicesPayload,
     },
     AppServices, ServiceActionKind, ServiceControlError, ServiceIngressAccess,
     ServiceIngressMetadata, ServiceIngressProtocol, ServiceMetricSnapshot, ServiceRateLimit,
@@ -1640,7 +1640,10 @@ async fn register_module_services(
     let payload = ReportedServicesPayload {
         services: payload.services,
     };
-    match module_service.register_reported_services(&module_id, payload).await {
+    match module_service
+        .register_reported_services(&module_id, payload)
+        .await
+    {
         Ok(()) => (StatusCode::OK, Json("ok")).into_response(),
         Err(err) => module_runtime_problem(err).into_response(),
     }
@@ -2093,21 +2096,28 @@ async fn gateway_proxy(
             ServiceIngressAccess::Public => match extract_optional_gateway_token(&headers) {
                 Ok(Some(token)) => {
                     let validated = match security.validate_service_token(token) {
-                        Ok(claims) => claims,
+                        Ok(claims) => Some(claims),
+                        Err(SecurityError::ServiceToken(
+                            ServiceTokenError::NotFound
+                            | ServiceTokenError::Expired
+                            | ServiceTokenError::IdleTimeout,
+                        )) => None,
                         Err(err) => return (Err(map_service_token_error(err)), audit_ctx),
                     };
-                    if let Some(metadata) = security_metadata {
-                        if !metadata.allows_claims(&validated) {
-                            return (
-                                Err(http_problem(
-                                    StatusCode::FORBIDDEN,
-                                    http_messages::problems::gateway_access_denied(&service_id),
-                                )),
-                                audit_ctx,
-                            );
+                    if let Some(validated) = validated {
+                        if let Some(metadata) = security_metadata {
+                            if !metadata.allows_claims(&validated) {
+                                return (
+                                    Err(http_problem(
+                                        StatusCode::FORBIDDEN,
+                                        http_messages::problems::gateway_access_denied(&service_id),
+                                    )),
+                                    audit_ctx,
+                                );
+                            }
                         }
+                        claims = Some(validated);
                     }
-                    claims = Some(validated);
                 }
                 Ok(None) => {}
                 Err(problem) => return (Err(problem), audit_ctx),

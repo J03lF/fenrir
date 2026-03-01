@@ -16,6 +16,14 @@ fn enforce_guard_allows_force() {
 }
 
 #[test]
+fn enforce_guard_allows_force_with_trailing_semicolon() {
+    let stmt = "DELETE FROM foo --force;";
+    let sanitized = enforce_guard(stmt).expect("force should allow with semicolon");
+    assert!(sanitized.contains("DELETE FROM foo"));
+    assert!(!sanitized.contains("--force"));
+}
+
+#[test]
 fn enforce_guard_blocks_without_force() {
     assert!(enforce_guard("DROP TABLE foo").is_err());
 }

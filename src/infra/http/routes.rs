@@ -53,7 +53,7 @@ use crate::services::module::token_audit::{record_module_token_exchange, ModuleT
 use crate::services::scheduler::ScheduledJobSnapshot;
 use crate::services::{
     module::{
-        ModuleIngressError, ModuleIngressTarget, ModuleServicesPublishRequest,
+        ModuleIngressError, ModuleIngressTarget, ModuleServicesPublishRequest, ModuleStartupReport,
         ReportedServiceEntry, ReportedServicesPayload,
     },
     AppServices, ServiceActionKind, ServiceControlError, ServiceIngressAccess,
@@ -492,6 +492,16 @@ struct RegistryModuleView {
 #[derive(Serialize)]
 struct RegistryModulesResponse {
     modules: Vec<RegistryModuleView>,
+}
+
+#[derive(Serialize)]
+struct ModuleStartupReportsResponse {
+    reports: Vec<ModuleStartupReport>,
+}
+
+#[derive(Serialize)]
+struct ModuleStartupReportResponse {
+    report: ModuleStartupReport,
 }
 
 #[derive(Serialize)]
@@ -1725,6 +1735,50 @@ async fn restart_module_runtime(
     }
 }
 
+async fn list_module_startup_reports(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(problem) = authorize(&state.auth, &state.services, &headers, Role::Operator) {
+        return problem.into_response();
+    }
+    let Some(service) = state.services.module_service() else {
+        return module_service_unavailable().into_response();
+    };
+    let reports = service.startup_reports().await;
+    (
+        StatusCode::OK,
+        Json(ModuleStartupReportsResponse { reports }),
+    )
+        .into_response()
+}
+
+async fn module_startup_report(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    if let Err(problem) = authorize(&state.auth, &state.services, &headers, Role::Operator) {
+        return problem.into_response();
+    }
+    let Some(service) = state.services.module_service() else {
+        return module_service_unavailable().into_response();
+    };
+    let module_id = match ModuleId::new(id.trim()) {
+        Ok(id) => id,
+        Err(err) => return module_validation_problem("invalid_module_id", err).into_response(),
+    };
+    let Some(report) = service.startup_report(&module_id).await else {
+        return ServiceActionProblem::new(
+            StatusCode::NOT_FOUND,
+            "module_startup_report_not_found",
+            format!("no startup report found for module '{module_id}'"),
+        )
+        .into_response();
+    };
+    (StatusCode::OK, Json(ModuleStartupReportResponse { report })).into_response()
+}
+
 async fn release_dev_overrides(State(state): State<HttpState>, headers: HeaderMap) -> Response {
     if let Err(problem) = authorize(&state.auth, &state.services, &headers, Role::Operator) {
         return problem.into_response();
@@ -2259,6 +2313,14 @@ pub(super) fn build_router(state: HttpState) -> Router {
         .route("/modules/runtime/:id/start", post(start_module_runtime))
         .route("/modules/runtime/:id/stop", post(stop_module_runtime))
         .route("/modules/runtime/:id/restart", post(restart_module_runtime))
+        .route(
+            "/modules/runtime/startup-reports",
+            get(list_module_startup_reports),
+        )
+        .route(
+            "/modules/runtime/:id/startup-report",
+            get(module_startup_report),
+        )
         .route("/modules/runtime/stop-all", post(stop_all_module_runtimes))
         .route(
             "/modules/runtime/release-dev-overrides",

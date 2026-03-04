@@ -1948,16 +1948,7 @@ fn parse_role_token(raw: &str) -> Result<(Role, &str), ConfigError> {
 fn resolve_secret(value: &str, key: &'static str) -> Result<String, ConfigError> {
     if let Some(env) = value.strip_prefix("env:") {
         let var = env.trim();
-        match std::env::var(var) {
-            Ok(secret) if !secret.trim().is_empty() => Ok(secret),
-            Ok(_) => Err(ConfigError::Invalid(
-                "environment variable referenced in configuration must not be empty",
-            )),
-            Err(_) => Err(ConfigError::MissingEnv {
-                key,
-                var: var.to_string(),
-            }),
-        }
+        resolve_secret_from_env(var, key)
     } else {
         Ok(value.to_string())
     }
@@ -1977,4 +1968,62 @@ fn resolve_optional_secret(
         }
         None => Ok(None),
     }
+}
+
+fn resolve_secret_from_env(var: &str, key: &'static str) -> Result<String, ConfigError> {
+    let file_var = format!("{var}_FILE");
+    let direct = std::env::var(var).ok();
+    let file_ref = std::env::var(&file_var).ok();
+
+    let direct_non_empty = direct
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let file_ref_non_empty = file_ref
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+
+    if direct_non_empty.is_some() && file_ref_non_empty.is_some() {
+        return Err(ConfigError::InvalidMessage(format!(
+            "configuration secret source '{var}' is ambiguous: set either {var} or {file_var}, not both"
+        )));
+    }
+
+    if let Some(secret) = direct_non_empty {
+        return Ok(secret);
+    }
+
+    if let Some(path) = file_ref_non_empty {
+        let raw = std::fs::read_to_string(path.trim()).map_err(|err| {
+            ConfigError::InvalidMessage(format!(
+                "failed to read secret file from {file_var}: {err}"
+            ))
+        })?;
+        let secret = raw.trim();
+        if secret.is_empty() {
+            return Err(ConfigError::InvalidMessage(format!(
+                "secret file referenced by {file_var} must not be empty"
+            )));
+        }
+        return Ok(secret.to_string());
+    }
+
+    if matches!(direct, Some(value) if value.trim().is_empty()) {
+        return Err(ConfigError::InvalidMessage(format!(
+            "environment variable {var} must not be empty"
+        )));
+    }
+    if matches!(file_ref, Some(value) if value.trim().is_empty()) {
+        return Err(ConfigError::InvalidMessage(format!(
+            "environment variable {file_var} must not be empty"
+        )));
+    }
+
+    Err(ConfigError::MissingEnv {
+        key,
+        var: format!("{var} or {file_var}"),
+    })
 }

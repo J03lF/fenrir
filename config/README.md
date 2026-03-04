@@ -102,7 +102,7 @@ accept_invalid_certs = false
 # PUBLIC_URL = "https://tickets.local"
 
 [modules.services."module:fenrir-api".secrets]
-# API_KEY = "env:FENRIR_API_KEY"
+# API_KEY = "env:FENRIR_API_KEY" # supports FENRIR_API_KEY or FENRIR_API_KEY_FILE
 
 [modules.services."module:fenrir-api".policy]
 # internal_only = false
@@ -122,6 +122,11 @@ accept_invalid_certs = false
 ```
 
 `[modules.runtime.clients]` steuert Timeouts, Retry-/Backoff-Strategien sowie den Health-Probe-Intervall des ModuleService. Der `.tls`-Block erlaubt optionales mTLS gegenüber der Control-Plane. Mit `[modules.services."<service-id>"]` lassen sich pro Service zusätzliche Env-Variablen (`.env`) und Secrets (`.secrets`, nur `env:...`) injizieren sowie die Security-Policy (`.policy`, inkl. `tenant.mode = any|fixed|allow_list`) überschreiben.
+
+Secret-Resolution für `modules.services.<service>.secrets = "env:VAR"`:
+- Fenrir akzeptiert `VAR` **oder** `VAR_FILE` (Pfad auf Datei mit Secret-Inhalt).
+- Sind beide gesetzt, wird der Start mit Konfigurationsfehler abgebrochen.
+- Leere Werte oder nicht lesbare Secret-Dateien werden als harte Fehler behandelt (fail-closed).
 
 `modules.runtime.env_passthrough_prefixes` erlaubt zusätzlich globales Prefix-Passthrough aus Fenrirs Prozess-Umgebung (z. B. `["ATHENE_", "AUTH_"]`). Unabhängig davon leitet Fenrir pro Modul automatisch abgeleitete Prefixes weiter (z. B. für `athene-api`: `ATHENE_API_` und `ATHENE_`; für `auth-service`: `AUTH_SERVICE_` und `AUTH_`), damit neue Modulvariablen ohne Fenrir-Codeänderung verfügbar sind.
 

@@ -1,14 +1,15 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeSet, HashMap, HashSet},
     env,
+    path::Path,
     str::FromStr,
     sync::Arc,
     time::{Duration, Instant, SystemTime},
 };
 
 use crate::domain::module::{
-    ModuleId, ModuleManifest, ModuleRuntimeError, ModuleRuntimeInfo, ModuleRuntimeKind,
-    ModuleRuntimeStatus, ModuleStartConfig, ModuleVersion,
+    InstalledModule, ModuleId, ModuleManifest, ModuleRuntimeError, ModuleRuntimeInfo,
+    ModuleRuntimeKind, ModuleRuntimeStatus, ModuleStartConfig, ModuleVersion,
 };
 use crate::security::service::{ServiceRole, ServiceScope};
 use crate::security::service_tokens::DelegatedToken;
@@ -20,6 +21,7 @@ use crate::utils::messages::services::module::{
     runtime::{logs as runtime_logs, notes as runtime_notes},
     service::logs as module_service_logs,
 };
+use futures::stream::{self, StreamExt};
 use reqwest::StatusCode;
 use serde::Serialize;
 use tokio::fs;
@@ -28,12 +30,50 @@ use tokio::time::sleep;
 use super::config::ModuleEnvResolutionError;
 use super::reported::{ReportedServiceEntry, ReportedServicesPayload};
 use super::service::{MODULE_SERVICE_MANIFEST_PATH, RESERVED_ENV_KEYS};
-use super::{ModuleClientSettings, ModuleService};
+use super::{
+    ModuleClientSettings, ModuleService, ModuleStartupPhaseReport, ModuleStartupPhaseStatus,
+    ModuleStartupReport, ModuleStartupStatus, ModuleStartupTrigger,
+};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
 const MANIFEST_REFRESH_MAX_ATTEMPTS: u32 = 20;
 const MANIFEST_REFRESH_MIN_DELAY_MS: u64 = 500;
+const AUTOSTART_CONCURRENCY_DEFAULT: usize = 4;
+const AUTOSTART_CONCURRENCY_MIN: usize = 1;
+const AUTOSTART_CONCURRENCY_MAX: usize = 16;
+const START_PREFLIGHT_TIMEOUT_MS_DEFAULT: u64 = 5_000;
+const START_TOKEN_TIMEOUT_MS_DEFAULT: u64 = 5_000;
+const START_RUNTIME_TIMEOUT_MS_DEFAULT: u64 = 30_000;
+const PREFLIGHT_ARTIFACT_MISSING: &str = "MODULE-PREFLIGHT-001";
+const PREFLIGHT_PORT_UNAVAILABLE: &str = "MODULE-PREFLIGHT-002";
+const DEPENDENCY_MISSING: &str = "MODULE-DEP-001";
+const DEPENDENCY_CYCLE: &str = "MODULE-DEP-002";
+const DEPENDENCY_INVALID: &str = "MODULE-DEP-003";
+const DEPENDENCY_UPSTREAM_FAILED: &str = "MODULE-DEP-004";
+const DEPENDENCY_VERSION_MISMATCH: &str = "MODULE-DEP-005";
+const START_PREFLIGHT_TIMEOUT: &str = "MODULE-SLO-001";
+const START_TOKEN_TIMEOUT: &str = "MODULE-SLO-002";
+const START_RUNTIME_TIMEOUT: &str = "MODULE-SLO-003";
+
+#[derive(Clone)]
+struct AutostartNode {
+    module_id: ModuleId,
+    manifest: ModuleManifest,
+    dependencies: Vec<ModuleId>,
+}
+
+struct BlockedAutostartModule {
+    module_id: ModuleId,
+    manifest: ModuleManifest,
+    code: &'static str,
+    reason: String,
+}
+
+struct AutostartPlan {
+    layers: Vec<Vec<AutostartNode>>,
+    blocked: Vec<BlockedAutostartModule>,
+}
 
 impl ModuleService {
     pub async fn ensure_all_running(&self) {
@@ -46,19 +86,323 @@ impl ModuleService {
             }
         };
 
+        let module_count = modules.len();
+        let concurrency = self.autostart_concurrency_limit();
+        let plan = self.build_autostart_plan(modules);
+        tracing::info!(
+            event = "module.lifecycle.autostart_started",
+            module_count,
+            concurrency
+        );
+
+        for blocked in plan.blocked {
+            let reason = format!("{}: {}", blocked.code, blocked.reason);
+            tracing::warn!(
+                event = "module.lifecycle.autostart_blocked",
+                module_id = %blocked.module_id,
+                error_code = blocked.code,
+                reason = %reason
+            );
+            self.update_module_service_status(
+                &blocked.module_id,
+                &blocked.manifest,
+                ServiceStatus::Failed,
+                Some(runtime_notes::start_failed(reason.clone())),
+            );
+            self.store_startup_report(ModuleStartupReport {
+                module_id: blocked.module_id,
+                trigger: ModuleStartupTrigger::Autostart,
+                status: ModuleStartupStatus::Failed,
+                started_at: Self::now_rfc3339(),
+                completed_at: Self::now_rfc3339(),
+                total_duration_ms: 0,
+                phases: vec![ModuleStartupPhaseReport {
+                    phase: "dependency_resolution".to_string(),
+                    status: ModuleStartupPhaseStatus::Failed,
+                    duration_ms: 0,
+                    error_code: Some(blocked.code.to_string()),
+                    message: Some(reason),
+                }],
+            })
+            .await;
+        }
+
+        let mut succeeded = HashSet::new();
+        for layer in plan.layers {
+            let succeeded_snapshot = succeeded.clone();
+            let results = stream::iter(layer.into_iter().map(|node| {
+                let succeeded_snapshot = succeeded_snapshot.clone();
+                async move {
+                    if let Some(dep) = node
+                        .dependencies
+                        .iter()
+                        .find(|dep| !succeeded_snapshot.contains(*dep))
+                        .cloned()
+                    {
+                        let reason = format!(
+                            "{DEPENDENCY_UPSTREAM_FAILED}: dependency '{dep}' failed to start"
+                        );
+                        self.update_module_service_status(
+                            &node.module_id,
+                            &node.manifest,
+                            ServiceStatus::Failed,
+                            Some(runtime_notes::start_failed(reason.clone())),
+                        );
+                        self.store_startup_report(ModuleStartupReport {
+                            module_id: node.module_id.clone(),
+                            trigger: ModuleStartupTrigger::Autostart,
+                            status: ModuleStartupStatus::Failed,
+                            started_at: Self::now_rfc3339(),
+                            completed_at: Self::now_rfc3339(),
+                            total_duration_ms: 0,
+                            phases: vec![ModuleStartupPhaseReport {
+                                phase: "dependency_resolution".to_string(),
+                                status: ModuleStartupPhaseStatus::Skipped,
+                                duration_ms: 0,
+                                error_code: Some(DEPENDENCY_UPSTREAM_FAILED.to_string()),
+                                message: Some(reason),
+                            }],
+                        })
+                        .await;
+                        return (node.module_id, false);
+                    }
+
+                    match self
+                        .ensure_running_with_trigger(
+                            &node.module_id,
+                            ModuleStartupTrigger::Autostart,
+                        )
+                        .await
+                    {
+                        Ok(()) => (node.module_id, true),
+                        Err(err) => {
+                            tracing::warn!(
+                                module = %node.module_id,
+                                error = %err,
+                                "{}",
+                                runtime_logs::AUTOSTART_FAILED
+                            );
+                            (node.module_id, false)
+                        }
+                    }
+                }
+            }))
+            .buffer_unordered(concurrency)
+            .collect::<Vec<_>>()
+            .await;
+
+            for (module_id, ok) in results {
+                if ok {
+                    succeeded.insert(module_id);
+                }
+            }
+        }
+
+        tracing::info!(
+            event = "module.lifecycle.autostart_completed",
+            module_count,
+            concurrency
+        );
+    }
+
+    fn autostart_concurrency_limit(&self) -> usize {
+        let raw = env::var("FENRIR_MODULE_AUTOSTART_CONCURRENCY").ok();
+        let Some(raw) = raw.as_deref() else {
+            return AUTOSTART_CONCURRENCY_DEFAULT;
+        };
+
+        match raw.parse::<usize>() {
+            Ok(value) => value.clamp(AUTOSTART_CONCURRENCY_MIN, AUTOSTART_CONCURRENCY_MAX),
+            Err(err) => {
+                tracing::warn!(
+                    event = "module.lifecycle.autostart_config_invalid",
+                    env_var = "FENRIR_MODULE_AUTOSTART_CONCURRENCY",
+                    value = raw,
+                    error = %err,
+                    fallback = AUTOSTART_CONCURRENCY_DEFAULT
+                );
+                AUTOSTART_CONCURRENCY_DEFAULT
+            }
+        }
+    }
+
+    fn build_autostart_plan(&self, modules: Vec<InstalledModule>) -> AutostartPlan {
+        let mut manifests = HashMap::new();
         for module in modules {
             let Ok(module_id) = module.manifest.module_id() else {
                 continue;
             };
-            if let Err(err) = self.ensure_running(&module_id).await {
-                tracing::warn!(
-                    module = %module_id,
-                    error = %err,
-                    "{}",
-                    runtime_logs::AUTOSTART_FAILED
-                );
+            manifests.insert(module_id, module.manifest);
+        }
+
+        let mut indegree: HashMap<ModuleId, usize> = HashMap::new();
+        let mut outgoing: HashMap<ModuleId, Vec<ModuleId>> = HashMap::new();
+        let mut deps_by_module: HashMap<ModuleId, Vec<ModuleId>> = HashMap::new();
+        let mut blocked = Vec::new();
+        let mut blocked_ids = HashSet::new();
+
+        for module_id in manifests.keys() {
+            indegree.insert(module_id.clone(), 0);
+            outgoing.insert(module_id.clone(), Vec::new());
+            deps_by_module.insert(module_id.clone(), Vec::new());
+        }
+
+        for (module_id, manifest) in &manifests {
+            let mut seen = HashSet::new();
+            for dependency in &manifest.dependencies {
+                if !dependency.required() {
+                    continue;
+                }
+                let required_version = match dependency {
+                    crate::domain::module::ModuleDependency::Spec(spec) => spec.version.as_ref(),
+                    crate::domain::module::ModuleDependency::Id(_) => None,
+                };
+                let dep_raw = dependency.id().trim();
+                let dep_id = match ModuleId::new(dep_raw) {
+                    Ok(id) => id,
+                    Err(err) => {
+                        blocked_ids.insert(module_id.clone());
+                        blocked.push(BlockedAutostartModule {
+                            module_id: module_id.clone(),
+                            manifest: manifest.clone(),
+                            code: DEPENDENCY_INVALID,
+                            reason: format!("invalid dependency id '{dep_raw}': {err}"),
+                        });
+                        continue;
+                    }
+                };
+
+                if dep_id == *module_id {
+                    blocked_ids.insert(module_id.clone());
+                    blocked.push(BlockedAutostartModule {
+                        module_id: module_id.clone(),
+                        manifest: manifest.clone(),
+                        code: DEPENDENCY_INVALID,
+                        reason: "module cannot depend on itself".to_string(),
+                    });
+                    continue;
+                }
+
+                if !seen.insert(dep_id.clone()) {
+                    continue;
+                }
+
+                if !manifests.contains_key(&dep_id) {
+                    blocked_ids.insert(module_id.clone());
+                    blocked.push(BlockedAutostartModule {
+                        module_id: module_id.clone(),
+                        manifest: manifest.clone(),
+                        code: DEPENDENCY_MISSING,
+                        reason: format!("required dependency '{dep_id}' is not installed"),
+                    });
+                    continue;
+                }
+
+                if let Some(required_version) = required_version {
+                    let Some(dep_manifest) = manifests.get(&dep_id) else {
+                        continue;
+                    };
+                    if !required_version.matches(&dep_manifest.version) {
+                        blocked_ids.insert(module_id.clone());
+                        blocked.push(BlockedAutostartModule {
+                            module_id: module_id.clone(),
+                            manifest: manifest.clone(),
+                            code: DEPENDENCY_VERSION_MISMATCH,
+                            reason: format!(
+                                "dependency '{dep_id}' does not satisfy version requirement '{}'",
+                                required_version
+                            ),
+                        });
+                        continue;
+                    }
+                }
+
+                if let Some(entry) = indegree.get_mut(module_id) {
+                    *entry += 1;
+                }
+                outgoing
+                    .entry(dep_id.clone())
+                    .or_default()
+                    .push(module_id.clone());
+                deps_by_module
+                    .entry(module_id.clone())
+                    .or_default()
+                    .push(dep_id);
             }
         }
+
+        for blocked_id in blocked_ids {
+            indegree.remove(&blocked_id);
+            outgoing.remove(&blocked_id);
+            deps_by_module.remove(&blocked_id);
+            for children in outgoing.values_mut() {
+                children.retain(|child| child != &blocked_id);
+            }
+            for deps in deps_by_module.values_mut() {
+                deps.retain(|dep| dep != &blocked_id);
+            }
+        }
+
+        let mut ready = BTreeSet::new();
+        for (module_id, degree) in &indegree {
+            if *degree == 0 {
+                ready.insert(module_id.clone());
+            }
+        }
+
+        let mut layers = Vec::new();
+        let mut processed = HashSet::new();
+        while !ready.is_empty() {
+            let current: Vec<ModuleId> = ready.iter().cloned().collect();
+            for module_id in &current {
+                ready.remove(module_id);
+            }
+
+            let mut layer = Vec::new();
+            for module_id in current {
+                processed.insert(module_id.clone());
+                let Some(manifest) = manifests.get(&module_id).cloned() else {
+                    continue;
+                };
+                let dependencies = deps_by_module.remove(&module_id).unwrap_or_default();
+                layer.push(AutostartNode {
+                    module_id: module_id.clone(),
+                    manifest,
+                    dependencies,
+                });
+
+                let children = outgoing.remove(&module_id).unwrap_or_default();
+                for child in children {
+                    if let Some(degree) = indegree.get_mut(&child) {
+                        if *degree > 0 {
+                            *degree -= 1;
+                            if *degree == 0 {
+                                ready.insert(child);
+                            }
+                        }
+                    }
+                }
+            }
+            if !layer.is_empty() {
+                layers.push(layer);
+            }
+        }
+
+        for module_id in indegree.keys() {
+            if processed.contains(module_id) {
+                continue;
+            }
+            if let Some(manifest) = manifests.get(module_id) {
+                blocked.push(BlockedAutostartModule {
+                    module_id: module_id.clone(),
+                    manifest: manifest.clone(),
+                    code: DEPENDENCY_CYCLE,
+                    reason: "dependency cycle detected".to_string(),
+                });
+            }
+        }
+
+        AutostartPlan { layers, blocked }
     }
 
     pub async fn stop_all_modules(&self) -> Result<(), ModuleRuntimeError> {
@@ -113,6 +457,15 @@ impl ModuleService {
     }
 
     pub async fn ensure_running(&self, module_id: &ModuleId) -> Result<(), ModuleRuntimeError> {
+        self.ensure_running_with_trigger(module_id, ModuleStartupTrigger::EnsureRunning)
+            .await
+    }
+
+    async fn ensure_running_with_trigger(
+        &self,
+        module_id: &ModuleId,
+        trigger: ModuleStartupTrigger,
+    ) -> Result<(), ModuleRuntimeError> {
         self.diagnostics.record_heartbeat("module-lifecycle");
         self.diagnostics.record_heartbeat("module-runtime");
         let installed = match self.storage.load(module_id).await {
@@ -181,7 +534,7 @@ impl ModuleService {
                     env_vars: Vec::new(),
                     auto_restart: true,
                 };
-                self.start(config).await.map(|_| ())
+                self.start_with_trigger(config, trigger).await.map(|_| ())
             }
             Err(err) => Err(err),
         }
@@ -197,13 +550,26 @@ impl ModuleService {
             env_vars: Vec::new(),
             auto_restart: true,
         };
-        self.start(config).await
+        self.start_with_trigger(config, ModuleStartupTrigger::ManualStart)
+            .await
     }
 
     pub async fn start(
         &self,
-        mut config: ModuleStartConfig,
+        config: ModuleStartConfig,
     ) -> Result<ModuleRuntimeInfo, ModuleRuntimeError> {
+        self.start_with_trigger(config, ModuleStartupTrigger::ManualStart)
+            .await
+    }
+
+    async fn start_with_trigger(
+        &self,
+        mut config: ModuleStartConfig,
+        trigger: ModuleStartupTrigger,
+    ) -> Result<ModuleRuntimeInfo, ModuleRuntimeError> {
+        let attempt_started_at = OffsetDateTime::now_utc();
+        let attempt_started = Instant::now();
+        let mut phases = Vec::new();
         let installed = self
             .storage
             .load(&config.module_id)
@@ -227,6 +593,7 @@ impl ModuleService {
             });
         }
 
+        let manifest = installed.manifest.clone();
         self.register_declared_services(&config.module_id, &installed)
             .await
             .map_err(|err| ModuleRuntimeError::InvalidState(err.to_string()))?;
@@ -258,14 +625,185 @@ impl ModuleService {
 
         self.guard_quarantine(&config.module_id)?;
 
-        let gateway_endpoint = self.ensure_gateway_endpoint(&config.module_id).await?;
-
-        let issued_token = self.issue_module_service_token(&config.module_id).await?;
-
         let assigned_port = match config.port {
             Some(port) => Some(port),
             None => self.port_allocator.assigned_port(&config.module_id).await?,
         };
+        let preflight_timeout_ms = Self::phase_timeout_ms(
+            "FENRIR_MODULE_START_PREFLIGHT_TIMEOUT_MS",
+            START_PREFLIGHT_TIMEOUT_MS_DEFAULT,
+        );
+        let preflight_started = Instant::now();
+        let preflight = tokio::time::timeout(
+            Duration::from_millis(preflight_timeout_ms),
+            self.run_start_preflight(&config.module_id, &installed.path, assigned_port),
+        )
+        .await;
+        let preflight_duration = preflight_started.elapsed().as_millis() as u64;
+        match preflight {
+            Ok(Ok(())) => phases.push(ModuleStartupPhaseReport {
+                phase: "preflight".to_string(),
+                status: ModuleStartupPhaseStatus::Succeeded,
+                duration_ms: preflight_duration,
+                error_code: None,
+                message: None,
+            }),
+            Ok(Err(err)) => {
+                let start_reason_prefix = format!("module {} preflight failed", config.module_id);
+                let reason = format!("{start_reason_prefix}: {err}");
+                phases.push(ModuleStartupPhaseReport {
+                    phase: "preflight".to_string(),
+                    status: ModuleStartupPhaseStatus::Failed,
+                    duration_ms: preflight_duration,
+                    error_code: Self::error_code_for_runtime_error(&err),
+                    message: Some(err.to_string()),
+                });
+                tracing::warn!(
+                    event = "module.lifecycle.preflight_failed",
+                    module_id = %config.module_id,
+                    error = %err
+                );
+                self.update_module_service_status(
+                    &config.module_id,
+                    &manifest,
+                    ServiceStatus::Failed,
+                    Some(runtime_notes::start_failed(reason)),
+                );
+                self.store_startup_report(Self::build_startup_report(
+                    &config.module_id,
+                    trigger,
+                    ModuleStartupStatus::Failed,
+                    attempt_started_at,
+                    attempt_started.elapsed().as_millis() as u64,
+                    phases,
+                ))
+                .await;
+                return Err(err);
+            }
+            Err(_) => {
+                let err = ModuleRuntimeError::StartFailed {
+                    module_id: config.module_id.to_string(),
+                    reason: format!(
+                        "{START_PREFLIGHT_TIMEOUT}: preflight phase exceeded {} ms",
+                        preflight_timeout_ms
+                    ),
+                };
+                phases.push(ModuleStartupPhaseReport {
+                    phase: "preflight".to_string(),
+                    status: ModuleStartupPhaseStatus::Failed,
+                    duration_ms: preflight_timeout_ms,
+                    error_code: Some(START_PREFLIGHT_TIMEOUT.to_string()),
+                    message: Some(err.to_string()),
+                });
+                self.update_module_service_status(
+                    &config.module_id,
+                    &manifest,
+                    ServiceStatus::Failed,
+                    Some(runtime_notes::start_failed(err.to_string())),
+                );
+                self.store_startup_report(Self::build_startup_report(
+                    &config.module_id,
+                    trigger,
+                    ModuleStartupStatus::Failed,
+                    attempt_started_at,
+                    attempt_started.elapsed().as_millis() as u64,
+                    phases,
+                ))
+                .await;
+                return Err(err);
+            }
+        }
+
+        tracing::info!(
+            event = "module.lifecycle.preflight_passed",
+            module_id = %config.module_id,
+            assigned_port = ?assigned_port
+        );
+
+        let gateway_endpoint = self.ensure_gateway_endpoint(&config.module_id).await?;
+
+        let token_timeout_ms = Self::phase_timeout_ms(
+            "FENRIR_MODULE_START_TOKEN_TIMEOUT_MS",
+            START_TOKEN_TIMEOUT_MS_DEFAULT,
+        );
+        let token_started = Instant::now();
+        let issued_token = match tokio::time::timeout(
+            Duration::from_millis(token_timeout_ms),
+            self.issue_module_service_token(&config.module_id),
+        )
+        .await
+        {
+            Ok(Ok(token)) => {
+                phases.push(ModuleStartupPhaseReport {
+                    phase: "service_token".to_string(),
+                    status: ModuleStartupPhaseStatus::Succeeded,
+                    duration_ms: token_started.elapsed().as_millis() as u64,
+                    error_code: None,
+                    message: None,
+                });
+                token
+            }
+            Ok(Err(err)) => {
+                phases.push(ModuleStartupPhaseReport {
+                    phase: "service_token".to_string(),
+                    status: ModuleStartupPhaseStatus::Failed,
+                    duration_ms: token_started.elapsed().as_millis() as u64,
+                    error_code: Self::error_code_for_runtime_error(&err),
+                    message: Some(err.to_string()),
+                });
+                self.update_module_service_status(
+                    &config.module_id,
+                    &manifest,
+                    ServiceStatus::Failed,
+                    Some(runtime_notes::start_failed(err.to_string())),
+                );
+                self.stop_gateway_if_any(&config.module_id).await;
+                self.store_startup_report(Self::build_startup_report(
+                    &config.module_id,
+                    trigger,
+                    ModuleStartupStatus::Failed,
+                    attempt_started_at,
+                    attempt_started.elapsed().as_millis() as u64,
+                    phases,
+                ))
+                .await;
+                return Err(err);
+            }
+            Err(_) => {
+                let err = ModuleRuntimeError::StartFailed {
+                    module_id: config.module_id.to_string(),
+                    reason: format!(
+                        "{START_TOKEN_TIMEOUT}: token issuance exceeded {} ms",
+                        token_timeout_ms
+                    ),
+                };
+                phases.push(ModuleStartupPhaseReport {
+                    phase: "service_token".to_string(),
+                    status: ModuleStartupPhaseStatus::Failed,
+                    duration_ms: token_timeout_ms,
+                    error_code: Some(START_TOKEN_TIMEOUT.to_string()),
+                    message: Some(err.to_string()),
+                });
+                self.update_module_service_status(
+                    &config.module_id,
+                    &manifest,
+                    ServiceStatus::Failed,
+                    Some(runtime_notes::start_failed(err.to_string())),
+                );
+                self.stop_gateway_if_any(&config.module_id).await;
+                self.store_startup_report(Self::build_startup_report(
+                    &config.module_id,
+                    trigger,
+                    ModuleStartupStatus::Failed,
+                    attempt_started_at,
+                    attempt_started.elapsed().as_millis() as u64,
+                    phases,
+                ))
+                .await;
+                return Err(err);
+            }
+        };
+
         config.port = assigned_port;
         config.env_vars = self.inject_runtime_env(
             config.env_vars,
@@ -281,18 +819,51 @@ impl ModuleService {
             gateway_endpoint.clone(),
         ));
 
-        let manifest = installed.manifest.clone();
+        self.update_module_service_status(
+            &config.module_id,
+            &manifest,
+            ServiceStatus::Starting,
+            Some(runtime_notes::STARTING.to_string()),
+        );
+
         let module_id_clone = config.module_id.clone();
+        tracing::info!(
+            event = "module.lifecycle.boot_started",
+            module_id = %module_id_clone,
+            assigned_port = ?assigned_port
+        );
         let runtime_started_at = Instant::now();
-        let runtime_result = self.runtime.start(config).await;
-        let runtime_success = runtime_result.is_ok();
+        let runtime_timeout_ms = Self::phase_timeout_ms(
+            "FENRIR_MODULE_START_RUNTIME_TIMEOUT_MS",
+            START_RUNTIME_TIMEOUT_MS_DEFAULT,
+        );
+        let runtime_result = tokio::time::timeout(
+            Duration::from_millis(runtime_timeout_ms),
+            self.runtime.start(config),
+        )
+        .await;
+        let runtime_success = matches!(runtime_result, Ok(Ok(_)));
         self.record_lifecycle_metrics(runtime_started_at, runtime_success);
         let runtime_info = match runtime_result {
-            Ok(info) => {
+            Ok(Ok(info)) => {
+                phases.push(ModuleStartupPhaseReport {
+                    phase: "runtime_start".to_string(),
+                    status: ModuleStartupPhaseStatus::Succeeded,
+                    duration_ms: runtime_started_at.elapsed().as_millis() as u64,
+                    error_code: None,
+                    message: None,
+                });
                 self.clear_health(&info.module_id);
                 info
             }
-            Err(err) => {
+            Ok(Err(err)) => {
+                phases.push(ModuleStartupPhaseReport {
+                    phase: "runtime_start".to_string(),
+                    status: ModuleStartupPhaseStatus::Failed,
+                    duration_ms: runtime_started_at.elapsed().as_millis() as u64,
+                    error_code: Self::error_code_for_runtime_error(&err),
+                    message: Some(err.to_string()),
+                });
                 self.stop_gateway_if_any(&module_id_clone).await;
                 let final_err = if let Some(until) = self.record_failure(&module_id_clone) {
                     self.annotate_quarantine(&module_id_clone, &manifest, until);
@@ -316,7 +887,81 @@ impl ModuleService {
                         );
                     }
                 }
+                self.update_module_service_status(
+                    &module_id_clone,
+                    &manifest,
+                    ServiceStatus::Failed,
+                    Some(runtime_notes::start_failed(final_err.to_string())),
+                );
+                tracing::warn!(
+                    event = "module.lifecycle.boot_failed",
+                    module_id = %module_id_clone,
+                    latency_ms = runtime_started_at.elapsed().as_secs_f64() * 1000.0,
+                    error = %final_err
+                );
+                self.store_startup_report(Self::build_startup_report(
+                    &module_id_clone,
+                    trigger,
+                    ModuleStartupStatus::Failed,
+                    attempt_started_at,
+                    attempt_started.elapsed().as_millis() as u64,
+                    phases,
+                ))
+                .await;
                 return Err(final_err);
+            }
+            Err(_) => {
+                let timeout_err = ModuleRuntimeError::StartFailed {
+                    module_id: module_id_clone.to_string(),
+                    reason: format!(
+                        "{START_RUNTIME_TIMEOUT}: runtime start exceeded {} ms",
+                        runtime_timeout_ms
+                    ),
+                };
+                phases.push(ModuleStartupPhaseReport {
+                    phase: "runtime_start".to_string(),
+                    status: ModuleStartupPhaseStatus::Failed,
+                    duration_ms: runtime_timeout_ms,
+                    error_code: Some(START_RUNTIME_TIMEOUT.to_string()),
+                    message: Some(timeout_err.to_string()),
+                });
+                self.stop_gateway_if_any(&module_id_clone).await;
+                let _ = self.runtime.stop(&module_id_clone).await;
+                if let Some(token) = issued_token.as_ref() {
+                    if let Err(revoke_err) = self
+                        .security
+                        .revoke_service_token(&token.token, "module-start-timeout")
+                    {
+                        tracing::warn!(
+                            module = %token.claims.actor.identifier(),
+                            error = %revoke_err,
+                            "{}",
+                            module_service_logs::SERVICE_TOKEN_REVOKE_FAILED
+                        );
+                    }
+                }
+                self.update_module_service_status(
+                    &module_id_clone,
+                    &manifest,
+                    ServiceStatus::Failed,
+                    Some(runtime_notes::start_failed(timeout_err.to_string())),
+                );
+                tracing::warn!(
+                    event = "module.lifecycle.boot_failed",
+                    module_id = %module_id_clone,
+                    latency_ms = runtime_started_at.elapsed().as_secs_f64() * 1000.0,
+                    error = %timeout_err
+                );
+                self.store_startup_report(Self::build_startup_report(
+                    &module_id_clone,
+                    trigger,
+                    ModuleStartupStatus::Failed,
+                    attempt_started_at,
+                    attempt_started.elapsed().as_millis() as u64,
+                    phases,
+                ))
+                .await;
+                return Err(timeout_err);
             }
         };
 
@@ -332,9 +977,11 @@ impl ModuleService {
         }
 
         tracing::info!(
+            event = "module.lifecycle.boot_succeeded",
             module_id = %runtime_info.module_id,
             pid = ?runtime_info.pid,
             port = ?runtime_info.port,
+            latency_ms = runtime_started_at.elapsed().as_secs_f64() * 1000.0,
             "{}",
             runtime_logs::MODULE_STARTED
         );
@@ -366,7 +1013,142 @@ impl ModuleService {
             }
         }
 
+        self.store_startup_report(Self::build_startup_report(
+            &runtime_info.module_id,
+            trigger,
+            ModuleStartupStatus::Succeeded,
+            attempt_started_at,
+            attempt_started.elapsed().as_millis() as u64,
+            phases,
+        ))
+        .await;
+
         Ok(runtime_info)
+    }
+
+    fn phase_timeout_ms(env_key: &str, default: u64) -> u64 {
+        let raw = match env::var(env_key) {
+            Ok(value) => value,
+            Err(_) => return default,
+        };
+        match raw.trim().parse::<u64>() {
+            Ok(value) if value > 0 => value,
+            Ok(_) | Err(_) => {
+                tracing::warn!(
+                    event = "module.lifecycle.start_timeout_config_invalid",
+                    env_var = env_key,
+                    value = raw,
+                    fallback = default
+                );
+                default
+            }
+        }
+    }
+
+    async fn store_startup_report(&self, report: ModuleStartupReport) {
+        self.startup_reports
+            .write()
+            .await
+            .insert(report.module_id.clone(), report);
+    }
+
+    fn build_startup_report(
+        module_id: &ModuleId,
+        trigger: ModuleStartupTrigger,
+        status: ModuleStartupStatus,
+        started_at: OffsetDateTime,
+        total_duration_ms: u64,
+        phases: Vec<ModuleStartupPhaseReport>,
+    ) -> ModuleStartupReport {
+        ModuleStartupReport {
+            module_id: module_id.clone(),
+            trigger,
+            status,
+            started_at: Self::format_offset_rfc3339(started_at),
+            completed_at: Self::format_offset_rfc3339(OffsetDateTime::now_utc()),
+            total_duration_ms,
+            phases,
+        }
+    }
+
+    fn error_code_for_runtime_error(err: &ModuleRuntimeError) -> Option<String> {
+        match err {
+            ModuleRuntimeError::StartFailed { reason, .. } => {
+                let candidate = reason.split(':').next()?.trim();
+                if candidate.is_empty() {
+                    return None;
+                }
+                if candidate
+                    .chars()
+                    .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '-')
+                {
+                    Some(candidate.to_string())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn now_rfc3339() -> String {
+        Self::format_offset_rfc3339(OffsetDateTime::now_utc())
+    }
+
+    fn format_offset_rfc3339(value: OffsetDateTime) -> String {
+        value
+            .format(&Rfc3339)
+            .unwrap_or_else(|_| value.unix_timestamp().to_string())
+    }
+
+    pub async fn startup_reports(&self) -> Vec<ModuleStartupReport> {
+        let guard = self.startup_reports.read().await;
+        let mut reports: Vec<_> = guard.values().cloned().collect();
+        reports.sort_by(|a, b| a.module_id.cmp(&b.module_id));
+        reports
+    }
+
+    pub async fn startup_report(&self, module_id: &ModuleId) -> Option<ModuleStartupReport> {
+        self.startup_reports.read().await.get(module_id).cloned()
+    }
+
+    async fn run_start_preflight(
+        &self,
+        module_id: &ModuleId,
+        installed_path: &str,
+        assigned_port: Option<u16>,
+    ) -> Result<(), ModuleRuntimeError> {
+        tracing::info!(
+            event = "module.lifecycle.preflight_started",
+            module_id = %module_id,
+            assigned_port = ?assigned_port
+        );
+
+        if fs::metadata(Path::new(installed_path)).await.is_err() {
+            return Err(ModuleRuntimeError::StartFailed {
+                module_id: module_id.to_string(),
+                reason: format!(
+                    "{PREFLIGHT_ARTIFACT_MISSING}: installed artifact path missing ({installed_path})"
+                ),
+            });
+        }
+
+        if let Some(port) = assigned_port {
+            let bind_addr = format!("127.0.0.1:{port}");
+            match tokio::net::TcpListener::bind(&bind_addr).await {
+                Ok(listener) => drop(listener),
+                Err(err) => {
+                    return Err(ModuleRuntimeError::StartFailed {
+                        module_id: module_id.to_string(),
+                        reason: format!(
+                            "{PREFLIGHT_PORT_UNAVAILABLE}: failed to reserve {bind_addr} ({err})"
+                        ),
+                    });
+                }
+            }
+        }
+
+        Ok(())
     }
 
     pub async fn stop(&self, module_id: &ModuleId) -> Result<(), ModuleRuntimeError> {
@@ -468,12 +1250,15 @@ impl ModuleService {
         self.stop(module_id).await?;
 
         let mut info = self
-            .start(ModuleStartConfig {
-                module_id: module_id.clone(),
-                port: None,
-                env_vars: vec![],
-                auto_restart: false,
-            })
+            .start_with_trigger(
+                ModuleStartConfig {
+                    module_id: module_id.clone(),
+                    port: None,
+                    env_vars: vec![],
+                    auto_restart: false,
+                },
+                ModuleStartupTrigger::Restart,
+            )
             .await?;
         info.restart_count = restart_count;
         self.update_module_service_status(

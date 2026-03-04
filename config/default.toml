@@ -228,6 +228,7 @@ accept_invalid_certs = false
 # PUBLIC_URL = "https://tickets.local"
 # [modules.services."module:fenrir-api".secrets]
 # API_KEY = "env:FENRIR_API_KEY"
+# Supports `FENRIR_API_KEY` or `FENRIR_API_KEY_FILE` (set exactly one).
 # [modules.services."module:fenrir-api".policy]
 # internal_only = false
 # allowed_roles = ["service-read", "service-write"]

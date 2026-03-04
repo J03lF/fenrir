@@ -22,8 +22,8 @@ pub use install::{
     ModuleInstallStatus,
 };
 pub use manifest::{
-    ChecksumAlgorithm, ModuleArtifactDescriptor, ModuleChecksum, ModuleManifest,
-    ModuleSignatureDescriptor, SignatureAlgorithm,
+    ChecksumAlgorithm, ModuleArtifactDescriptor, ModuleChecksum, ModuleDependency,
+    ModuleDependencySpec, ModuleManifest, ModuleSignatureDescriptor, SignatureAlgorithm,
 };
 pub use ports::{ModuleRegistryPort, ModuleStoragePort, ModuleVerifierPort};
 pub use progress::{ModuleProgress, ProgressCallback};

@@ -21,6 +21,8 @@ pub struct ModuleManifest {
     pub artifact: ModuleArtifactDescriptor,
     pub signature: ModuleSignatureDescriptor,
     #[serde(default)]
+    pub dependencies: Vec<ModuleDependency>,
+    #[serde(default)]
     pub tags: Vec<String>,
     #[serde(default)]
     pub published_at: Option<u64>,
@@ -34,6 +36,42 @@ impl ModuleManifest {
     pub fn module_version(&self) -> ModuleVersion {
         ModuleVersion(self.version.clone())
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ModuleDependency {
+    Id(String),
+    Spec(ModuleDependencySpec),
+}
+
+impl ModuleDependency {
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Id(id) => id,
+            Self::Spec(spec) => &spec.id,
+        }
+    }
+
+    pub fn required(&self) -> bool {
+        match self {
+            Self::Id(_) => true,
+            Self::Spec(spec) => spec.required,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModuleDependencySpec {
+    pub id: String,
+    #[serde(default, with = "serde_helpers::option_version_req")]
+    pub version: Option<VersionReq>,
+    #[serde(default = "default_dependency_required")]
+    pub required: bool,
+}
+
+const fn default_dependency_required() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

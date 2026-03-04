@@ -213,6 +213,52 @@ pub struct ModuleScaffoldSummary {
     pub files: Vec<PathBuf>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModuleStartupTrigger {
+    Autostart,
+    EnsureRunning,
+    ManualStart,
+    Restart,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModuleStartupStatus {
+    Succeeded,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModuleStartupPhaseStatus {
+    Succeeded,
+    Failed,
+    Skipped,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ModuleStartupPhaseReport {
+    pub phase: String,
+    pub status: ModuleStartupPhaseStatus,
+    pub duration_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ModuleStartupReport {
+    pub module_id: ModuleId,
+    pub trigger: ModuleStartupTrigger,
+    pub status: ModuleStartupStatus,
+    pub started_at: String,
+    pub completed_at: String,
+    pub total_duration_ms: u64,
+    pub phases: Vec<ModuleStartupPhaseReport>,
+}
+
 // ============================================================================
 // Services JSON Support
 // ============================================================================

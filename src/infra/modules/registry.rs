@@ -483,6 +483,7 @@ impl ModuleRegistryPort for HttpModuleRegistry {
                 size_bytes: None,
             },
             signature,
+            dependencies: Vec::new(),
             tags: vec![],
             published_at: (target_version.released_at >= 0)
                 .then_some(target_version.released_at as u64),
@@ -1030,6 +1031,7 @@ impl LocalModuleVersion {
                     .unwrap_or_else(|| "local-dev".to_string()),
                 signature: self.signature.clone().unwrap_or_default(),
             },
+            dependencies: Vec::new(),
             tags: module.tags.clone(),
             published_at: self.published_at,
         }

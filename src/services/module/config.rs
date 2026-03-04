@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::env;
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use crate::config::{
@@ -148,19 +149,8 @@ impl ModuleEnvVar {
     ) -> Result<(String, String), ModuleEnvResolutionError> {
         match &self.source {
             ModuleEnvSource::Literal(value) => Ok((self.key.clone(), value.clone())),
-            ModuleEnvSource::Env(var) => match env::var(var) {
-                Ok(value) if !value.trim().is_empty() => Ok((self.key.clone(), value)),
-                Ok(_) => Err(ModuleEnvResolutionError::Empty {
-                    service_id: service_id.to_string(),
-                    env_var: var.clone(),
-                    key: self.key.clone(),
-                }),
-                Err(_) => Err(ModuleEnvResolutionError::Missing {
-                    service_id: service_id.to_string(),
-                    env_var: var.clone(),
-                    key: self.key.clone(),
-                }),
-            },
+            ModuleEnvSource::Env(var) => resolve_secret_value(service_id, &self.key, var)
+                .map(|value| (self.key.clone(), value)),
         }
     }
 
@@ -187,6 +177,20 @@ pub enum ModuleEnvResolutionError {
         env_var: String,
         key: String,
     },
+    Conflict {
+        service_id: String,
+        env_var: String,
+        file_var: String,
+        key: String,
+    },
+    FileRead {
+        service_id: String,
+        env_var: String,
+        file_var: String,
+        key: String,
+        path: String,
+        reason: String,
+    },
 }
 
 impl ModuleEnvResolutionError {
@@ -206,8 +210,104 @@ impl ModuleEnvResolutionError {
             } => format!(
                 "service {service_id} resolved env {key} from {env_var}, but the value is empty"
             ),
+            ModuleEnvResolutionError::Conflict {
+                service_id,
+                env_var,
+                file_var,
+                key,
+            } => format!(
+                "service {service_id} resolved env {key} from both {env_var} and {file_var}; set only one source"
+            ),
+            ModuleEnvResolutionError::FileRead {
+                service_id,
+                env_var,
+                file_var,
+                key,
+                path,
+                reason,
+            } => format!(
+                "service {service_id} resolved env {key} from {file_var} (for {env_var}) at '{path}', but reading failed: {reason}"
+            ),
         }
     }
+}
+
+fn resolve_secret_value(
+    service_id: &str,
+    key: &str,
+    env_var: &str,
+) -> Result<String, ModuleEnvResolutionError> {
+    let direct = env::var(env_var).ok();
+    let file_var = format!("{env_var}_FILE");
+    let file_ref = env::var(&file_var).ok();
+
+    let direct_non_empty = direct
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let file_ref_non_empty = file_ref
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+
+    if direct_non_empty.is_some() && file_ref_non_empty.is_some() {
+        return Err(ModuleEnvResolutionError::Conflict {
+            service_id: service_id.to_string(),
+            env_var: env_var.to_string(),
+            file_var,
+            key: key.to_string(),
+        });
+    }
+
+    if let Some(value) = direct_non_empty {
+        return Ok(value);
+    }
+
+    if let Some(path) = file_ref_non_empty {
+        let secret_path = PathBuf::from(path.trim());
+        let raw = std::fs::read_to_string(&secret_path).map_err(|err| {
+            ModuleEnvResolutionError::FileRead {
+                service_id: service_id.to_string(),
+                env_var: env_var.to_string(),
+                file_var: file_var.clone(),
+                key: key.to_string(),
+                path: secret_path.display().to_string(),
+                reason: err.to_string(),
+            }
+        })?;
+        let value = raw.trim();
+        if value.is_empty() {
+            return Err(ModuleEnvResolutionError::Empty {
+                service_id: service_id.to_string(),
+                env_var: file_var,
+                key: key.to_string(),
+            });
+        }
+        return Ok(value.to_string());
+    }
+
+    if matches!(direct, Some(value) if value.trim().is_empty()) {
+        return Err(ModuleEnvResolutionError::Empty {
+            service_id: service_id.to_string(),
+            env_var: env_var.to_string(),
+            key: key.to_string(),
+        });
+    }
+    if matches!(file_ref, Some(value) if value.trim().is_empty()) {
+        return Err(ModuleEnvResolutionError::Empty {
+            service_id: service_id.to_string(),
+            env_var: file_var,
+            key: key.to_string(),
+        });
+    }
+
+    Err(ModuleEnvResolutionError::Missing {
+        service_id: service_id.to_string(),
+        env_var: env_var.to_string(),
+        key: key.to_string(),
+    })
 }
 
 #[derive(Clone, Debug, Default)]

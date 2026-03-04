@@ -55,8 +55,8 @@ use super::scaffold::generate_module_scaffold;
 use super::token_audit::{record_module_token_exchange, ModuleTokenAuditContext};
 use super::types::{
     DistributionAction, DistributionPlanEntry, ModuleIngressError, ModuleIngressTarget,
-    ModuleReleaseOutcome, ModuleScaffoldOptions, ModuleScaffoldSummary, ModuleUpdateInfo,
-    RegisteredDevService,
+    ModuleReleaseOutcome, ModuleScaffoldOptions, ModuleScaffoldSummary, ModuleStartupReport,
+    ModuleUpdateInfo, RegisteredDevService,
 };
 
 const DEFAULT_SERVICE_TENANT: &str = "default";
@@ -196,6 +196,7 @@ pub struct ModuleService {
     pub(super) manifest_client: Client,
     pub(super) service_snapshot_path: Option<PathBuf>,
     pub(super) service_endpoints: Arc<RwLock<HashMap<String, String>>>,
+    pub(super) startup_reports: Arc<RwLock<HashMap<ModuleId, ModuleStartupReport>>>,
     pub(super) app_services: Weak<AppServices>,
     pub(super) self_ref: Weak<ModuleService>,
 }
@@ -893,6 +894,7 @@ impl ModuleService {
                 manifest_client,
                 service_snapshot_path,
                 service_endpoints: Arc::new(RwLock::new(HashMap::new())),
+                startup_reports: Arc::new(RwLock::new(HashMap::new())),
                 app_services: services,
                 self_ref: weak.clone(),
             }
@@ -1936,6 +1938,7 @@ mod tests {
                 key_id: "".to_string(),
                 signature: "".to_string(),
             },
+            dependencies: Vec::new(),
             tags: Vec::new(),
             published_at: None,
         };

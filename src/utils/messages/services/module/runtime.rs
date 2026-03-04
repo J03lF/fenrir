@@ -22,5 +22,10 @@ pub mod notes {
     }
 
     pub const RUNNING: &str = "running";
+    pub const STARTING: &str = "starting";
     pub const STOPPED: &str = "stopped";
+
+    pub fn start_failed(reason: impl fmt::Display) -> String {
+        format!("start failed: {reason}")
+    }
 }

@@ -23,5 +23,7 @@ pub use service::{ModuleService, ModuleServiceInit, ModuleTokenLease};
 pub use types::{
     DistributionAction, DistributionPlanEntry, ModuleDevServices, ModuleIngressError,
     ModuleIngressTarget, ModuleScaffoldOptions, ModuleScaffoldRuntime, ModuleScaffoldSummary,
-    ModuleSyncOutcome, ModuleSyncPackage, ModuleUpdateInfo, RegisteredDevService,
+    ModuleStartupPhaseReport, ModuleStartupPhaseStatus, ModuleStartupReport, ModuleStartupStatus,
+    ModuleStartupTrigger, ModuleSyncOutcome, ModuleSyncPackage, ModuleUpdateInfo,
+    RegisteredDevService,
 };

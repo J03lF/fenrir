@@ -353,11 +353,13 @@ pub struct GatewayResponsePayload {
 
 #[derive(Serialize)]
 #[serde(tag = "format", content = "value")]
+#[allow(dead_code)]
 pub enum GatewayBody {
     Empty,
     Json(serde_json::Value),
     Text(String),
     Base64(String),
+    RawJson(Box<serde_json::value::RawValue>),
 }
 
 impl GatewayBody {
@@ -365,10 +367,13 @@ impl GatewayBody {
         if bytes.is_empty() {
             return GatewayBody::Empty;
         }
-        if let Ok(json) = serde_json::from_slice(bytes) {
-            return GatewayBody::Json(json);
-        }
         if let Ok(text) = std::str::from_utf8(bytes) {
+            let trimmed = text.trim_start();
+            if trimmed.starts_with('{') || trimmed.starts_with('[') {
+                if let Ok(raw) = serde_json::value::RawValue::from_string(text.to_string()) {
+                    return GatewayBody::RawJson(raw);
+                }
+            }
             return GatewayBody::Text(text.to_string());
         }
         GatewayBody::Base64(BASE64_STANDARD.encode(bytes))

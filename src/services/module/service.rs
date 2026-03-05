@@ -831,6 +831,10 @@ impl ModuleService {
             });
         }
 
+        if let Some(target) = self.resolve_first_override_service(&module_id).await {
+            return Ok(target);
+        }
+
         self.resolve_runtime_ingress_target(&module_id).await
     }
 
@@ -1017,6 +1021,24 @@ impl ModuleService {
                     endpoint,
                 }
             })
+        })
+    }
+
+    async fn resolve_first_override_service(
+        &self,
+        module_id: &ModuleId,
+    ) -> Option<ModuleIngressTarget> {
+        let guard = self.dev_overrides.read().await;
+        guard.get(module_id).and_then(|state| {
+            state
+                .services
+                .iter()
+                .next()
+                .map(|(svc_id, &endpoint)| ModuleIngressTarget::DevService {
+                    module_id: module_id.clone(),
+                    service_id: svc_id.clone(),
+                    endpoint,
+                })
         })
     }
 

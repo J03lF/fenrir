@@ -305,6 +305,7 @@ impl PostgresAdapter {
             Type::TEXT_ARRAY | Type::VARCHAR_ARRAY | Type::BPCHAR_ARRAY | Type::NAME_ARRAY => {
                 Self::coerce_text_array(value)
             }
+            Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME => Self::coerce_text(value),
             _ => Ok(Self::prepare_param(value)),
         }
     }
@@ -425,6 +426,24 @@ impl PostgresAdapter {
         };
 
         Ok(PreparedParamBinding::TextArray(items))
+    }
+
+    fn coerce_text(value: &DbValue) -> DbResult<PreparedParamBinding> {
+        let text = match value {
+            DbValue::Text(text) => text.clone(),
+            DbValue::Json(text) => text.clone(),
+            DbValue::Uuid(uuid) => uuid.to_string(),
+            DbValue::Inet(ip) => ip.to_string(),
+            DbValue::Timestamp(dt) => dt.to_string(),
+            DbValue::TimestampStr(text) => text.clone(),
+            DbValue::Bool(flag) => flag.to_string(),
+            DbValue::Integer(num) => num.to_string(),
+            DbValue::Integer32(num) => num.to_string(),
+            DbValue::Float(num) => num.to_string(),
+            DbValue::TextArray(items) => serde_json::to_string(items).unwrap_or_else(|_| "[]".to_string()),
+            other => format!("{other:?}"),
+        };
+        Ok(PreparedParamBinding::Text(text))
     }
 
     fn map_rows(rows: Vec<Row>) -> DbResult<Vec<DbExecutionResult>> {

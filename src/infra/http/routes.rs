@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use axum::body::Body;
-use axum::extract::{OriginalUri, Path as AxumPath, Query, State};
+use axum::extract::{ConnectInfo, OriginalUri, Path as AxumPath, Query, State};
 use axum::http::{
     header::{HeaderName as AxumHeaderName, AUTHORIZATION, HOST},
     HeaderMap, HeaderValue, Method, Request, StatusCode, Uri,
@@ -1816,14 +1816,47 @@ struct GatewayRoute {
     tail: String,
 }
 
+struct OptionalPeerAddr(Option<std::net::SocketAddr>);
+
+#[axum::async_trait]
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for OptionalPeerAddr {
+    type Rejection = Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(Self(
+            parts
+                .extensions
+                .get::<ConnectInfo<std::net::SocketAddr>>()
+                .map(|ci| ci.0),
+        ))
+    }
+}
+
+fn inject_forwarded_for(headers: &mut HeaderMap, peer: std::net::SocketAddr) {
+    if headers.contains_key("x-forwarded-for") {
+        return;
+    }
+    if let Ok(value) = HeaderValue::from_str(&peer.ip().to_string()) {
+        headers.insert("x-forwarded-for", value);
+    }
+}
+
 async fn proxy_module_service(
     State(state): State<HttpState>,
+    OptionalPeerAddr(peer_addr): OptionalPeerAddr,
     AxumPath((service_param, tail)): AxumPath<(String, String)>,
     method: Method,
     headers: HeaderMap,
     OriginalUri(original_uri): OriginalUri,
     body: Body,
 ) -> Response {
+    let mut headers = headers;
+    if let Some(addr) = peer_addr {
+        inject_forwarded_for(&mut headers, addr);
+    }
     let route = GatewayRoute {
         service_param,
         tail,
@@ -1846,12 +1879,17 @@ async fn proxy_module_service(
 
 async fn proxy_module_service_grpc(
     State(state): State<HttpState>,
+    OptionalPeerAddr(peer_addr): OptionalPeerAddr,
     AxumPath((service_param, tail)): AxumPath<(String, String)>,
     method: Method,
     headers: HeaderMap,
     OriginalUri(original_uri): OriginalUri,
     body: Body,
 ) -> Response {
+    let mut headers = headers;
+    if let Some(addr) = peer_addr {
+        inject_forwarded_for(&mut headers, addr);
+    }
     let route = GatewayRoute {
         service_param,
         tail,

@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -284,6 +284,8 @@ impl DbConnectorService {
                     Ok(DbValue::NullTimestamp)
                 } else if Self::looks_like_uuid_column(name) {
                     Ok(DbValue::NullUuid)
+                } else if Self::looks_like_inet_column(name) {
+                    Ok(DbValue::NullInet)
                 } else {
                     // Default to generic NULL (works for TEXT, VARCHAR, etc.)
                     // INET columns are rare - treat IP addresses as text by default
@@ -314,6 +316,11 @@ impl DbConnectorService {
                 }
             }
             JsonValue::String(text) => {
+                if Self::looks_like_inet_column(name) {
+                    return Ok(Self::parse_inet_value(&text)
+                        .map(DbValue::Inet)
+                        .unwrap_or(DbValue::NullInet));
+                }
                 if Self::looks_like_text_array_column(name) {
                     return Ok(Self::parse_text_array_value(&text));
                 }
@@ -385,6 +392,30 @@ impl DbConnectorService {
         matches!(lower.as_str(), "allowed_email_domains" | "scopes")
             || lower.ends_with("_domains")
             || lower.ends_with("_scopes")
+    }
+
+    /// Heuristic to detect if a column stores an IP address.
+    fn looks_like_inet_column(name: &str) -> bool {
+        let lower = name.to_lowercase();
+        matches!(
+            lower.as_str(),
+            "ip" | "ip_address" | "client_ip" | "remote_ip" | "peer_ip"
+        ) || lower.ends_with("_ip")
+            || lower.ends_with("_ip_address")
+    }
+
+    fn parse_inet_value(text: &str) -> Option<IpAddr> {
+        let trimmed = text.split(',').next().unwrap_or(text).trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        if let Ok(ip) = trimmed.parse::<IpAddr>() {
+            return Some(ip);
+        }
+        if let Ok(addr) = trimmed.parse::<SocketAddr>() {
+            return Some(addr.ip());
+        }
+        None
     }
 
     fn parse_text_array_items(values: Vec<JsonValue>) -> DbValue {

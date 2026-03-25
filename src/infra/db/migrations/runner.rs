@@ -13,7 +13,7 @@ use crate::domain::db::{DbEngine, DbError, DbExecutionResult};
 use crate::infra::db::runtime::state::sync_from_migrations;
 use crate::services::db_shell::DbShellService;
 
-use super::{list_migration_files, migration_dir};
+use super::{list_migration_files, list_sql_files_in, migration_dir, ModuleMigrationSource};
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct MigrationState {
@@ -256,6 +256,77 @@ fn state_file(runtime_dir: &Path, engine: DbEngine) -> PathBuf {
     runtime_dir
         .join("migrations")
         .join(format!("{}.json", engine.as_str()))
+}
+
+/// Apply pending migrations from installed modules that declare `[migrations]`
+/// in their `.fenrir/runtime.toml`. Each module gets its own state file under
+/// `runtime/migrations/<engine>/<module_id>.json`.
+pub async fn apply_module_migrations(
+    runtime_dir: PathBuf,
+    db_shell: Arc<DbShellService>,
+    engine: DbEngine,
+    sources: &[ModuleMigrationSource],
+) -> Result<MigrationReport> {
+    if sources.is_empty() {
+        return Ok(MigrationReport::default());
+    }
+
+    let mut session = db_shell.create_session();
+    session
+        .switch_engine(engine)
+        .map_err(|err| anyhow!(err.to_string()))?;
+
+    let mut report = MigrationReport::default();
+
+    for source in sources {
+        let state_path = module_state_file(&runtime_dir, engine, &source.module_id);
+        let mut state = load_state(&state_path).await?;
+        let files = list_sql_files_in(&source.migrations_dir)?;
+
+        for file in files {
+            if state.is_applied(&file) {
+                continue;
+            }
+            let full_path = source.migrations_dir.join(&file);
+            if !full_path.exists() {
+                continue;
+            }
+            let payload = fs::read_to_string(&full_path).await.with_context(|| {
+                format!(
+                    "failed to read module migration {} ({})",
+                    full_path.display(),
+                    source.module_id,
+                )
+            })?;
+            if payload.trim().is_empty() {
+                state.mark_applied(file.clone());
+                persist_state(&state_path, &state).await?;
+                continue;
+            }
+            info!(
+                engine = %engine,
+                module = %source.module_id,
+                file = %file,
+                "applying module database migration"
+            );
+            session
+                .simple_query(payload.as_str())
+                .await
+                .map_err(db_error)?;
+            state.mark_applied(file.clone());
+            persist_state(&state_path, &state).await?;
+            report.record(format!("{}:{}", source.module_id, file));
+        }
+    }
+
+    Ok(report)
+}
+
+fn module_state_file(runtime_dir: &Path, engine: DbEngine, module_id: &str) -> PathBuf {
+    runtime_dir
+        .join("migrations")
+        .join(engine.as_str())
+        .join(format!("{}.json", module_id))
 }
 
 fn db_error(err: DbError) -> anyhow::Error {

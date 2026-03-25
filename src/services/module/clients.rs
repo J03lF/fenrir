@@ -3,9 +3,13 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use reqwest::Client;
+use serde_json::Value as JsonValue;
 use tokio::time::sleep;
 
-use crate::config::{ConfigError, ModuleRuntimeClientSection, ModuleRuntimeClientTlsSection};
+use crate::config::{
+    ConfigError, ModuleRuntimeClientSection, ModuleRuntimeClientTlsSection,
+    ModuleRuntimeRolloutSection,
+};
 
 #[derive(Clone, Debug)]
 pub struct ModuleClientSettings {
@@ -14,6 +18,16 @@ pub struct ModuleClientSettings {
     pub backoff: Duration,
     pub health_interval: Duration,
     pub tls: ModuleClientTlsSettings,
+}
+
+#[derive(Clone, Debug)]
+pub struct ModuleRolloutSettings {
+    pub drain_before_restart: Duration,
+    pub inter_restart_delay: Duration,
+    pub health_check_timeout: Duration,
+    pub health_poll_interval: Duration,
+    pub rollback_on_failure: bool,
+    pub abort_on_first_failure: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -33,6 +47,19 @@ impl ModuleClientSettings {
             health_interval: Duration::from_secs(cfg.health_probe_interval_seconds),
             tls: ModuleClientTlsSettings::from_config(&cfg.tls)?,
         })
+    }
+}
+
+impl ModuleRolloutSettings {
+    pub fn from_config(cfg: &ModuleRuntimeRolloutSection) -> Self {
+        Self {
+            drain_before_restart: Duration::from_millis(cfg.drain_before_restart_ms),
+            inter_restart_delay: Duration::from_millis(cfg.inter_restart_delay_ms),
+            health_check_timeout: Duration::from_millis(cfg.health_check_timeout_ms),
+            health_poll_interval: Duration::from_millis(cfg.health_poll_interval_ms),
+            rollback_on_failure: cfg.rollback_on_failure,
+            abort_on_first_failure: cfg.abort_on_first_failure,
+        }
     }
 }
 
@@ -112,6 +139,32 @@ impl ModuleHealthHttpClient {
                 .await
             {
                 Ok(response) => return response.error_for_status().map(|_| ()),
+                Err(err) => {
+                    attempts += 1;
+                    if attempts > self.retries {
+                        return Err(err);
+                    }
+                    let delay = self.backoff.saturating_mul(attempts);
+                    sleep(delay).await;
+                }
+            }
+        }
+    }
+
+    pub async fn fetch_json(&self, url: &str) -> Result<JsonValue, reqwest::Error> {
+        let mut attempts = 0;
+        loop {
+            match self
+                .inner
+                .get(url)
+                .header("x-fenrir-health-probe", "control-plane")
+                .send()
+                .await
+            {
+                Ok(response) => {
+                    let response = response.error_for_status()?;
+                    return response.json::<JsonValue>().await;
+                }
                 Err(err) => {
                     attempts += 1;
                     if attempts > self.retries {

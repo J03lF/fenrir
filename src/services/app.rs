@@ -13,7 +13,9 @@ use tokio::sync::broadcast;
 
 use super::backup::BackupService;
 use super::db_shell::DbShellService;
-use super::diagnostics::{ServiceDiagnostics, ServiceMetricSnapshot};
+use super::diagnostics::{
+    ServiceDiagnostics, ServiceMetricSnapshot, ServiceRuntimeMetricsSnapshot,
+};
 use super::jobs::{JobLogError, JobLogSnapshot};
 use super::managed::{
     block_on_managed, ClosureManagedService, ManagedService, ServiceControlError,
@@ -213,6 +215,16 @@ impl AppServices {
 
     pub fn service_diagnostics_snapshot(&self) -> HashMap<String, ServiceMetricSnapshot> {
         self.diagnostics.snapshot_all()
+    }
+
+    pub fn service_runtime_metrics(&self, id: &str) -> Option<ServiceRuntimeMetricsSnapshot> {
+        self.diagnostics.runtime_metrics_snapshot(id)
+    }
+
+    pub fn service_runtime_metrics_snapshot(
+        &self,
+    ) -> HashMap<String, ServiceRuntimeMetricsSnapshot> {
+        self.diagnostics.runtime_metrics_snapshot_all()
     }
 
     pub fn scheduler_jobs(&self) -> Vec<ScheduledJobSnapshot> {

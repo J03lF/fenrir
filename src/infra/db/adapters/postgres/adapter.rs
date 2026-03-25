@@ -440,7 +440,9 @@ impl PostgresAdapter {
             DbValue::Integer(num) => num.to_string(),
             DbValue::Integer32(num) => num.to_string(),
             DbValue::Float(num) => num.to_string(),
-            DbValue::TextArray(items) => serde_json::to_string(items).unwrap_or_else(|_| "[]".to_string()),
+            DbValue::TextArray(items) => {
+                serde_json::to_string(items).unwrap_or_else(|_| "[]".to_string())
+            }
             other => format!("{other:?}"),
         };
         Ok(PreparedParamBinding::Text(text))
@@ -471,6 +473,11 @@ impl PostgresAdapter {
     fn stringify_row_value(row: &Row, idx: usize) -> String {
         if let Ok(value) = row.try_get::<usize, Option<String>>(idx) {
             return value.unwrap_or_else(|| "NULL".to_string());
+        }
+        if let Ok(value) = row.try_get::<usize, Option<Json<JsonValue>>>(idx) {
+            return value
+                .map(|json| json.0.to_string())
+                .unwrap_or_else(|| "NULL".to_string());
         }
         if let Ok(value) = row.try_get::<usize, Option<uuid::Uuid>>(idx) {
             return value

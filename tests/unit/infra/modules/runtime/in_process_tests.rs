@@ -59,6 +59,7 @@ fn test_manifest() -> InstalledModule {
                 key_id: String::new(),
                 signature: String::new(),
             },
+            dependencies: vec![],
             tags: vec![],
             published_at: None,
         },

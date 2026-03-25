@@ -2,8 +2,11 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
+use serde_json::Value as JsonValue;
+
 const MAX_LATENCY_SAMPLES: usize = 64;
 pub const DEFAULT_STALE_AFTER_SECS: u64 = 180;
+pub const DEFAULT_RESOURCE_STALE_AFTER_SECS: u64 = 60;
 
 #[derive(Default)]
 struct ServiceMetricEntry {
@@ -72,12 +75,14 @@ fn percentile(samples: &[f64], percentile: f64) -> Option<f64> {
 #[derive(Default)]
 pub struct ServiceDiagnostics {
     entries: Mutex<HashMap<String, ServiceMetricEntry>>,
+    runtime_metrics: ServiceRuntimeMetrics,
 }
 
 impl ServiceDiagnostics {
     pub fn new() -> Self {
         Self {
             entries: Mutex::new(HashMap::new()),
+            runtime_metrics: ServiceRuntimeMetrics::new(),
         }
     }
 
@@ -113,6 +118,29 @@ impl ServiceDiagnostics {
             })
             .unwrap_or_default()
     }
+
+    pub fn update_runtime_metrics(&self, service_id: &str, payload: JsonValue) {
+        self.runtime_metrics.update(service_id, payload);
+    }
+
+    pub fn record_runtime_metrics_failure(&self, service_id: &str, error: impl Into<String>) {
+        self.runtime_metrics.record_failure(service_id, error);
+    }
+
+    pub fn clear_runtime_metrics(&self, service_id: &str) {
+        self.runtime_metrics.clear(service_id);
+    }
+
+    pub fn runtime_metrics_snapshot(
+        &self,
+        service_id: &str,
+    ) -> Option<ServiceRuntimeMetricsSnapshot> {
+        self.runtime_metrics.snapshot(service_id)
+    }
+
+    pub fn runtime_metrics_snapshot_all(&self) -> HashMap<String, ServiceRuntimeMetricsSnapshot> {
+        self.runtime_metrics.snapshot_all()
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -143,5 +171,96 @@ impl ServiceMetricSnapshot {
         self.last_heartbeat_elapsed()
             .map(|elapsed| elapsed >= threshold)
             .unwrap_or(false)
+    }
+}
+
+#[derive(Default)]
+struct ServiceRuntimeMetricsEntry {
+    updated_at: Option<SystemTime>,
+    payload: Option<JsonValue>,
+    last_error: Option<String>,
+}
+
+#[derive(Default)]
+pub struct ServiceRuntimeMetrics {
+    entries: Mutex<HashMap<String, ServiceRuntimeMetricsEntry>>,
+}
+
+impl ServiceRuntimeMetrics {
+    pub fn new() -> Self {
+        Self {
+            entries: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn update(&self, service_id: &str, payload: JsonValue) {
+        if let Ok(mut guard) = self.entries.lock() {
+            let entry = guard.entry(service_id.to_string()).or_default();
+            entry.updated_at = Some(SystemTime::now());
+            entry.payload = Some(payload);
+            entry.last_error = None;
+        }
+    }
+
+    pub fn record_failure(&self, service_id: &str, error: impl Into<String>) {
+        if let Ok(mut guard) = self.entries.lock() {
+            let entry = guard.entry(service_id.to_string()).or_default();
+            entry.last_error = Some(error.into());
+        }
+    }
+
+    pub fn clear(&self, service_id: &str) {
+        if let Ok(mut guard) = self.entries.lock() {
+            guard.remove(service_id);
+        }
+    }
+
+    pub fn snapshot(&self, service_id: &str) -> Option<ServiceRuntimeMetricsSnapshot> {
+        self.entries.lock().ok().and_then(|guard| {
+            guard
+                .get(service_id)
+                .map(ServiceRuntimeMetricsEntry::snapshot)
+        })
+    }
+
+    pub fn snapshot_all(&self) -> HashMap<String, ServiceRuntimeMetricsSnapshot> {
+        self.entries
+            .lock()
+            .map(|guard| {
+                guard
+                    .iter()
+                    .map(|(id, entry)| (id.clone(), entry.snapshot()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+impl ServiceRuntimeMetricsEntry {
+    fn snapshot(&self) -> ServiceRuntimeMetricsSnapshot {
+        ServiceRuntimeMetricsSnapshot {
+            updated_at: self.updated_at,
+            payload: self.payload.clone(),
+            last_error: self.last_error.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ServiceRuntimeMetricsSnapshot {
+    pub updated_at: Option<SystemTime>,
+    pub payload: Option<JsonValue>,
+    pub last_error: Option<String>,
+}
+
+impl ServiceRuntimeMetricsSnapshot {
+    pub fn updated_at_elapsed(&self) -> Option<Duration> {
+        self.updated_at.and_then(|ts| ts.elapsed().ok())
+    }
+
+    pub fn is_stale(&self, threshold: Duration) -> bool {
+        self.updated_at_elapsed()
+            .map(|elapsed| elapsed >= threshold)
+            .unwrap_or(true)
     }
 }

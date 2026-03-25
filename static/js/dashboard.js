@@ -247,6 +247,18 @@ const bulkRestartBtn = document.querySelector('[data-bulk-restart]');
 const auditBody = document.querySelector('[data-audit-events]');
 const auditMeta = document.querySelector('[data-audit-meta]');
 const auditRefreshBtn = document.querySelector('[data-audit-refresh]');
+const analyticsBody = document.querySelector('[data-analytics-events]');
+const analyticsMeta = document.querySelector('[data-analytics-meta]');
+const analyticsCount = document.querySelector('[data-analytics-count]');
+const analyticsRefreshBtn = document.querySelector('[data-analytics-refresh]');
+const analyticsModuleSelect = document.querySelector('[data-analytics-module]');
+const analyticsSearchInput = document.querySelector('[data-analytics-search]');
+const analyticsSearchClear = document.querySelector('[data-analytics-search-clear]');
+const analyticsLevelButtons = Array.from(document.querySelectorAll('[data-analytics-level]'));
+const analyticsTotalValue = document.querySelector('[data-analytics-total]');
+const analyticsErrorsValue = document.querySelector('[data-analytics-errors]');
+const analyticsWarningsValue = document.querySelector('[data-analytics-warnings]');
+const analyticsUnavailableValue = document.querySelector('[data-analytics-unavailable]');
 const auditModal = document.querySelector('[data-audit-modal]');
 const auditModalContent = document.querySelector('[data-audit-modal-content]');
 const auditModalClose = document.querySelector('[data-audit-modal-close]');
@@ -407,6 +419,13 @@ let historyLoading = false;
 let currentAuditRange = AUDIT_HISTORY_RANGE_DEFAULT;
 let auditHistoryLoaded = false;
 let auditHistoryLoading = false;
+let analyticsLoading = false;
+let analyticsLoaded = false;
+let analyticsCache = [];
+let analyticsModules = [];
+let currentAnalyticsLevel = 'issues';
+let currentAnalyticsModule = 'all';
+let currentAnalyticsSearch = '';
 const SERVICE_RESOURCE_STALE_MS = 60_000;
 const SERVICE_SORT_LABELS = {
   'cpu-desc': 'CPU ↓',
@@ -439,6 +458,7 @@ let lastIncidentsHtml = '';
 let lastModulesHtml = '';
 let lastAuditTableHtml = '';
 let lastAuditPreviewHtml = '';
+let lastAnalyticsTableHtml = '';
 
 /* ============================================
    STORAGE & TOKEN FUNCTIONS
@@ -500,6 +520,13 @@ const setHistoryButtonsActive = (range) => {
 const setAuditButtonsActive = (range) => {
   auditRangeButtons.forEach((button) => {
     const active = button.dataset.auditRange === range;
+    button.dataset.active = active ? 'true' : 'false';
+  });
+};
+
+const setAnalyticsLevelButtonsActive = (level) => {
+  analyticsLevelButtons.forEach((button) => {
+    const active = button.dataset.analyticsLevel === level;
     button.dataset.active = active ? 'true' : 'false';
   });
 };
@@ -630,6 +657,60 @@ const fetchAuditHistory = async (range, { background = false } = {}) => {
     }
   } finally {
     auditHistoryLoading = false;
+  }
+};
+
+const buildModuleAnalyticsUrl = () => {
+  const params = new URLSearchParams();
+  params.set('level', currentAnalyticsLevel);
+  params.set('limit', '200');
+  params.set('tail', '250');
+  if (currentAnalyticsModule && currentAnalyticsModule !== 'all') {
+    params.set('module', currentAnalyticsModule);
+  }
+  if (currentAnalyticsSearch) {
+    params.set('search', currentAnalyticsSearch);
+  }
+  return `/analytics/module-events?${params.toString()}`;
+};
+
+const applyAnalyticsPayload = (payload) => {
+  analyticsCache = Array.isArray(payload?.events) ? payload.events : [];
+  analyticsModules = Array.isArray(payload?.modules) ? payload.modules : [];
+  renderAnalyticsSummary(payload?.counts || {});
+  renderAnalyticsModuleOptions(analyticsModules);
+  renderAnalyticsTable();
+};
+
+const fetchModuleAnalytics = async ({ background = false } = {}) => {
+  if (analyticsLoading) {
+    return;
+  }
+  analyticsLoading = true;
+  try {
+    const response = await fetchWithToken(buildModuleAnalyticsUrl());
+    if (!response.ok) {
+      if (!background) {
+        showAlert(`Module-Analytics nicht verfügbar (${response.status}).`);
+      }
+      return;
+    }
+    const body = await response.json();
+    applyAnalyticsPayload(body);
+    if (analyticsMeta) {
+      const moduleLabel = body?.filter?.module || 'alle Module';
+      analyticsMeta.textContent = `${analyticsCache.length} Events · ${moduleLabel}`;
+    }
+    if (analyticsCount) {
+      analyticsCount.textContent = `${analyticsCache.length} Einträge`;
+    }
+    analyticsLoaded = true;
+  } catch (error) {
+    if (!background) {
+      showAlert('Module-Analytics nicht verfügbar.');
+    }
+  } finally {
+    analyticsLoading = false;
   }
 };
 
@@ -2653,6 +2734,10 @@ const setActivePage = (name, { persist = true } = {}) => {
     if (!historyLoaded && !historyLoading) {
       fetchTelemetryHistory(currentHistoryRange, { background: true }).catch(() => {});
     }
+  } else if (target === 'analytics') {
+    if (!analyticsLoaded && !analyticsLoading) {
+      fetchModuleAnalytics({ background: true }).catch(() => {});
+    }
   } else if (target === 'audit') {
     // Load audit data only when audit page is visited
     if (!auditHistoryLoaded && !auditHistoryLoading) {
@@ -2744,6 +2829,7 @@ if (serviceStatusButtons.length > 0) {
 updateServiceFilterClearState();
 
 setAuditButtonsActive(currentAuditRange);
+setAnalyticsLevelButtonsActive(currentAnalyticsLevel);
 auditRangeButtons.forEach((button) => {
   button.addEventListener('click', () => {
     const targetRange = button.dataset.auditRange;
@@ -2756,6 +2842,60 @@ auditRangeButtons.forEach((button) => {
     fetchAuditHistory(targetRange).catch(() => {});
   });
 });
+
+if (analyticsModuleSelect) {
+  analyticsModuleSelect.addEventListener('change', (event) => {
+    currentAnalyticsModule = event.target.value || 'all';
+    analyticsLoaded = false;
+    fetchModuleAnalytics().catch(() => {});
+  });
+}
+
+if (analyticsSearchInput) {
+  const debouncedAnalyticsSearch = debounce((value) => {
+    currentAnalyticsSearch = value.trim();
+    analyticsLoaded = false;
+    fetchModuleAnalytics({ background: true }).catch(() => {});
+    if (analyticsSearchClear) {
+      analyticsSearchClear.dataset.visible = currentAnalyticsSearch ? 'true' : 'false';
+    }
+  }, 180);
+  analyticsSearchInput.addEventListener('input', (event) => {
+    debouncedAnalyticsSearch(event.target.value || '');
+  });
+}
+
+if (analyticsSearchClear) {
+  analyticsSearchClear.addEventListener('click', () => {
+    currentAnalyticsSearch = '';
+    if (analyticsSearchInput) {
+      analyticsSearchInput.value = '';
+    }
+    analyticsSearchClear.dataset.visible = 'false';
+    analyticsLoaded = false;
+    fetchModuleAnalytics().catch(() => {});
+  });
+}
+
+analyticsLevelButtons.forEach((button) => {
+  button.addEventListener('click', () => {
+    const targetLevel = button.dataset.analyticsLevel || 'issues';
+    if (targetLevel === currentAnalyticsLevel || analyticsLoading) {
+      return;
+    }
+    currentAnalyticsLevel = targetLevel;
+    setAnalyticsLevelButtonsActive(targetLevel);
+    analyticsLoaded = false;
+    fetchModuleAnalytics().catch(() => {});
+  });
+});
+
+if (analyticsRefreshBtn) {
+  analyticsRefreshBtn.addEventListener('click', () => {
+    analyticsLoaded = false;
+    fetchModuleAnalytics().catch(() => {});
+  });
+}
 
 if (metricChartCanvas) {
   metricChartCanvas.addEventListener('mousemove', handleChartHover);
@@ -2844,6 +2984,101 @@ const renderAuditCache = () => {
     attachAuditRowListeners();
   }
   renderAuditPreview();
+};
+
+const renderAnalyticsSummary = (counts) => {
+  if (analyticsTotalValue) {
+    analyticsTotalValue.textContent = numberFormatter.format(counts?.total || 0);
+  }
+  if (analyticsErrorsValue) {
+    analyticsErrorsValue.textContent = numberFormatter.format(counts?.error || 0);
+  }
+  if (analyticsWarningsValue) {
+    analyticsWarningsValue.textContent = numberFormatter.format(counts?.warn || 0);
+  }
+  if (analyticsUnavailableValue) {
+    analyticsUnavailableValue.textContent = numberFormatter.format(counts?.unavailable || 0);
+  }
+};
+
+const renderAnalyticsModuleOptions = (modules) => {
+  if (!analyticsModuleSelect) {
+    return;
+  }
+  const selected = currentAnalyticsModule || 'all';
+  const options = ['<option value="all">Alle Module</option>']
+    .concat(
+      (modules || []).map((entry) => {
+        const label = entry.available === false
+          ? `${entry.module_id} · offline`
+          : `${entry.module_id} · ${entry.total} Events`;
+        return `<option value="${escapeHtml(entry.module_id)}">${escapeHtml(label)}</option>`;
+      }),
+    )
+    .join('');
+  analyticsModuleSelect.innerHTML = options;
+  analyticsModuleSelect.value = selected;
+};
+
+const analyticsLevelPillClass = (level) => {
+  switch ((level || '').toLowerCase()) {
+    case 'error':
+      return 'pill failure';
+    case 'warn':
+      return 'pill denied';
+    case 'info':
+      return 'pill info';
+    case 'debug':
+    case 'trace':
+      return 'pill debug';
+    default:
+      return 'pill';
+  }
+};
+
+const renderAnalyticsTable = () => {
+  if (!analyticsBody) {
+    return;
+  }
+  if (!analyticsCache || analyticsCache.length === 0) {
+    const emptyHtml = '<tr><td colspan="5">Keine Module-Events für die aktuellen Filter.</td></tr>';
+    if (lastAnalyticsTableHtml !== emptyHtml) {
+      analyticsBody.innerHTML = emptyHtml;
+      lastAnalyticsTableHtml = emptyHtml;
+    }
+    if (analyticsCount) {
+      analyticsCount.textContent = '0 Einträge';
+    }
+    return;
+  }
+
+  if (analyticsCount) {
+    analyticsCount.textContent = `${analyticsCache.length} Einträge`;
+  }
+
+  const newHtml = analyticsCache
+    .map((event) => {
+      const target = event.target || '–';
+      const shortTarget = target.length > 34 ? `${target.substring(0, 34)}…` : target;
+      const shortMessage = (event.message || '–').length > 120
+        ? `${event.message.substring(0, 120)}…`
+        : (event.message || '–');
+      return `
+        <tr>
+          <td>${event.timestamp ? formatTimestamp(event.timestamp) : '–'}</td>
+          <td class="service-id">${escapeHtml(event.module_id || '–')}</td>
+          <td><span class="${analyticsLevelPillClass(event.level)}">${escapeHtml(event.level || '–')}</span></td>
+          <td class="target-cell" title="${escapeHtml(target)}">${escapeHtml(shortTarget)}</td>
+          <td class="note-cell" title="${escapeHtml(event.raw || event.message || '')}">${escapeHtml(shortMessage)}</td>
+        </tr>
+      `;
+    })
+    .join('');
+
+  if (newHtml !== lastAnalyticsTableHtml) {
+    analyticsBody.innerHTML = newHtml;
+    lastAnalyticsTableHtml = newHtml;
+  }
 };
 
 const attachAuditRowListeners = () => {
@@ -3646,6 +3881,9 @@ const loadAll = async ({ background = false } = {}) => {
     if (!auditHistoryLoaded && !auditHistoryLoading) {
       fetchAuditHistory(currentAuditRange, { background: background || !document.hasFocus() }).catch(() => {});
     }
+    if (currentVisiblePage === 'analytics' && !analyticsLoading) {
+      fetchModuleAnalytics({ background: true }).catch(() => {});
+    }
     lastRefreshAt = Date.now();
     updateRefreshNote();
   } catch (error) {
@@ -3658,6 +3896,13 @@ const loadAll = async ({ background = false } = {}) => {
     auditBody.innerHTML = '<tr><td colspan="4">Netzwerkfehler – keine Audit-Daten.</td></tr>';
     auditMeta.textContent = 'Fehler';
     auditHistoryLoaded = false;
+    if (analyticsBody) {
+      analyticsBody.innerHTML = '<tr><td colspan="5">Netzwerkfehler – keine Analytics-Daten.</td></tr>';
+    }
+    if (analyticsMeta) {
+      analyticsMeta.textContent = 'Fehler';
+    }
+    analyticsLoaded = false;
     setUptimeBase(null);
     healthValue.textContent = 'unbekannt';
     healthNote.textContent = 'Telemetrie nicht verfügbar.';

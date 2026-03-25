@@ -326,6 +326,61 @@ pub fn boot() -> Result<BootContext, BootError> {
     } else {
         info!(engine = %effective_default_engine, "database migrations up to date");
     }
+
+    // Discover and apply module migrations from installed modules that declare
+    // [migrations] in their .fenrir/runtime.toml. Scan both install_dir and
+    // dev_sources.base_path, deduplicating by module_id.
+    let install_dir = PathBuf::from(&cfg.modules.storage.install_dir);
+    let mut module_sources = db::migrations::discover_module_migrations(&install_dir);
+    if let Some(dev_base) = cfg
+        .modules
+        .dev_sources
+        .base_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let dev_path = PathBuf::from(dev_base);
+        if dev_path.is_dir() && dev_path != install_dir {
+            let dev_sources = db::migrations::discover_module_migrations(&dev_path);
+            for ds in dev_sources {
+                if !module_sources.iter().any(|s| s.module_id == ds.module_id) {
+                    module_sources.push(ds);
+                }
+            }
+            module_sources.sort_by(|a, b| a.module_id.cmp(&b.module_id));
+        }
+    }
+    if !module_sources.is_empty() {
+        info!(
+            modules = module_sources.len(),
+            "discovered module migration sources"
+        );
+        let module_sources_for_apply = module_sources.clone();
+        let runtime_dir_for_apply = runtime_dir.clone();
+        let db_shell_service_for_apply = Arc::clone(&db_shell_service);
+        let module_migration_report = wrap_boot(
+            block_on_managed(async move {
+                db::migrations::apply_module_migrations(
+                    runtime_dir_for_apply,
+                    db_shell_service_for_apply,
+                    effective_default_engine,
+                    &module_sources_for_apply,
+                )
+                .await
+            }),
+            BootErrorCode::DbMigrations,
+            boot_errors::DB_MIGRATIONS_FAILED,
+        )?;
+        if module_migration_report.applied_count() > 0 {
+            info!(
+                engine = %effective_default_engine,
+                applied = module_migration_report.applied_count(),
+                files = ?module_migration_report.applied(),
+                "module database migrations applied"
+            );
+        }
+    }
     let scheduler_state_dir = cfg.runtime.scheduler_path();
     let scheduler_service = Arc::new(SchedulerService::new(
         Arc::clone(&registry),
@@ -573,6 +628,8 @@ pub fn boot() -> Result<BootContext, BootError> {
         BootErrorCode::ModuleAttach,
         boot_errors::MODULE_SERVICE_ATTACH_FAILED,
     )?;
+    let rollout_settings =
+        crate::services::module::ModuleRolloutSettings::from_config(&cfg.modules.runtime.rollout);
     let health_client = wrap_boot(
         ModuleHealthHttpClient::new(&client_settings),
         BootErrorCode::ModuleAttach,
@@ -602,6 +659,7 @@ pub fn boot() -> Result<BootContext, BootError> {
         dev_sources,
         overrides: service_overrides,
         client_settings,
+        rollout_settings,
         health_client,
         default_service_scopes,
         env_passthrough_prefixes: cfg.modules.runtime.env_passthrough_prefixes.clone(),

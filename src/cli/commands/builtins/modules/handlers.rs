@@ -12,9 +12,11 @@ use crate::cli::commands::registry::{
 };
 use crate::cli::commands::table::Table;
 use crate::cli::output::BoxTable;
+use crate::config;
 use crate::domain::module::{ModuleId, ModuleInstallSource, ModuleRuntimeInfo, ModuleVersion};
 use crate::services::module::{
-    DistributionAction, ModuleScaffoldOptions, ModuleScaffoldRuntime, ModuleService,
+    DistributionAction, ModuleCanaryRoutingStatus, ModuleRollingRestartReport,
+    ModuleRuntimeInstanceSnapshot, ModuleScaffoldOptions, ModuleScaffoldRuntime, ModuleService,
     ModuleSyncOutcome,
 };
 use crate::services::{ServiceSnapshot, ServiceStatus};
@@ -173,6 +175,10 @@ fn dispatch_module(
         "start" => handle_start(ctx, out, args),
         "stop" => handle_stop(ctx, out, args),
         "restart" => handle_restart(ctx, out, args),
+        "instances" => handle_instances(ctx, out, args),
+        "rolling-restart" => handle_rolling_restart(ctx, out, args),
+        "canary" => handle_canary(ctx, out, args),
+        "reload-overrides" => handle_reload_overrides(ctx, out, args),
         "stop-all" => handle_stop_all(ctx, out, args),
         other => {
             warn!(
@@ -1267,6 +1273,413 @@ fn handle_restart(
                 AuditOutcome::Failure,
                 module_error_metadata(runtime_error_code(&err), err.to_string()),
             );
+        }
+    }
+
+    Ok(CommandOutcome::Continue)
+}
+
+fn handle_instances(
+    ctx: &ModulesCommandCtx,
+    out: &mut dyn Write,
+    args: &[&str],
+) -> io::Result<CommandOutcome> {
+    let args = strip_module_keyword(args);
+    if args.len() != 1 {
+        writeln!(out, "usage: modules instances <module-id>")?;
+        return Ok(CommandOutcome::Continue);
+    }
+
+    let Some(module_id) = parse_module_id(out, args[0])? else {
+        return Ok(CommandOutcome::Continue);
+    };
+
+    let module_id_for_call = module_id.clone();
+    let result =
+        ctx.runtime_call(
+            |service| async move { service.runtime_instances(&module_id_for_call).await },
+        );
+
+    match result {
+        Ok(instances) => render_module_instances(out, &module_id, &instances)?,
+        Err(err) => {
+            render_runtime_error(out, "Failed to list module instances.", &err)?;
+            ctx.record_audit(
+                "module::instances",
+                &module_id,
+                None,
+                AuditOutcome::Failure,
+                module_error_metadata(runtime_error_code(&err), err.to_string()),
+            );
+        }
+    }
+
+    Ok(CommandOutcome::Continue)
+}
+
+fn handle_rolling_restart(
+    ctx: &ModulesCommandCtx,
+    out: &mut dyn Write,
+    args: &[&str],
+) -> io::Result<CommandOutcome> {
+    let args = strip_module_keyword(args);
+    if args.len() != 1 {
+        writeln!(out, "usage: modules rolling-restart <module-id>")?;
+        return Ok(CommandOutcome::Continue);
+    }
+
+    let Some(module_id) = parse_module_id(out, args[0])? else {
+        return Ok(CommandOutcome::Continue);
+    };
+
+    let module_id_for_call = module_id.clone();
+    let result = ctx
+        .runtime_call(|service| async move { service.rolling_restart(&module_id_for_call).await });
+
+    match result {
+        Ok(report) => {
+            render_rolling_restart_report(out, &report)?;
+            ctx.record_audit(
+                "module::rolling_restart",
+                &module_id,
+                None,
+                AuditOutcome::Success,
+                AuditMetadata::default()
+                    .insert("health_verified", report.health_verified.to_string())
+                    .insert(
+                        "restarted_instances",
+                        report.restarted_instances.len().to_string(),
+                    ),
+            );
+        }
+        Err(err) => {
+            render_runtime_error(out, "Failed to rolling-restart module.", &err)?;
+            ctx.record_audit(
+                "module::rolling_restart",
+                &module_id,
+                None,
+                AuditOutcome::Failure,
+                module_error_metadata(runtime_error_code(&err), err.to_string()),
+            );
+        }
+    }
+
+    Ok(CommandOutcome::Continue)
+}
+
+fn render_module_instances(
+    out: &mut dyn Write,
+    module_id: &ModuleId,
+    instances: &[ModuleRuntimeInstanceSnapshot],
+) -> io::Result<()> {
+    writeln!(out, "Instances for {module_id}:")?;
+    if instances.is_empty() {
+        writeln!(out, "  no runtime instances")?;
+        return Ok(());
+    }
+
+    for instance in instances {
+        writeln!(
+            out,
+            "  {}  status={} pid={} port={} endpoint={}",
+            instance.instance_id,
+            format_runtime_status(&instance.status),
+            instance
+                .pid
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            instance
+                .port
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            instance.endpoint.as_deref().unwrap_or("-"),
+        )?;
+    }
+    Ok(())
+}
+
+fn render_rolling_restart_report(
+    out: &mut dyn Write,
+    report: &ModuleRollingRestartReport,
+) -> io::Result<()> {
+    writeln!(out, "{}", report.note)?;
+    writeln!(
+        out,
+        "health verified: {}",
+        if report.health_verified { "yes" } else { "no" }
+    )?;
+    render_module_instances(out, &report.module_id, &report.restarted_instances)
+}
+
+fn render_canary_status(out: &mut dyn Write, status: &ModuleCanaryRoutingStatus) -> io::Result<()> {
+    writeln!(out, "Canary routing for {}:", status.module_id)?;
+    writeln!(
+        out,
+        "  strategy: {}",
+        status
+            .strategy
+            .map(|value| format!("{value:?}").to_ascii_lowercase())
+            .unwrap_or_else(|| "unset".to_string())
+    )?;
+    writeln!(out, "  traffic percent: {}", status.traffic_percent)?;
+    if status.configured_instances.is_empty() {
+        writeln!(out, "  configured canary instances: none")?;
+    } else {
+        writeln!(
+            out,
+            "  configured canary instances: {}",
+            status.configured_instances.join(", ")
+        )?;
+    }
+    writeln!(out, "  active stable instances:")?;
+    if status.active_stable_instances.is_empty() {
+        writeln!(out, "    none")?;
+    } else {
+        for instance in &status.active_stable_instances {
+            writeln!(
+                out,
+                "    {} ({})",
+                instance.instance_id,
+                instance.endpoint.as_deref().unwrap_or("-")
+            )?;
+        }
+    }
+    writeln!(out, "  active canary instances:")?;
+    if status.active_canary_instances.is_empty() {
+        writeln!(out, "    none")?;
+    } else {
+        for instance in &status.active_canary_instances {
+            writeln!(
+                out,
+                "    {} ({})",
+                instance.instance_id,
+                instance.endpoint.as_deref().unwrap_or("-")
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn handle_canary(
+    ctx: &ModulesCommandCtx,
+    out: &mut dyn Write,
+    args: &[&str],
+) -> io::Result<CommandOutcome> {
+    let args = strip_module_keyword(args);
+    if args.len() < 2 {
+        writeln!(
+            out,
+            "usage: modules canary <module-id> <status|start|set|clear> [percent] [instance-id ...]"
+        )?;
+        return Ok(CommandOutcome::Continue);
+    }
+
+    let Some(module_id) = parse_module_id(out, args[0])? else {
+        return Ok(CommandOutcome::Continue);
+    };
+    match args[1] {
+        "status" => {
+            let module_id_for_call = module_id.clone();
+            match ctx.runtime_call(|service| async move {
+                service.canary_routing_status(&module_id_for_call).await
+            }) {
+                Ok(status) => render_canary_status(out, &status)?,
+                Err(err) => render_runtime_error(out, "Failed to inspect canary routing.", &err)?,
+            }
+        }
+        "start" => {
+            let instance_ids = if args.len() > 2 {
+                Some(args[2..].iter().map(|value| value.to_string()).collect())
+            } else {
+                None
+            };
+            let module_id_for_call = module_id.clone();
+            match ctx.runtime_call(move |service| async move {
+                service
+                    .start_canary_routing(&module_id_for_call, instance_ids)
+                    .await
+            }) {
+                Ok(status) => render_canary_status(out, &status)?,
+                Err(err) => render_runtime_error(out, "Failed to start canary routing.", &err)?,
+            }
+        }
+        "set" => {
+            if args.len() < 3 {
+                writeln!(
+                    out,
+                    "usage: modules canary <module-id> set <percent> [instance-id ...]"
+                )?;
+                return Ok(CommandOutcome::Continue);
+            }
+            let percent = match args[2].parse::<u8>() {
+                Ok(value) => value,
+                Err(_) => {
+                    writeln!(out, "traffic percent must be an integer between 0 and 100")?;
+                    return Ok(CommandOutcome::Continue);
+                }
+            };
+            let instance_ids = if args.len() > 3 {
+                Some(args[3..].iter().map(|value| value.to_string()).collect())
+            } else {
+                None
+            };
+            let module_id_for_call = module_id.clone();
+            match ctx.runtime_call(move |service| async move {
+                service
+                    .set_canary_routing(&module_id_for_call, percent, instance_ids)
+                    .await
+            }) {
+                Ok(status) => render_canary_status(out, &status)?,
+                Err(err) => render_runtime_error(out, "Failed to update canary routing.", &err)?,
+            }
+        }
+        "clear" => {
+            let module_id_for_call = module_id.clone();
+            match ctx.runtime_call(|service| async move {
+                service.clear_canary_routing(&module_id_for_call).await
+            }) {
+                Ok(status) => render_canary_status(out, &status)?,
+                Err(err) => render_runtime_error(out, "Failed to clear canary routing.", &err)?,
+            }
+        }
+        _ => {
+            writeln!(
+                out,
+                "usage: modules canary <module-id> <status|start|set|clear> [percent] [instance-id ...]"
+            )?;
+        }
+    }
+
+    Ok(CommandOutcome::Continue)
+}
+
+fn format_runtime_status(status: &crate::domain::module::ModuleRuntimeStatus) -> &'static str {
+    match status {
+        crate::domain::module::ModuleRuntimeStatus::Running => "running",
+        crate::domain::module::ModuleRuntimeStatus::Stopped => "stopped",
+        crate::domain::module::ModuleRuntimeStatus::Failed => "failed",
+        crate::domain::module::ModuleRuntimeStatus::Starting => "starting",
+        crate::domain::module::ModuleRuntimeStatus::Stopping => "stopping",
+    }
+}
+
+fn handle_reload_overrides(
+    ctx: &ModulesCommandCtx,
+    out: &mut dyn Write,
+    args: &[&str],
+) -> io::Result<CommandOutcome> {
+    let args = strip_module_keyword(args);
+    let restart_running = !args.iter().any(|arg| {
+        matches!(
+            arg.to_ascii_lowercase().as_str(),
+            "--no-restart" | "--no-restart-running"
+        )
+    });
+    if args.iter().any(|arg| {
+        arg.starts_with("--")
+            && !matches!(
+                arg.to_ascii_lowercase().as_str(),
+                "--no-restart" | "--no-restart-running"
+            )
+    }) {
+        writeln!(out, "usage: modules reload-overrides [--no-restart]")?;
+        return Ok(CommandOutcome::Continue);
+    }
+
+    let loaded = match config::load() {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            writeln!(out, "failed to reload Fenrir config: {err}")?;
+            return Ok(CommandOutcome::Continue);
+        }
+    };
+    let overrides = match crate::services::module::ModuleServiceOverrides::from_config(
+        &loaded.modules.services,
+        &loaded.modules.service_profiles,
+    ) {
+        Ok(overrides) => overrides,
+        Err(err) => {
+            writeln!(out, "invalid module override config: {err}")?;
+            return Ok(CommandOutcome::Continue);
+        }
+    };
+
+    let reloaded = ctx.module_call(move |service| async move {
+        service
+            .reload_service_overrides(overrides, restart_running)
+            .await
+    });
+
+    match reloaded {
+        Ok(report) => {
+            match report.status {
+                crate::services::module::ModuleOverrideReloadStatus::Applied => {
+                    if report.restarted_modules.is_empty() {
+                        writeln!(
+                            out,
+                            "module overrides applied successfully; no running modules required restart"
+                        )?;
+                    } else {
+                        let modules = report
+                            .restarted_modules
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        writeln!(
+                            out,
+                            "module overrides applied successfully; restarted: {modules}"
+                        )?;
+                    }
+                }
+                crate::services::module::ModuleOverrideReloadStatus::RolledBack => {
+                    let restarted = report
+                        .restarted_modules
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let rollback = report
+                        .rollback_restarted_modules
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    writeln!(
+                        out,
+                        "module overrides failed health checks and were rolled back; attempted restart: [{}], rollback restart: [{}]",
+                        restarted,
+                        rollback,
+                    )?;
+                }
+                crate::services::module::ModuleOverrideReloadStatus::Failed => {
+                    let modules = report
+                        .restarted_modules
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    writeln!(
+                        out,
+                        "module overrides applied with health check failures; restarted: [{modules}]"
+                    )?;
+                }
+            }
+
+            for module in report.modules.iter().filter(|entry| !entry.healthy) {
+                writeln!(out, " - {}: {}", module.module_id, module.note)?;
+            }
+            if report.restart_running {
+                let verified = report
+                    .modules
+                    .iter()
+                    .filter(|entry| entry.health_checked && entry.healthy)
+                    .count();
+                writeln!(out, "health-verified modules: {verified}")?;
+            }
+        }
+        Err(err) => {
+            writeln!(out, "failed to reload module overrides: {err}")?;
         }
     }
 

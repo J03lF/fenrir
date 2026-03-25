@@ -298,6 +298,30 @@ const MODULE_SUBCOMMANDS: &[CommandSubcommand] = &[
         msg_modules::subcommands::RESTART_DESC,
     ),
     CommandSubcommand::new(
+        "instances",
+        &["instance-list"],
+        &[MODULE_ID_ARGUMENT],
+        "Show runtime instance snapshots for a module.",
+    ),
+    CommandSubcommand::new(
+        "rolling-restart",
+        &["rolling_restart"],
+        &[MODULE_ID_ARGUMENT],
+        "Perform a health-gated rolling restart over module runtime instances.",
+    ),
+    CommandSubcommand::new(
+        "canary",
+        &["traffic-shift", "traffic_shift"],
+        &[MODULE_ID_ARGUMENT],
+        "Inspect or update weighted canary routing for a module.",
+    ),
+    CommandSubcommand::new(
+        "reload-overrides",
+        &["reload_overrides", "reload-tuning"],
+        &[],
+        "Reload module service override config and selectively restart affected modules.",
+    ),
+    CommandSubcommand::new(
         "stop-all",
         &["stop_all"],
         &[],

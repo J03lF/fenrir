@@ -49,6 +49,13 @@ pub struct ModuleRuntimeInfo {
     pub restart_count: u32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleRuntimeInstanceInfo {
+    pub instance_id: String,
+    pub primary: bool,
+    pub runtime: ModuleRuntimeInfo,
+}
+
 /// Configuration for starting a module
 #[derive(Debug, Clone)]
 pub struct ModuleStartConfig {
@@ -78,6 +85,49 @@ pub trait ModuleRuntimePort: Send + Sync {
 
     /// Restart a module instance
     async fn restart(&self, module_id: &ModuleId) -> Result<ModuleRuntimeInfo, ModuleRuntimeError>;
+
+    /// List all runtime instances for a module.
+    async fn list_instances(
+        &self,
+        module_id: &ModuleId,
+    ) -> Result<Vec<ModuleRuntimeInstanceInfo>, ModuleRuntimeError> {
+        Ok(vec![ModuleRuntimeInstanceInfo {
+            instance_id: format!("{module_id}:primary"),
+            primary: true,
+            runtime: self.status(module_id).await?,
+        }])
+    }
+
+    /// Restart a specific runtime instance.
+    async fn restart_instance(
+        &self,
+        module_id: &ModuleId,
+        _instance_id: &str,
+    ) -> Result<ModuleRuntimeInfo, ModuleRuntimeError> {
+        self.restart(module_id).await
+    }
+
+    /// Reconcile the number of runtime instances for a module.
+    async fn reconcile_instances(
+        &self,
+        config: ModuleStartConfig,
+        desired_instances: usize,
+    ) -> Result<Vec<ModuleRuntimeInstanceInfo>, ModuleRuntimeError> {
+        match desired_instances {
+            0 => {
+                let _ = self.stop(&config.module_id).await;
+                Ok(Vec::new())
+            }
+            1 => Ok(vec![ModuleRuntimeInstanceInfo {
+                instance_id: format!("{}:primary", config.module_id),
+                primary: true,
+                runtime: self.start(config).await?,
+            }]),
+            _ => Err(ModuleRuntimeError::InvalidState(
+                "runtime does not support multiple instances".to_string(),
+            )),
+        }
+    }
 
     /// Get logs from a module instance
     async fn logs(

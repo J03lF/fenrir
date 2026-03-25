@@ -77,6 +77,15 @@
             </svg>
             <span>Services</span>
           </button>
+          <button type="button" role="tab" class="nav-item" data-page-trigger="analytics" aria-selected="false">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M4 19h16"/>
+              <path d="M7 16V9"/>
+              <path d="M12 16V5"/>
+              <path d="M17 16v-4"/>
+            </svg>
+            <span>Analytics</span>
+          </button>
           <button type="button" role="tab" class="nav-item" data-page-trigger="audit" aria-selected="false">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
@@ -511,6 +520,129 @@
                   <tbody data-services>
                     <tr>
                       <td colspan="6">Service-Registry wird abgefragt …</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </article>
+          </section>
+
+          <!-- ANALYTICS PAGE -->
+          <section class="page" data-page="analytics" data-visible="false">
+            <div class="page-title">
+              <h1>Module Analytics</h1>
+              <p>Zentrale Fehler- und Warning-Ansicht aller Module</p>
+              <span class="page-meta" data-analytics-meta>Analytics wird geladen …</span>
+            </div>
+
+            <div class="stats-row">
+              <article class="stat-card">
+                <div class="stat-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <path d="M4 19h16"/>
+                    <path d="M7 16V9"/>
+                    <path d="M12 16V5"/>
+                    <path d="M17 16v-4"/>
+                  </svg>
+                </div>
+                <div class="stat-content">
+                  <span class="stat-label">Gefilterte Events</span>
+                  <span class="stat-value" data-analytics-total>–</span>
+                </div>
+              </article>
+              <article class="stat-card">
+                <div class="stat-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <path d="M12 9v4"/>
+                    <path d="M12 17h.01"/>
+                    <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+                  </svg>
+                </div>
+                <div class="stat-content">
+                  <span class="stat-label">Errors</span>
+                  <span class="stat-value" data-analytics-errors>–</span>
+                </div>
+              </article>
+              <article class="stat-card">
+                <div class="stat-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <path d="M12 8v4"/>
+                    <path d="M12 16h.01"/>
+                    <circle cx="12" cy="12" r="10"/>
+                  </svg>
+                </div>
+                <div class="stat-content">
+                  <span class="stat-label">Warnings</span>
+                  <span class="stat-value" data-analytics-warnings>–</span>
+                </div>
+              </article>
+              <article class="stat-card">
+                <div class="stat-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/>
+                    <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+                  </svg>
+                </div>
+                <div class="stat-content">
+                  <span class="stat-label">Nicht verfügbar</span>
+                  <span class="stat-value" data-analytics-unavailable>–</span>
+                </div>
+              </article>
+            </div>
+
+            <article class="card audit-table-card analytics-table-card">
+              <div class="audit-toolbar analytics-toolbar">
+                <div class="toolbar-left">
+                  <div class="analytics-select-wrap">
+                    <select data-analytics-module>
+                      <option value="all">Alle Module</option>
+                    </select>
+                  </div>
+                  <div class="search-box analytics-search">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <circle cx="11" cy="11" r="8"></circle>
+                      <path d="m21 21-4.35-4.35"></path>
+                    </svg>
+                    <input type="text" placeholder="Fehler, Target oder Modul suchen" data-analytics-search />
+                    <button type="button" class="clear-btn" data-analytics-search-clear aria-label="Suche leeren">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="18" y1="6" x2="6" y2="18"></line>
+                        <line x1="6" y1="6" x2="18" y2="18"></line>
+                      </svg>
+                    </button>
+                  </div>
+                  <div class="filter-chips analytics-levels">
+                    <button type="button" data-analytics-level="issues" data-active="true">Issues</button>
+                    <button type="button" data-analytics-level="error">Errors</button>
+                    <button type="button" data-analytics-level="warn">Warnings</button>
+                    <button type="button" data-analytics-level="all">Alle</button>
+                  </div>
+                </div>
+                <div class="toolbar-right">
+                  <span class="audit-count" data-analytics-count>–</span>
+                  <button type="button" class="toolbar-btn refresh" data-analytics-refresh title="Aktualisieren">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M23 4v6h-6M1 20v-6h6"/>
+                      <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+                    </svg>
+                  </button>
+                </div>
+              </div>
+
+              <div class="table-scroll">
+                <table class="data-table audit-table analytics-table">
+                  <thead>
+                    <tr>
+                      <th>Zeit</th>
+                      <th>Modul</th>
+                      <th>Level</th>
+                      <th>Target</th>
+                      <th>Message</th>
+                    </tr>
+                  </thead>
+                  <tbody data-analytics-events>
+                    <tr>
+                      <td colspan="5">Keine Analytics-Daten geladen.</td>
                     </tr>
                   </tbody>
                 </table>

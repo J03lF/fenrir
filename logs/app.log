@@ -1,86 +1,318 @@
-2026-03-05T10:01:27.178545Z  INFO main ThreadId(01) fenrir::infra::logging::init: file logging initialized log_path=logs/app.log
-2026-03-05T10:01:27.178709Z  INFO main ThreadId(01) fenrir::infra::logging::init: db log file prepared log_path=logs/db.log
-2026-03-05T10:01:27.306958Z  INFO main ThreadId(01) fenrir::infra::db::runtime: postgres using Unix socket (TCP disabled) socket_dir=/opt/fenrir/development/tmp/runtime/db/socket
-2026-03-05T10:01:27.510488Z  INFO main ThreadId(01) fenrir::infra::db::runtime: postgres unix socket ready socket=/opt/fenrir/development/tmp/runtime/db/socket/.s.PGSQL.5432
-2026-03-05T10:01:27.510682Z  INFO main ThreadId(01) fenrir::infra::db::runtime: embedded postgres started securely port=55432 pid=60576 auth="scram-sha-256" socket=true
-2026-03-05T10:01:27.510772Z  INFO main ThreadId(01) fenrir::infra::db::runtime: db runtime supervisor started (stub) mode=Embedded engine=Postgres dir=/opt/fenrir/development/tmp/runtime/db
-2026-03-05T10:01:27.513244Z  INFO main ThreadId(01) fenrir::boot::startup: core services registered in registry
-2026-03-05T10:01:27.560415Z  INFO main ThreadId(01) fenrir::boot::startup: database migrations up to date engine=postgres
-2026-03-05T10:01:27.560537Z  INFO main ThreadId(01) fenrir::boot::startup: scheduler service started
-2026-03-05T10:01:27.560567Z  INFO tokio-runtime-worker ThreadId(14) fenrir::services::scheduler::service: scheduler heartbeat loop started
-2026-03-05T10:01:27.563617Z  INFO                 main ThreadId(01) fenrir::boot::startup: audit log persistence configured path=/opt/fenrir/development/tmp/runtime/audit/fenrir-audit-history.json capacity=2048 retention_hours=24 persist_seconds=30
-2026-03-05T10:01:27.570129Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: loaded 2 module states from disk
-2026-03-05T10:01:27.570166Z  WARN                 main ThreadId(01) fenrir::infra::modules::runtime::process: module was running but process no longer exists module_id=athene-api pid=42340
-2026-03-05T10:01:27.570171Z  WARN                 main ThreadId(01) fenrir::infra::modules::runtime::process: module was running but process no longer exists module_id=notification-service pid=67536
-2026-03-05T10:01:27.579361Z  INFO                 main ThreadId(01) fenrir::security::identity::authority: identity store: using database backend
-2026-03-05T10:01:27.579839Z  INFO                 main ThreadId(01) fenrir::services::scheduler::service: Automatic backup job registered schedule=daily
-2026-03-05T10:01:27.579878Z  INFO                 main ThreadId(01) fenrir::infra::http::server: HTTP control-plane authentication via identity broker with static token fallback
-2026-03-05T10:01:27.579922Z  INFO                 main ThreadId(01) fenrir::boot::startup: boot complete app=fenrir version=0.1.4
-2026-03-05T10:01:27.580472Z  INFO                 main ThreadId(01) fenrir::infra::db::connector: db connector ipc socket ready path=/opt/fenrir/development/tmp/runtime/ipc/db-connector.sock
-2026-03-05T10:01:27.580537Z  INFO tokio-runtime-worker ThreadId(02) fenrir::infra::db::connector: db connector task started task="db-connector-ipc"
-2026-03-05T10:01:27.585370Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.autostart_started" module_count=6 concurrency=4
-2026-03-05T10:01:27.587778Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.preflight_started" module_id=athene-api assigned_port=Some(41004)
-2026-03-05T10:01:27.587912Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.preflight_started" module_id=athene assigned_port=Some(41002)
-2026-03-05T10:01:27.588000Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.preflight_started" module_id=athene-web assigned_port=Some(41005)
-2026-03-05T10:01:27.588034Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.preflight_passed" module_id=athene-api assigned_port=Some(41004)
-2026-03-05T10:01:27.588378Z  INFO                 main ThreadId(01) fenrir::services::module::gateway: runtime gateway started module=athene-api endpoint=http://127.0.0.1:50628/call
-2026-03-05T10:01:27.591545Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.boot_started" module_id=athene-api assigned_port=Some(41004)
-2026-03-05T10:01:27.591638Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.preflight_passed" module_id=athene assigned_port=Some(41002)
-2026-03-05T10:01:27.591717Z  INFO                 main ThreadId(01) fenrir::services::module::gateway: runtime gateway started module=athene endpoint=http://127.0.0.1:50629/call
-2026-03-05T10:01:27.594188Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.boot_started" module_id=athene assigned_port=Some(41002)
-2026-03-05T10:01:27.594294Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.preflight_started" module_id=athene-webcomponents assigned_port=Some(41008)
-2026-03-05T10:01:27.594321Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.preflight_passed" module_id=athene-web assigned_port=Some(41005)
-2026-03-05T10:01:27.594383Z  INFO                 main ThreadId(01) fenrir::services::module::gateway: runtime gateway started module=athene-web endpoint=http://127.0.0.1:50630/call
-2026-03-05T10:01:27.596753Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.boot_started" module_id=athene-web assigned_port=Some(41005)
-2026-03-05T10:01:27.596817Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.preflight_passed" module_id=athene-webcomponents assigned_port=Some(41008)
-2026-03-05T10:01:27.596876Z  INFO                 main ThreadId(01) fenrir::services::module::gateway: runtime gateway started module=athene-webcomponents endpoint=http://127.0.0.1:50631/call
-2026-03-05T10:01:27.599913Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.boot_started" module_id=athene-webcomponents assigned_port=Some(41008)
-2026-03-05T10:01:27.605020Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: module static server started module_id=athene-web port=41005 root=/Users/jfurocket/Documents/personal/modules/athene-web/dist/browser
-2026-03-05T10:01:27.607963Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: module started successfully event="module.lifecycle.boot_succeeded" module_id=athene-web pid=None port=Some(41005) latency_ms=11.19925
-2026-03-05T10:01:27.610752Z  WARN                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.boot_failed" module_id=athene-webcomponents latency_ms=10.828208 error=failed to start module `athene-webcomponents`: no executable module found in /Users/jfurocket/Documents/personal/modules/athene-webcomponents. Searched: athene-webcomponents, bin/athene-webcomponents, athene-webcomponents.exe, bin/athene-webcomponents.exe
-2026-03-05T10:01:27.610777Z  WARN                 main ThreadId(01) fenrir::services::module::runtime: auto-start failed module=athene-webcomponents error=failed to start module `athene-webcomponents`: no executable module found in /Users/jfurocket/Documents/personal/modules/athene-webcomponents. Searched: athene-webcomponents, bin/athene-webcomponents, athene-webcomponents.exe, bin/athene-webcomponents.exe
-2026-03-05T10:01:27.611557Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.preflight_started" module_id=auth-service assigned_port=Some(41006)
-2026-03-05T10:01:27.611630Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.preflight_passed" module_id=auth-service assigned_port=Some(41006)
-2026-03-05T10:01:27.611723Z  INFO                 main ThreadId(01) fenrir::services::module::gateway: runtime gateway started module=auth-service endpoint=http://127.0.0.1:50633/call
-2026-03-05T10:01:27.614543Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.boot_started" module_id=auth-service assigned_port=Some(41006)
-2026-03-05T10:01:27.618338Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.preflight_started" module_id=notification-service assigned_port=Some(41007)
-2026-03-05T10:01:27.618450Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.preflight_passed" module_id=notification-service assigned_port=Some(41007)
-2026-03-05T10:01:27.618556Z  INFO                 main ThreadId(01) fenrir::services::module::gateway: runtime gateway started module=notification-service endpoint=http://127.0.0.1:50634/call
-2026-03-05T10:01:27.621632Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.boot_started" module_id=notification-service assigned_port=Some(41007)
-2026-03-05T10:01:27.632421Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: module process started module_id=athene-api pid=60605 port=Some(41004)
-2026-03-05T10:01:27.633783Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: module process started module_id=athene pid=60606 port=Some(41002)
-2026-03-05T10:01:27.634481Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: module process started module_id=auth-service pid=60607 port=Some(41006)
-2026-03-05T10:01:27.637349Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: module started successfully event="module.lifecycle.boot_succeeded" module_id=athene-api pid=Some(60605) port=Some(41004) latency_ms=45.793583
-2026-03-05T10:01:27.641399Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: module started successfully event="module.lifecycle.boot_succeeded" module_id=auth-service pid=Some(60607) port=Some(41006) latency_ms=26.828375
-2026-03-05T10:01:27.644079Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: module started successfully event="module.lifecycle.boot_succeeded" module_id=athene pid=Some(60606) port=Some(41002) latency_ms=49.879958
-2026-03-05T10:01:27.645210Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: module process started module_id=notification-service pid=60609 port=Some(41007)
-2026-03-05T10:01:27.647957Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: module started successfully event="module.lifecycle.boot_succeeded" module_id=notification-service pid=Some(60609) port=Some(41007) latency_ms=26.292834000000003
-2026-03-05T10:01:28.052449Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.autostart_completed" module_count=6 concurrency=4
-2026-03-05T10:01:28.052496Z  INFO                 main ThreadId(01) fenrir::boot::transports: transport initialisation triggered
-2026-03-05T10:01:28.052498Z  INFO tokio-runtime-worker ThreadId(02) fenrir::boot::transports: ssh server task spawned
-2026-03-05T10:01:28.052712Z  INFO tokio-runtime-worker ThreadId(14) fenrir::infra::http::server: HTTP server task spawned
-2026-03-05T10:01:28.053151Z  INFO tokio-runtime-worker ThreadId(02) fenrir::infra::ssh::server: starting SSH server host=127.0.0.1 port=2222
-2026-03-05T10:01:55.648491Z  INFO tokio-runtime-worker ThreadId(07) fenrir::infra::modules::runtime::process: module stopped module_id=athene pid=60606
-2026-03-05T10:01:55.663497Z  INFO tokio-runtime-worker ThreadId(26) fenrir::services::module::dev: activating module dev service override module=athene services=1
-2026-03-05T10:01:55.664362Z  INFO tokio-runtime-worker ThreadId(26) fenrir::services::module::gateway: runtime gateway started module=athene endpoint=http://127.0.0.1:50709/call
-2026-03-05T10:02:01.372391Z  INFO tokio-runtime-worker ThreadId(26) fenrir::infra::modules::runtime::process: module static server stopped module_id=athene-web
-2026-03-05T10:02:01.385070Z  INFO tokio-runtime-worker ThreadId(26) fenrir::services::module::dev: activating module dev service override module=athene-web services=1
-2026-03-05T10:02:01.385958Z  INFO tokio-runtime-worker ThreadId(26) fenrir::services::module::gateway: runtime gateway started module=athene-web endpoint=http://127.0.0.1:50711/call
-2026-03-05T10:02:06.457735Z  INFO tokio-runtime-worker ThreadId(02) fenrir::infra::modules::runtime::process: module stopped module_id=athene-api pid=60605
-2026-03-05T10:02:06.462299Z  INFO tokio-runtime-worker ThreadId(02) fenrir::services::module::dev: activating module dev service override module=athene-api services=1
-2026-03-05T10:02:06.462447Z  INFO tokio-runtime-worker ThreadId(02) fenrir::services::module::gateway: runtime gateway started module=athene-api endpoint=http://127.0.0.1:50713/call
-2026-03-05T10:02:09.660131Z  INFO tokio-runtime-worker ThreadId(14) fenrir::infra::modules::runtime::process: module stopped module_id=auth-service pid=60607
-2026-03-05T10:02:09.674584Z  INFO tokio-runtime-worker ThreadId(14) fenrir::services::module::dev: activating module dev service override module=auth-service services=1
-2026-03-05T10:02:09.675741Z  INFO tokio-runtime-worker ThreadId(14) fenrir::services::module::gateway: runtime gateway started module=auth-service endpoint=http://127.0.0.1:50714/call
-2026-03-05T10:06:27.581883Z  INFO tokio-runtime-worker ThreadId(02) fenrir::services::scheduler::service: Running scheduled database backup
-2026-03-05T10:06:27.582017Z  INFO tokio-runtime-worker ThreadId(02) fenrir::services::backup::service: Starting backup: running pre-flight checks
-2026-03-05T10:06:27.599603Z  INFO tokio-runtime-worker ThreadId(14) fenrir::services::backup::service: Pre-backup: forcing checkpoint
-2026-03-05T10:06:27.616155Z  INFO tokio-runtime-worker ThreadId(02) fenrir::services::backup::service: Creating backup
-2026-03-05T10:06:27.722106Z  INFO tokio-runtime-worker ThreadId(14) fenrir::services::backup::service: Using Unix socket for backup: /opt/fenrir/development/tmp/runtime/db/socket
-2026-03-05T10:06:28.475650Z  INFO tokio-runtime-worker ThreadId(02) fenrir::services::backup::service: Refreshing DB state snapshot
-2026-03-05T10:06:28.478797Z  INFO tokio-runtime-worker ThreadId(29) fenrir::services::backup::service: DB state snapshot copied to backup
-2026-03-05T10:06:28.478832Z  INFO tokio-runtime-worker ThreadId(29) fenrir::services::backup::service: Verifying backup integrity
-2026-03-05T10:06:28.478993Z  INFO tokio-runtime-worker ThreadId(29) fenrir::services::backup::service: Rotating old backups (keeping 7)
-2026-03-05T10:06:28.479644Z  INFO tokio-runtime-worker ThreadId(29) fenrir::services::backup::service: Removing old backup: /opt/fenrir/development/tmp/runtime/backups/postgres-20260301_135445
-2026-03-05T10:06:28.559043Z  INFO tokio-runtime-worker ThreadId(29) fenrir::services::backup::service: Backup complete: /opt/fenrir/development/tmp/runtime/backups/postgres-20260305_100627 (17 MB)
-2026-03-05T10:06:28.561689Z  INFO tokio-runtime-worker ThreadId(29) fenrir::services::scheduler::service: Scheduled backup completed successfully path=/opt/fenrir/development/tmp/runtime/backups/postgres-20260305_100627 size_mb=17
+2026-03-18T14:23:25.040085Z  INFO main ThreadId(01) fenrir::infra::logging::init: file logging initialized log_path=logs/app.log
+2026-03-18T14:23:25.040366Z  INFO main ThreadId(01) fenrir::infra::logging::init: db log file prepared log_path=logs/db.log
+2026-03-18T14:23:25.140259Z  INFO main ThreadId(01) fenrir::infra::db::runtime: postgres using Unix socket (TCP disabled) socket_dir=/opt/fenrir/development/tmp/runtime/db/socket
+2026-03-18T14:23:25.141111Z  INFO main ThreadId(01) fenrir::infra::db::runtime: postgres unix socket ready socket=/opt/fenrir/development/tmp/runtime/db/socket/.s.PGSQL.5432
+2026-03-18T14:23:25.141175Z  INFO main ThreadId(01) fenrir::infra::db::runtime: embedded postgres started securely port=55432 pid=58347 auth="scram-sha-256" socket=true
+2026-03-18T14:23:25.141220Z  INFO main ThreadId(01) fenrir::infra::db::runtime: db runtime supervisor started (stub) mode=Embedded engine=Postgres dir=/opt/fenrir/development/tmp/runtime/db
+2026-03-18T14:23:25.141987Z  INFO main ThreadId(01) fenrir::boot::startup: core services registered in registry
+2026-03-18T14:23:25.156291Z  INFO main ThreadId(01) fenrir::boot::startup: database migrations up to date engine=postgres
+2026-03-18T14:23:25.160201Z  INFO main ThreadId(01) fenrir::boot::startup: discovered module migration sources modules=2
+2026-03-18T14:23:25.160748Z  INFO main ThreadId(01) fenrir::boot::startup: scheduler service started
+2026-03-18T14:23:25.160767Z  INFO tokio-runtime-worker ThreadId(15) fenrir::services::scheduler::service: scheduler heartbeat loop started
+2026-03-18T14:23:25.161502Z  INFO                 main ThreadId(01) fenrir::boot::startup: audit log persistence configured path=/opt/fenrir/development/tmp/runtime/audit/fenrir-audit-history.json capacity=2048 retention_hours=24 persist_seconds=30
+2026-03-18T14:23:25.165273Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: loaded 4 module states from disk
+2026-03-18T14:23:25.165655Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: reattached running module process module_id=auth-service pid=85244
+2026-03-18T14:23:25.165666Z  WARN                 main ThreadId(01) fenrir::infra::modules::runtime::process: module was running but process no longer exists module_id=athene-api pid=55954
+2026-03-18T14:23:25.165669Z  WARN                 main ThreadId(01) fenrir::infra::modules::runtime::process: module was running but process no longer exists module_id=athene pid=53973
+2026-03-18T14:23:25.165671Z  WARN                 main ThreadId(01) fenrir::infra::modules::runtime::process: module was running but process no longer exists module_id=notification-service pid=85246
+2026-03-18T14:23:25.170966Z  INFO                 main ThreadId(01) fenrir::security::identity::authority: identity store: using database backend
+2026-03-18T14:23:25.171305Z  INFO                 main ThreadId(01) fenrir::services::scheduler::service: Automatic backup job registered schedule=daily
+2026-03-18T14:23:25.171347Z  INFO                 main ThreadId(01) fenrir::infra::http::server: HTTP control-plane authentication via identity broker with static token fallback
+2026-03-18T14:23:25.171378Z  INFO                 main ThreadId(01) fenrir::boot::startup: boot complete app=fenrir version=0.1.4
+2026-03-18T14:23:25.171670Z  INFO                 main ThreadId(01) fenrir::infra::db::connector: db connector ipc socket ready path=/opt/fenrir/development/tmp/runtime/ipc/db-connector.sock
+2026-03-18T14:23:25.171713Z  INFO tokio-runtime-worker ThreadId(15) fenrir::infra::db::connector: db connector task started task="db-connector-ipc"
+2026-03-18T14:23:25.172370Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.autostart_started" module_count=6 concurrency=4
+2026-03-18T14:23:25.173709Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.preflight_started" module_id=athene assigned_port=Some(41002)
+2026-03-18T14:23:25.173780Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.preflight_started" module_id=athene-api assigned_port=Some(41004)
+2026-03-18T14:23:25.173829Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.preflight_started" module_id=athene-web assigned_port=Some(41005)
+2026-03-18T14:23:25.173870Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.preflight_started" module_id=athene-webcomponents assigned_port=Some(41008)
+2026-03-18T14:23:25.173892Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.preflight_passed" module_id=athene assigned_port=Some(41002)
+2026-03-18T14:23:25.174161Z  INFO                 main ThreadId(01) fenrir::services::module::gateway: runtime gateway started module=athene endpoint=http://127.0.0.1:63794/call
+2026-03-18T14:23:25.175074Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.boot_started" module_id=athene assigned_port=Some(41002)
+2026-03-18T14:23:25.175128Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.preflight_passed" module_id=athene-api assigned_port=Some(41004)
+2026-03-18T14:23:25.175185Z  INFO                 main ThreadId(01) fenrir::services::module::gateway: runtime gateway started module=athene-api endpoint=http://127.0.0.1:63795/call
+2026-03-18T14:23:25.175814Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.boot_started" module_id=athene-api assigned_port=Some(41004)
+2026-03-18T14:23:25.175843Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.preflight_passed" module_id=athene-web assigned_port=Some(41005)
+2026-03-18T14:23:25.175886Z  INFO                 main ThreadId(01) fenrir::services::module::gateway: runtime gateway started module=athene-web endpoint=http://127.0.0.1:63796/call
+2026-03-18T14:23:25.176550Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.boot_started" module_id=athene-web assigned_port=Some(41005)
+2026-03-18T14:23:25.176580Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.preflight_passed" module_id=athene-webcomponents assigned_port=Some(41008)
+2026-03-18T14:23:25.176623Z  INFO                 main ThreadId(01) fenrir::services::module::gateway: runtime gateway started module=athene-webcomponents endpoint=http://127.0.0.1:63797/call
+2026-03-18T14:23:25.177277Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.boot_started" module_id=athene-webcomponents assigned_port=Some(41008)
+2026-03-18T14:23:25.178850Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: module static server started module_id=athene-web port=41005 root=/Users/jfurocket/Documents/personal/modules/athene-web/dist/browser
+2026-03-18T14:23:25.180200Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: module started successfully event="module.lifecycle.boot_succeeded" module_id=athene-web pid=None port=Some(41005) latency_ms=3.641792
+2026-03-18T14:23:25.181013Z  WARN                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.boot_failed" module_id=athene-webcomponents latency_ms=3.729167 error=failed to start module `athene-webcomponents`: no executable module found in /Users/jfurocket/Documents/personal/modules/athene-webcomponents. Searched: athene-webcomponents, bin/athene-webcomponents, athene-webcomponents.exe, bin/athene-webcomponents.exe
+2026-03-18T14:23:25.181028Z  WARN                 main ThreadId(01) fenrir::services::module::runtime: auto-start failed module=athene-webcomponents error=failed to start module `athene-webcomponents`: no executable module found in /Users/jfurocket/Documents/personal/modules/athene-webcomponents. Searched: athene-webcomponents, bin/athene-webcomponents, athene-webcomponents.exe, bin/athene-webcomponents.exe
+2026-03-18T14:23:25.181658Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: module process started module_id=athene instance_id=athene:primary pid=58354 port=Some(41002)
+2026-03-18T14:23:25.182259Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: module process started module_id=athene-api instance_id=athene-api:primary pid=58355 port=Some(41004)
+2026-03-18T14:23:25.183337Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: module started successfully event="module.lifecycle.boot_succeeded" module_id=athene pid=Some(58354) port=Some(41002) latency_ms=8.255749999999999
+2026-03-18T14:23:25.184167Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: module started successfully event="module.lifecycle.boot_succeeded" module_id=athene-api pid=Some(58355) port=Some(41004) latency_ms=8.34625
+2026-03-18T14:23:25.184474Z  INFO                 main ThreadId(01) fenrir::services::module::gateway: runtime gateway started module=auth-service endpoint=http://127.0.0.1:63801/call
+2026-03-18T14:23:25.185137Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.preflight_started" module_id=notification-service assigned_port=Some(41007)
+2026-03-18T14:23:25.185167Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.preflight_passed" module_id=notification-service assigned_port=Some(41007)
+2026-03-18T14:23:25.185213Z  INFO                 main ThreadId(01) fenrir::services::module::gateway: runtime gateway started module=notification-service endpoint=http://127.0.0.1:63803/call
+2026-03-18T14:23:25.185935Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.boot_started" module_id=notification-service assigned_port=Some(41007)
+2026-03-18T14:23:25.190702Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: module process started module_id=notification-service instance_id=notification-service:primary pid=58357 port=Some(41007)
+2026-03-18T14:23:25.191629Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: module started successfully event="module.lifecycle.boot_succeeded" module_id=notification-service pid=Some(58357) port=Some(41007) latency_ms=5.689875
+2026-03-18T14:23:25.599958Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.autostart_completed" module_count=6 concurrency=4
+2026-03-18T14:23:25.600146Z  INFO                 main ThreadId(01) fenrir::boot::transports: transport initialisation triggered
+2026-03-18T14:23:25.600177Z  INFO tokio-runtime-worker ThreadId(14) fenrir::boot::transports: ssh server task spawned
+2026-03-18T14:23:25.601598Z  INFO tokio-runtime-worker ThreadId(14) fenrir::infra::ssh::server: starting SSH server host=127.0.0.1 port=2222
+2026-03-18T14:23:25.601686Z  INFO tokio-runtime-worker ThreadId(04) fenrir::infra::http::server: HTTP server task spawned
+2026-03-18T14:26:47.995127Z  WARN tokio-runtime-worker ThreadId(14) fenrir::infra::telemetry::controller: readiness probe failed probe=services
+2026-03-18T14:26:48.979093Z  WARN tokio-runtime-worker ThreadId(04) fenrir::infra::telemetry::controller: readiness probe failed probe=services
+2026-03-18T14:26:50.570099Z  WARN tokio-runtime-worker ThreadId(38) fenrir::infra::telemetry::controller: readiness probe failed probe=services
+2026-03-18T14:27:02.612527Z  WARN tokio-runtime-worker ThreadId(13) fenrir::infra::telemetry::controller: readiness probe failed probe=services
+2026-03-18T14:27:05.624234Z  WARN tokio-runtime-worker ThreadId(04) fenrir::infra::telemetry::controller: readiness probe failed probe=services
+2026-03-18T14:27:20.623794Z  WARN tokio-runtime-worker ThreadId(13) fenrir::infra::telemetry::controller: readiness probe failed probe=services
+2026-03-18T14:27:35.623436Z  WARN tokio-runtime-worker ThreadId(13) fenrir::infra::telemetry::controller: readiness probe failed probe=services
+2026-03-18T14:27:55.173693Z  WARN tokio-runtime-worker ThreadId(04) fenrir::infra::telemetry::controller: readiness probe failed probe=services
+2026-03-18T14:28:05.619338Z  WARN tokio-runtime-worker ThreadId(13) fenrir::infra::telemetry::controller: readiness probe failed probe=services
+2026-03-18T14:28:25.174083Z  INFO tokio-runtime-worker ThreadId(13) fenrir::services::scheduler::service: Running scheduled database backup
+2026-03-18T14:28:25.174157Z  INFO tokio-runtime-worker ThreadId(13) fenrir::services::backup::service: Starting backup: running pre-flight checks
+2026-03-18T14:28:25.203227Z  INFO tokio-runtime-worker ThreadId(14) fenrir::services::backup::service: Pre-backup: forcing checkpoint
+2026-03-18T14:28:25.248909Z  INFO tokio-runtime-worker ThreadId(14) fenrir::services::backup::service: Creating backup
+2026-03-18T14:28:25.697053Z  INFO tokio-runtime-worker ThreadId(13) fenrir::services::backup::service: Using Unix socket for backup: /opt/fenrir/development/tmp/runtime/db/socket
+2026-03-18T14:28:27.855907Z  INFO tokio-runtime-worker ThreadId(13) fenrir::services::backup::service: Refreshing DB state snapshot
+2026-03-18T14:28:27.859267Z  INFO tokio-runtime-worker ThreadId(13) fenrir::services::backup::service: DB state snapshot copied to backup
+2026-03-18T14:28:27.859307Z  INFO tokio-runtime-worker ThreadId(13) fenrir::services::backup::service: Verifying backup integrity
+2026-03-18T14:28:27.859925Z  INFO tokio-runtime-worker ThreadId(13) fenrir::services::backup::service: Rotating old backups (keeping 7)
+2026-03-18T14:28:27.861299Z  INFO tokio-runtime-worker ThreadId(14) fenrir::services::backup::service: Removing old backup: /opt/fenrir/development/tmp/runtime/backups/postgres-20260304_144856
+2026-03-18T14:28:28.204911Z  INFO tokio-runtime-worker ThreadId(14) fenrir::services::backup::service: Backup complete: /opt/fenrir/development/tmp/runtime/backups/postgres-20260318_142825 (17 MB)
+2026-03-18T14:28:28.209611Z  INFO tokio-runtime-worker ThreadId(14) fenrir::services::scheduler::service: Scheduled backup completed successfully path=/opt/fenrir/development/tmp/runtime/backups/postgres-20260318_142825 size_mb=17
+2026-03-18T14:28:56.798547Z  WARN tokio-runtime-worker ThreadId(14) fenrir::infra::telemetry::controller: readiness probe failed probe=services
+2026-03-18T14:28:58.599146Z  WARN tokio-runtime-worker ThreadId(04) fenrir::infra::telemetry::controller: readiness probe failed probe=services
+2026-03-18T14:29:05.621051Z  WARN tokio-runtime-worker ThreadId(38) fenrir::infra::telemetry::controller: readiness probe failed probe=services
+2026-03-18T14:29:20.620025Z  WARN tokio-runtime-worker ThreadId(13) fenrir::infra::telemetry::controller: readiness probe failed probe=services
+2026-03-18T14:29:35.635085Z  WARN tokio-runtime-worker ThreadId(04) fenrir::infra::telemetry::controller: readiness probe failed probe=services
+2026-03-18T14:29:50.619423Z  WARN tokio-runtime-worker ThreadId(13) fenrir::infra::telemetry::controller: readiness probe failed probe=services
+2026-03-18T14:29:51.199396Z  WARN tokio-runtime-worker ThreadId(14) fenrir::infra::telemetry::controller: readiness probe failed probe=services
+2026-03-18T14:29:56.168144Z  WARN tokio-runtime-worker ThreadId(14) fenrir::infra::telemetry::controller: readiness probe failed probe=services
+2026-03-18T14:30:01.169974Z  WARN tokio-runtime-worker ThreadId(13) fenrir::infra::telemetry::controller: readiness probe failed probe=services
+2026-03-18T14:30:38.304015Z  INFO tokio-runtime-worker ThreadId(68) fenrir::services::module::runtime: restarting module module_id=athene
+2026-03-18T14:30:39.158243Z  INFO tokio-runtime-worker ThreadId(68) fenrir::infra::modules::runtime::process: module stopped module_id=athene instance_id=athene:primary pid=58354
+2026-03-18T14:30:39.163925Z  INFO tokio-runtime-worker ThreadId(68) fenrir::services::module::runtime: module stopped successfully module_id=athene
+2026-03-18T14:30:39.183051Z  INFO tokio-runtime-worker ThreadId(68) fenrir::services::module::runtime: event="module.lifecycle.preflight_started" module_id=athene assigned_port=Some(41002)
+2026-03-18T14:30:39.183766Z  INFO tokio-runtime-worker ThreadId(68) fenrir::services::module::runtime: event="module.lifecycle.preflight_passed" module_id=athene assigned_port=Some(41002)
+2026-03-18T14:30:39.185043Z  INFO tokio-runtime-worker ThreadId(68) fenrir::services::module::gateway: runtime gateway started module=athene endpoint=http://127.0.0.1:49739/call
+2026-03-18T14:30:39.187899Z  INFO tokio-runtime-worker ThreadId(68) fenrir::services::module::runtime: event="module.lifecycle.boot_started" module_id=athene assigned_port=Some(41002)
+2026-03-18T14:30:39.212981Z  INFO tokio-runtime-worker ThreadId(68) fenrir::infra::modules::runtime::process: module process started module_id=athene instance_id=athene:primary pid=69513 port=Some(41002)
+2026-03-18T14:30:39.214474Z  INFO tokio-runtime-worker ThreadId(68) fenrir::services::module::runtime: module started successfully event="module.lifecycle.boot_succeeded" module_id=athene pid=Some(69513) port=Some(41002) latency_ms=26.163916999999998
+2026-03-18T14:30:41.844106Z  INFO tokio-runtime-worker ThreadId(14) fenrir::services::module::runtime: restarting module module_id=athene-api
+2026-03-18T14:30:42.607003Z  WARN tokio-runtime-worker ThreadId(66) fenrir::infra::modules::runtime::process: gateway proxy response read failed module=athene-web error=request or response body error: error reading a body from connection: unexpected EOF during chunk size line
+2026-03-18T14:30:42.701806Z  INFO tokio-runtime-worker ThreadId(14) fenrir::infra::modules::runtime::process: module stopped module_id=athene-api instance_id=athene-api:primary pid=58355
+2026-03-18T14:30:42.704363Z  INFO tokio-runtime-worker ThreadId(14) fenrir::services::module::runtime: module stopped successfully module_id=athene-api
+2026-03-18T14:30:42.716855Z  INFO tokio-runtime-worker ThreadId(14) fenrir::services::module::runtime: event="module.lifecycle.preflight_started" module_id=athene-api assigned_port=Some(41004)
+2026-03-18T14:30:42.717997Z  INFO tokio-runtime-worker ThreadId(14) fenrir::services::module::runtime: event="module.lifecycle.preflight_passed" module_id=athene-api assigned_port=Some(41004)
+2026-03-18T14:30:42.718443Z  INFO tokio-runtime-worker ThreadId(14) fenrir::services::module::gateway: runtime gateway started module=athene-api endpoint=http://127.0.0.1:49755/call
+2026-03-18T14:30:42.723827Z  INFO tokio-runtime-worker ThreadId(14) fenrir::services::module::runtime: event="module.lifecycle.boot_started" module_id=athene-api assigned_port=Some(41004)
+2026-03-18T14:30:42.743958Z  INFO tokio-runtime-worker ThreadId(14) fenrir::infra::modules::runtime::process: module process started module_id=athene-api instance_id=athene-api:primary pid=69582 port=Some(41004)
+2026-03-18T14:30:42.746439Z  INFO tokio-runtime-worker ThreadId(14) fenrir::services::module::runtime: module started successfully event="module.lifecycle.boot_succeeded" module_id=athene-api pid=Some(69582) port=Some(41004) latency_ms=22.573083
+2026-03-18T14:30:45.927453Z  INFO tokio-runtime-worker ThreadId(14) fenrir::services::module::runtime: restarting module module_id=auth-service
+2026-03-18T14:30:46.681119Z  WARN tokio-runtime-worker ThreadId(14) fenrir::infra::modules::runtime::process: SIGTERM failed: ESRCH: No such process, trying SIGKILL
+2026-03-18T14:30:46.681203Z  INFO tokio-runtime-worker ThreadId(14) fenrir::infra::modules::runtime::process: module stopped module_id=auth-service instance_id=auth-service:primary pid=85244
+2026-03-18T14:30:46.682716Z  INFO tokio-runtime-worker ThreadId(14) fenrir::services::module::runtime: module stopped successfully module_id=auth-service
+2026-03-18T14:30:46.685715Z  INFO tokio-runtime-worker ThreadId(14) fenrir::services::module::runtime: event="module.lifecycle.preflight_started" module_id=auth-service assigned_port=Some(41006)
+2026-03-18T14:30:46.686041Z  INFO tokio-runtime-worker ThreadId(14) fenrir::services::module::runtime: event="module.lifecycle.preflight_passed" module_id=auth-service assigned_port=Some(41006)
+2026-03-18T14:30:46.686574Z  INFO tokio-runtime-worker ThreadId(14) fenrir::services::module::gateway: runtime gateway started module=auth-service endpoint=http://127.0.0.1:49777/call
+2026-03-18T14:30:46.689894Z  INFO tokio-runtime-worker ThreadId(14) fenrir::services::module::runtime: event="module.lifecycle.boot_started" module_id=auth-service assigned_port=Some(41006)
+2026-03-18T14:30:46.705405Z  INFO tokio-runtime-worker ThreadId(14) fenrir::infra::modules::runtime::process: module process started module_id=auth-service instance_id=auth-service:primary pid=69664 port=Some(41006)
+2026-03-18T14:30:46.709949Z  INFO tokio-runtime-worker ThreadId(14) fenrir::services::module::runtime: module started successfully event="module.lifecycle.boot_succeeded" module_id=auth-service pid=Some(69664) port=Some(41006) latency_ms=19.692709
+2026-03-18T14:31:01.697098Z  INFO tokio-runtime-worker ThreadId(68) fenrir::services::module::runtime: restarting module module_id=notification-service
+2026-03-18T14:31:02.551038Z  INFO tokio-runtime-worker ThreadId(68) fenrir::infra::modules::runtime::process: module stopped module_id=notification-service instance_id=notification-service:primary pid=58357
+2026-03-18T14:31:02.553392Z  INFO tokio-runtime-worker ThreadId(68) fenrir::services::module::runtime: module stopped successfully module_id=notification-service
+2026-03-18T14:31:02.560572Z  INFO tokio-runtime-worker ThreadId(68) fenrir::services::module::runtime: event="module.lifecycle.preflight_started" module_id=notification-service assigned_port=Some(41007)
+2026-03-18T14:31:02.562469Z  INFO tokio-runtime-worker ThreadId(68) fenrir::services::module::runtime: event="module.lifecycle.preflight_passed" module_id=notification-service assigned_port=Some(41007)
+2026-03-18T14:31:02.564872Z  INFO tokio-runtime-worker ThreadId(68) fenrir::services::module::gateway: runtime gateway started module=notification-service endpoint=http://127.0.0.1:49854/call
+2026-03-18T14:31:02.569484Z  INFO tokio-runtime-worker ThreadId(68) fenrir::services::module::runtime: event="module.lifecycle.boot_started" module_id=notification-service assigned_port=Some(41007)
+2026-03-18T14:31:02.584021Z  INFO tokio-runtime-worker ThreadId(68) fenrir::infra::modules::runtime::process: module process started module_id=notification-service instance_id=notification-service:primary pid=69973 port=Some(41007)
+2026-03-18T14:31:02.586158Z  INFO tokio-runtime-worker ThreadId(68) fenrir::services::module::runtime: module started successfully event="module.lifecycle.boot_succeeded" module_id=notification-service pid=Some(69973) port=Some(41007) latency_ms=16.243084
+2026-03-18T14:31:08.666635Z  INFO tokio-runtime-worker ThreadId(68) fenrir::services::module::runtime: restarting module module_id=athene-web
+2026-03-18T14:31:09.420648Z  INFO tokio-runtime-worker ThreadId(68) fenrir::infra::modules::runtime::process: module static server stopped module_id=athene-web instance_id=athene-web:primary
+2026-03-18T14:31:09.421977Z  INFO tokio-runtime-worker ThreadId(68) fenrir::services::module::runtime: module stopped successfully module_id=athene-web
+2026-03-18T14:31:09.427262Z  INFO tokio-runtime-worker ThreadId(68) fenrir::services::module::runtime: event="module.lifecycle.preflight_started" module_id=athene-web assigned_port=Some(41005)
+2026-03-18T14:31:09.430957Z  INFO tokio-runtime-worker ThreadId(68) fenrir::services::module::runtime: event="module.lifecycle.preflight_passed" module_id=athene-web assigned_port=Some(41005)
+2026-03-18T14:31:09.431337Z  INFO tokio-runtime-worker ThreadId(68) fenrir::services::module::gateway: runtime gateway started module=athene-web endpoint=http://127.0.0.1:49890/call
+2026-03-18T14:31:09.435467Z  INFO tokio-runtime-worker ThreadId(68) fenrir::services::module::runtime: event="module.lifecycle.boot_started" module_id=athene-web assigned_port=Some(41005)
+2026-03-18T14:31:09.439253Z  INFO tokio-runtime-worker ThreadId(68) fenrir::infra::modules::runtime::process: module static server started module_id=athene-web port=41005 root=/Users/jfurocket/Documents/personal/modules/athene-web/dist/browser
+2026-03-18T14:31:09.443770Z  INFO tokio-runtime-worker ThreadId(68) fenrir::services::module::runtime: module started successfully event="module.lifecycle.boot_succeeded" module_id=athene-web pid=None port=Some(41005) latency_ms=8.242332999999999
+2026-03-18T14:34:01.940579Z  WARN tokio-runtime-worker ThreadId(69) fenrir::infra::telemetry::controller: readiness probe failed probe=services
+2026-03-18T14:38:10.744175Z  WARN tokio-runtime-worker ThreadId(69) fenrir::infra::telemetry::controller: readiness probe failed probe=services
+2026-03-18T14:38:12.087907Z  WARN tokio-runtime-worker ThreadId(17) fenrir::infra::telemetry::controller: readiness probe failed probe=services
+2026-03-18T14:38:27.141463Z  WARN tokio-runtime-worker ThreadId(13) fenrir::infra::telemetry::controller: readiness probe failed probe=services
+2026-03-18T14:38:33.038170Z  WARN tokio-runtime-worker ThreadId(69) fenrir::infra::telemetry::controller: readiness probe failed probe=services
+2026-03-18T14:55:12.815042Z  WARN tokio-runtime-worker ThreadId(69) fenrir::infra::telemetry::controller: readiness probe failed probe=services
+2026-03-18T14:55:12.839137Z  WARN tokio-runtime-worker ThreadId(13) fenrir::infra::telemetry::controller: readiness probe failed probe=services
+2026-03-18T14:56:18.258255Z  INFO tokio-runtime-worker ThreadId(17) fenrir::infra::modules::runtime::process: module stopped module_id=athene instance_id=athene:primary pid=69513
+2026-03-18T14:56:18.260024Z  INFO tokio-runtime-worker ThreadId(17) fenrir::services::module::runtime: module stopped successfully module_id=athene
+2026-03-18T14:56:20.358655Z  WARN tokio-runtime-worker ThreadId(13) fenrir::infra::modules::registry: artifact checksum mismatch, attempting manifest refresh module=athene version=0.1.0-17 expected=69604c2902cef6cbd11bd9dbc589d6dacf634cda86801c260eb86fac72a52810 actual=114718ead468855a3e3dde4936ed9209574e3ba0a402269b70adb7f1cb3d3c9a
+2026-03-18T14:56:20.358690Z  INFO tokio-runtime-worker ThreadId(13) fenrir::infra::modules::registry: retrying download once after checksum mismatch module=athene version=0.1.0-17
+2026-03-18T14:56:20.715932Z  WARN tokio-runtime-worker ThreadId(13) fenrir::infra::modules::registry: artifact checksum mismatch, attempting manifest refresh module=athene version=0.1.0-17 expected=69604c2902cef6cbd11bd9dbc589d6dacf634cda86801c260eb86fac72a52810 actual=114718ead468855a3e3dde4936ed9209574e3ba0a402269b70adb7f1cb3d3c9a
+2026-03-18T14:56:20.717653Z  INFO tokio-runtime-worker ThreadId(17) fenrir::infra::modules::registry: retrying download with refreshed manifest module=athene version=0.1.0-17
+2026-03-18T14:56:21.471926Z  INFO tokio-runtime-worker ThreadId(141) fenrir::services::module::runtime: event="module.lifecycle.preflight_started" module_id=athene assigned_port=Some(41002)
+2026-03-18T14:56:21.471995Z  INFO tokio-runtime-worker ThreadId(13) fenrir::services::module::runtime: event="module.lifecycle.preflight_passed" module_id=athene assigned_port=Some(41002)
+2026-03-18T14:56:21.472088Z  INFO tokio-runtime-worker ThreadId(13) fenrir::services::module::gateway: runtime gateway started module=athene endpoint=http://127.0.0.1:57685/call
+2026-03-18T14:56:21.474501Z  INFO tokio-runtime-worker ThreadId(13) fenrir::services::module::runtime: event="module.lifecycle.boot_started" module_id=athene assigned_port=Some(41002)
+2026-03-18T14:56:21.483169Z  INFO tokio-runtime-worker ThreadId(14) fenrir::infra::modules::runtime::process: module process started module_id=athene instance_id=athene:primary pid=16764 port=Some(41002)
+2026-03-18T14:56:21.484232Z  INFO tokio-runtime-worker ThreadId(14) fenrir::services::module::runtime: module started successfully event="module.lifecycle.boot_succeeded" module_id=athene pid=Some(16764) port=Some(41002) latency_ms=9.724416
+2026-03-18T14:56:21.989848Z  INFO tokio-runtime-worker ThreadId(141) fenrir::infra::modules::runtime::process: module stopped module_id=athene-api instance_id=athene-api:primary pid=69582
+2026-03-18T14:56:21.991423Z  INFO tokio-runtime-worker ThreadId(141) fenrir::services::module::runtime: module stopped successfully module_id=athene-api
+2026-03-18T14:56:22.801732Z  INFO tokio-runtime-worker ThreadId(13) fenrir::services::module::runtime: module service manifest registered after retry module=athene attempt=1
+2026-03-18T14:56:24.994270Z  WARN tokio-runtime-worker ThreadId(17) fenrir::infra::modules::registry: artifact checksum mismatch, attempting manifest refresh module=athene-api version=0.1.0-13 expected=4470f8f2b0ad992503b01cdda47e555bcb53ce0e59e7348ff4e68a6e7cbed233 actual=c484bf4eb0ec51fa6badb6e4543e38d55f400166190d1ce6279503a8a084b6c3
+2026-03-18T14:56:24.994296Z  INFO tokio-runtime-worker ThreadId(17) fenrir::infra::modules::registry: retrying download once after checksum mismatch module=athene-api version=0.1.0-13
+2026-03-18T14:56:25.349439Z  WARN tokio-runtime-worker ThreadId(13) fenrir::infra::modules::registry: artifact checksum mismatch, attempting manifest refresh module=athene-api version=0.1.0-13 expected=4470f8f2b0ad992503b01cdda47e555bcb53ce0e59e7348ff4e68a6e7cbed233 actual=c484bf4eb0ec51fa6badb6e4543e38d55f400166190d1ce6279503a8a084b6c3
+2026-03-18T14:56:25.351360Z  INFO tokio-runtime-worker ThreadId(141) fenrir::infra::modules::registry: retrying download with refreshed manifest module=athene-api version=0.1.0-13
+2026-03-18T14:56:25.832277Z  INFO tokio-runtime-worker ThreadId(13) fenrir::services::module::runtime: event="module.lifecycle.preflight_started" module_id=athene-api assigned_port=Some(41004)
+2026-03-18T14:56:25.832352Z  INFO tokio-runtime-worker ThreadId(141) fenrir::services::module::runtime: event="module.lifecycle.preflight_passed" module_id=athene-api assigned_port=Some(41004)
+2026-03-18T14:56:25.832463Z  INFO tokio-runtime-worker ThreadId(141) fenrir::services::module::gateway: runtime gateway started module=athene-api endpoint=http://127.0.0.1:57711/call
+2026-03-18T14:56:25.833470Z  INFO tokio-runtime-worker ThreadId(141) fenrir::services::module::runtime: event="module.lifecycle.boot_started" module_id=athene-api assigned_port=Some(41004)
+2026-03-18T14:56:25.837639Z  INFO tokio-runtime-worker ThreadId(13) fenrir::infra::modules::runtime::process: module process started module_id=athene-api instance_id=athene-api:primary pid=16775 port=Some(41004)
+2026-03-18T14:56:25.839090Z  INFO tokio-runtime-worker ThreadId(13) fenrir::services::module::runtime: module started successfully event="module.lifecycle.boot_succeeded" module_id=athene-api pid=Some(16775) port=Some(41004) latency_ms=5.612916
+2026-03-18T14:56:26.350074Z  INFO tokio-runtime-worker ThreadId(17) fenrir::infra::modules::runtime::process: module stopped module_id=auth-service instance_id=auth-service:primary pid=69664
+2026-03-18T14:56:26.350808Z  INFO tokio-runtime-worker ThreadId(17) fenrir::services::module::runtime: module stopped successfully module_id=auth-service
+2026-03-18T14:56:27.161436Z  INFO tokio-runtime-worker ThreadId(13) fenrir::services::module::runtime: module service manifest registered after retry module=athene-api attempt=1
+2026-03-18T14:56:29.123077Z  WARN tokio-runtime-worker ThreadId(14) fenrir::infra::modules::registry: artifact checksum mismatch, attempting manifest refresh module=auth-service version=0.1.0-13 expected=4a0b069b0f3b66b8d5544240400ec5fa7fcada2d383d3e4af94e6ac46bb26408 actual=31b4bbb2b31c5f1126d73ac579fac3f7e6144bcf4f17c34cf6bb29acaf66284d
+2026-03-18T14:56:29.123101Z  INFO tokio-runtime-worker ThreadId(14) fenrir::infra::modules::registry: retrying download once after checksum mismatch module=auth-service version=0.1.0-13
+2026-03-18T14:56:29.641541Z  WARN tokio-runtime-worker ThreadId(14) fenrir::infra::modules::registry: artifact checksum mismatch, attempting manifest refresh module=auth-service version=0.1.0-13 expected=4a0b069b0f3b66b8d5544240400ec5fa7fcada2d383d3e4af94e6ac46bb26408 actual=31b4bbb2b31c5f1126d73ac579fac3f7e6144bcf4f17c34cf6bb29acaf66284d
+2026-03-18T14:56:29.643353Z  INFO tokio-runtime-worker ThreadId(13) fenrir::infra::modules::registry: retrying download with refreshed manifest module=auth-service version=0.1.0-13
+2026-03-18T14:56:30.214215Z  INFO tokio-runtime-worker ThreadId(14) fenrir::services::module::runtime: event="module.lifecycle.preflight_started" module_id=auth-service assigned_port=Some(41006)
+2026-03-18T14:56:30.214270Z  INFO tokio-runtime-worker ThreadId(14) fenrir::services::module::runtime: event="module.lifecycle.preflight_passed" module_id=auth-service assigned_port=Some(41006)
+2026-03-18T14:56:30.214344Z  INFO tokio-runtime-worker ThreadId(14) fenrir::services::module::gateway: runtime gateway started module=auth-service endpoint=http://127.0.0.1:57748/call
+2026-03-18T14:56:30.215265Z  INFO tokio-runtime-worker ThreadId(14) fenrir::services::module::runtime: event="module.lifecycle.boot_started" module_id=auth-service assigned_port=Some(41006)
+2026-03-18T14:56:30.218926Z  INFO tokio-runtime-worker ThreadId(141) fenrir::infra::modules::runtime::process: module process started module_id=auth-service instance_id=auth-service:primary pid=16782 port=Some(41006)
+2026-03-18T14:56:30.220014Z  INFO tokio-runtime-worker ThreadId(141) fenrir::services::module::runtime: module started successfully event="module.lifecycle.boot_succeeded" module_id=auth-service pid=Some(16782) port=Some(41006) latency_ms=4.743333
+2026-03-18T14:56:30.728284Z  INFO tokio-runtime-worker ThreadId(14) fenrir::infra::modules::runtime::process: module stopped module_id=notification-service instance_id=notification-service:primary pid=69973
+2026-03-18T14:56:30.729321Z  INFO tokio-runtime-worker ThreadId(14) fenrir::services::module::runtime: module stopped successfully module_id=notification-service
+2026-03-18T14:56:31.537831Z  INFO tokio-runtime-worker ThreadId(141) fenrir::services::module::runtime: module service manifest registered after retry module=auth-service attempt=1
+2026-03-18T14:58:16.151793Z  WARN tokio-runtime-worker ThreadId(142) fenrir::infra::telemetry::controller: readiness probe failed probe=services
+2026-03-18T14:58:27.144760Z  WARN tokio-runtime-worker ThreadId(150) fenrir::infra::telemetry::controller: readiness probe failed probe=services
+2026-03-18T14:58:42.143882Z  WARN tokio-runtime-worker ThreadId(13) fenrir::infra::telemetry::controller: readiness probe failed probe=services
+2026-03-18T15:03:11.789560Z  INFO tokio-runtime-worker ThreadId(169) fenrir::services::module::runtime: restarting module module_id=auth-service
+2026-03-18T15:03:12.643416Z  INFO tokio-runtime-worker ThreadId(169) fenrir::infra::modules::runtime::process: module stopped module_id=auth-service instance_id=auth-service:primary pid=16782
+2026-03-18T15:03:12.644896Z  INFO tokio-runtime-worker ThreadId(169) fenrir::services::module::runtime: module stopped successfully module_id=auth-service
+2026-03-18T15:03:12.649029Z  INFO tokio-runtime-worker ThreadId(169) fenrir::services::module::runtime: event="module.lifecycle.preflight_started" module_id=auth-service assigned_port=Some(41006)
+2026-03-18T15:03:12.649210Z  INFO tokio-runtime-worker ThreadId(169) fenrir::services::module::runtime: event="module.lifecycle.preflight_passed" module_id=auth-service assigned_port=Some(41006)
+2026-03-18T15:03:12.649366Z  INFO tokio-runtime-worker ThreadId(169) fenrir::services::module::gateway: runtime gateway started module=auth-service endpoint=http://127.0.0.1:59966/call
+2026-03-18T15:03:12.651537Z  INFO tokio-runtime-worker ThreadId(169) fenrir::services::module::runtime: event="module.lifecycle.boot_started" module_id=auth-service assigned_port=Some(41006)
+2026-03-18T15:03:12.666817Z  INFO tokio-runtime-worker ThreadId(169) fenrir::infra::modules::runtime::process: module process started module_id=auth-service instance_id=auth-service:primary pid=23526 port=Some(41006)
+2026-03-18T15:03:12.669992Z  INFO tokio-runtime-worker ThreadId(169) fenrir::services::module::runtime: module started successfully event="module.lifecycle.boot_succeeded" module_id=auth-service pid=Some(23526) port=Some(41006) latency_ms=18.433833
+2026-03-18T15:04:39.940032Z  WARN tokio-runtime-worker ThreadId(142) fenrir::infra::telemetry::controller: readiness probe failed probe=services
+2026-03-18T15:04:42.144274Z  WARN tokio-runtime-worker ThreadId(170) fenrir::infra::telemetry::controller: readiness probe failed probe=services
+2026-03-18T15:04:57.144960Z  WARN tokio-runtime-worker ThreadId(160) fenrir::infra::telemetry::controller: readiness probe failed probe=services
+2026-03-18T15:05:12.149170Z  WARN tokio-runtime-worker ThreadId(175) fenrir::infra::telemetry::controller: readiness probe failed probe=services
+2026-03-18T17:22:10.700687Z  WARN tokio-runtime-worker ThreadId(175) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-03-18T17:22:10.903773Z  WARN tokio-runtime-worker ThreadId(175) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-03-18T17:22:11.106526Z  WARN tokio-runtime-worker ThreadId(175) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-03-18T17:22:11.108659Z  WARN tokio-runtime-worker ThreadId(175) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-03-18T17:22:11.312054Z  WARN tokio-runtime-worker ThreadId(175) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-03-18T17:22:11.514409Z  WARN tokio-runtime-worker ThreadId(175) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-03-18T17:22:11.514813Z  WARN tokio-runtime-worker ThreadId(175) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-03-18T17:22:11.717109Z  WARN tokio-runtime-worker ThreadId(175) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-03-18T17:22:11.919130Z  WARN tokio-runtime-worker ThreadId(175) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-03-18T17:22:11.919382Z  WARN tokio-runtime-worker ThreadId(175) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-03-18T17:22:12.121722Z  WARN tokio-runtime-worker ThreadId(175) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-03-18T17:22:12.324396Z  WARN tokio-runtime-worker ThreadId(175) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-03-18T17:22:12.325058Z  WARN tokio-runtime-worker ThreadId(175) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-03-18T17:22:12.527322Z  WARN tokio-runtime-worker ThreadId(175) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-03-18T17:22:12.730113Z  WARN tokio-runtime-worker ThreadId(175) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-03-18T17:22:12.731043Z  WARN tokio-runtime-worker ThreadId(175) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-03-18T17:22:12.933687Z  WARN tokio-runtime-worker ThreadId(175) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-03-18T17:22:13.136246Z  WARN tokio-runtime-worker ThreadId(175) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-03-18T17:27:10.699460Z  WARN tokio-runtime-worker ThreadId(170) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-03-18T17:27:10.901523Z  WARN tokio-runtime-worker ThreadId(170) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-03-18T17:27:11.103984Z  WARN tokio-runtime-worker ThreadId(170) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-03-18T17:27:11.104537Z  WARN tokio-runtime-worker ThreadId(170) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-03-18T17:27:11.306009Z  WARN tokio-runtime-worker ThreadId(170) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-03-18T17:27:11.508103Z  WARN tokio-runtime-worker ThreadId(170) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-03-18T17:27:11.509652Z  WARN tokio-runtime-worker ThreadId(170) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-03-18T17:27:11.712150Z  WARN tokio-runtime-worker ThreadId(170) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-03-18T17:27:11.915027Z  WARN tokio-runtime-worker ThreadId(170) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-03-18T17:27:11.915506Z  WARN tokio-runtime-worker ThreadId(170) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-03-18T17:27:12.118169Z  WARN tokio-runtime-worker ThreadId(170) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-03-18T17:27:12.320310Z  WARN tokio-runtime-worker ThreadId(170) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-03-18T17:27:12.321205Z  WARN tokio-runtime-worker ThreadId(170) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-03-18T17:27:12.524043Z  WARN tokio-runtime-worker ThreadId(170) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-03-18T17:27:12.727749Z  WARN tokio-runtime-worker ThreadId(170) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-03-18T17:27:12.731330Z  WARN tokio-runtime-worker ThreadId(170) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-03-18T17:27:12.933329Z  WARN tokio-runtime-worker ThreadId(170) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-03-18T17:27:13.136976Z  WARN tokio-runtime-worker ThreadId(170) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-03-19T18:57:18.638503Z  INFO tokio-runtime-worker ThreadId(1706) fenrir::infra::modules::runtime::process: module stopped module_id=athene instance_id=athene:primary pid=16764
+2026-03-19T18:57:18.643546Z  INFO tokio-runtime-worker ThreadId(1706) fenrir::services::module::dev: activating module dev service override module=athene services=1
+2026-03-19T18:57:18.643881Z  INFO tokio-runtime-worker ThreadId(1706) fenrir::services::module::gateway: runtime gateway started module=athene endpoint=http://127.0.0.1:63933/call
+2026-03-19T18:57:47.651141Z  INFO tokio-runtime-worker ThreadId(1707) fenrir::services::module::runtime: event="module.lifecycle.autostart_started" module_count=6 concurrency=4
+2026-03-19T18:57:47.654807Z  INFO tokio-runtime-worker ThreadId(1709) fenrir::services::module::runtime: event="module.lifecycle.preflight_started" module_id=athene assigned_port=Some(41002)
+2026-03-19T18:57:47.654872Z  INFO tokio-runtime-worker ThreadId(1709) fenrir::services::module::runtime: event="module.lifecycle.preflight_started" module_id=athene-webcomponents assigned_port=Some(41008)
+2026-03-19T18:57:47.654906Z  INFO tokio-runtime-worker ThreadId(1709) fenrir::services::module::runtime: event="module.lifecycle.preflight_passed" module_id=athene assigned_port=Some(41002)
+2026-03-19T18:57:47.655934Z  INFO tokio-runtime-worker ThreadId(1709) fenrir::services::module::runtime: event="module.lifecycle.boot_started" module_id=athene assigned_port=Some(41002)
+2026-03-19T18:57:47.655996Z  INFO tokio-runtime-worker ThreadId(1707) fenrir::services::module::runtime: event="module.lifecycle.preflight_passed" module_id=athene-webcomponents assigned_port=Some(41008)
+2026-03-19T18:57:47.656076Z  INFO tokio-runtime-worker ThreadId(1707) fenrir::services::module::gateway: runtime gateway started module=athene-webcomponents endpoint=http://127.0.0.1:64050/call
+2026-03-19T18:57:47.657021Z  INFO tokio-runtime-worker ThreadId(1707) fenrir::services::module::runtime: event="module.lifecycle.boot_started" module_id=athene-webcomponents assigned_port=Some(41008)
+2026-03-19T18:57:47.661070Z  WARN tokio-runtime-worker ThreadId(1709) fenrir::services::module::runtime: event="module.lifecycle.boot_failed" module_id=athene-webcomponents latency_ms=4.043 error=failed to start module `athene-webcomponents`: no executable module found in /Users/jfurocket/Documents/personal/modules/athene-webcomponents. Searched: athene-webcomponents, bin/athene-webcomponents, athene-webcomponents.exe, bin/athene-webcomponents.exe
+2026-03-19T18:57:47.661093Z  WARN tokio-runtime-worker ThreadId(1709) fenrir::services::module::runtime: auto-start failed module=athene-webcomponents error=failed to start module `athene-webcomponents`: no executable module found in /Users/jfurocket/Documents/personal/modules/athene-webcomponents. Searched: athene-webcomponents, bin/athene-webcomponents, athene-webcomponents.exe, bin/athene-webcomponents.exe
+2026-03-19T18:57:47.662069Z  INFO tokio-runtime-worker ThreadId(1707) fenrir::services::module::runtime: event="module.lifecycle.preflight_started" module_id=notification-service assigned_port=Some(41007)
+2026-03-19T18:57:47.662109Z  INFO tokio-runtime-worker ThreadId(1707) fenrir::services::module::runtime: event="module.lifecycle.preflight_passed" module_id=notification-service assigned_port=Some(41007)
+2026-03-19T18:57:47.662190Z  INFO tokio-runtime-worker ThreadId(1707) fenrir::services::module::gateway: runtime gateway started module=notification-service endpoint=http://127.0.0.1:64056/call
+2026-03-19T18:57:47.663096Z  INFO tokio-runtime-worker ThreadId(1707) fenrir::services::module::runtime: event="module.lifecycle.boot_started" module_id=notification-service assigned_port=Some(41007)
+2026-03-19T18:57:47.677570Z  INFO tokio-runtime-worker ThreadId(1702) fenrir::infra::modules::runtime::process: module process started module_id=athene instance_id=athene:primary pid=99277 port=Some(41002)
+2026-03-19T18:57:47.678265Z  INFO tokio-runtime-worker ThreadId(1702) fenrir::infra::modules::runtime::process: module process started module_id=notification-service instance_id=notification-service:primary pid=99278 port=Some(41007)
+2026-03-19T18:57:47.679670Z  INFO tokio-runtime-worker ThreadId(1702) fenrir::services::module::runtime: module started successfully event="module.lifecycle.boot_succeeded" module_id=athene pid=Some(99277) port=Some(41002) latency_ms=23.723708
+2026-03-19T18:57:47.680695Z  INFO tokio-runtime-worker ThreadId(1707) fenrir::services::module::runtime: module started successfully event="module.lifecycle.boot_succeeded" module_id=notification-service pid=Some(99278) port=Some(41007) latency_ms=17.590417000000002
+2026-03-19T18:57:48.090266Z  INFO tokio-runtime-worker ThreadId(1709) fenrir::services::module::runtime: event="module.lifecycle.autostart_completed" module_count=6 concurrency=4
+2026-03-19T18:57:48.795310Z  INFO tokio-runtime-worker ThreadId(1702) fenrir::services::module::runtime: module service manifest registered after retry module=athene attempt=1
+2026-03-19T18:59:13.973215Z  WARN tokio-runtime-worker ThreadId(1702) fenrir::infra::telemetry::controller: readiness probe failed probe=services
+2026-03-19T18:59:29.044496Z  WARN tokio-runtime-worker ThreadId(1709) fenrir::infra::telemetry::controller: readiness probe failed probe=services
+2026-03-19T18:59:44.042644Z  WARN tokio-runtime-worker ThreadId(1702) fenrir::infra::telemetry::controller: readiness probe failed probe=services
+2026-03-19T18:59:47.757751Z  WARN tokio-runtime-worker ThreadId(1713) fenrir::infra::telemetry::controller: readiness probe failed probe=services
+2026-03-20T22:00:02.837033Z  INFO tokio-runtime-worker ThreadId(1713) fenrir::services::scheduler::service: Running scheduled database backup
+2026-03-20T22:00:02.840605Z  INFO tokio-runtime-worker ThreadId(1713) fenrir::services::backup::service: Starting backup: running pre-flight checks
+2026-03-20T22:00:02.868163Z  INFO tokio-runtime-worker ThreadId(1713) fenrir::services::backup::service: Pre-backup: forcing checkpoint
+2026-03-20T22:00:02.882191Z  INFO tokio-runtime-worker ThreadId(1706) fenrir::services::backup::service: Creating backup
+2026-03-20T22:00:02.966991Z  INFO tokio-runtime-worker ThreadId(1713) fenrir::services::backup::service: Using Unix socket for backup: /opt/fenrir/development/tmp/runtime/db/socket
+2026-03-20T22:00:03.831278Z  INFO tokio-runtime-worker ThreadId(1706) fenrir::services::backup::service: Refreshing DB state snapshot
+2026-03-20T22:00:03.839191Z  INFO tokio-runtime-worker ThreadId(1706) fenrir::services::backup::service: DB state snapshot copied to backup
+2026-03-20T22:00:03.839202Z  INFO tokio-runtime-worker ThreadId(1706) fenrir::services::backup::service: Verifying backup integrity
+2026-03-20T22:00:03.839290Z  INFO tokio-runtime-worker ThreadId(1706) fenrir::services::backup::service: Rotating old backups (keeping 7)
+2026-03-20T22:00:03.839727Z  INFO tokio-runtime-worker ThreadId(1706) fenrir::services::backup::service: Removing old backup: /opt/fenrir/development/tmp/runtime/backups/postgres-20260305_080416
+2026-03-20T22:00:03.970144Z  INFO tokio-runtime-worker ThreadId(1713) fenrir::services::backup::service: Backup complete: /opt/fenrir/development/tmp/runtime/backups/postgres-20260320_220002 (17 MB)
+2026-03-20T22:00:03.972995Z  INFO tokio-runtime-worker ThreadId(1713) fenrir::services::scheduler::service: Scheduled backup completed successfully path=/opt/fenrir/development/tmp/runtime/backups/postgres-20260320_220002 size_mb=17
+2026-03-23T19:19:11.265390Z  INFO tokio-runtime-worker ThreadId(2411) fenrir::services::scheduler::service: Running scheduled database backup
+2026-03-23T19:19:11.267517Z  INFO tokio-runtime-worker ThreadId(2411) fenrir::services::backup::service: Starting backup: running pre-flight checks
+2026-03-23T19:19:11.295472Z  INFO tokio-runtime-worker ThreadId(1713) fenrir::services::backup::service: Pre-backup: forcing checkpoint
+2026-03-23T19:19:11.309554Z  INFO tokio-runtime-worker ThreadId(2411) fenrir::services::backup::service: Creating backup
+2026-03-23T19:19:11.396508Z  INFO tokio-runtime-worker ThreadId(2411) fenrir::services::backup::service: Using Unix socket for backup: /opt/fenrir/development/tmp/runtime/db/socket
+2026-03-23T19:19:12.210418Z  INFO tokio-runtime-worker ThreadId(1713) fenrir::services::backup::service: Refreshing DB state snapshot
+2026-03-23T19:19:12.213861Z  INFO tokio-runtime-worker ThreadId(1713) fenrir::services::backup::service: DB state snapshot copied to backup
+2026-03-23T19:19:12.213870Z  INFO tokio-runtime-worker ThreadId(1713) fenrir::services::backup::service: Verifying backup integrity
+2026-03-23T19:19:12.213953Z  INFO tokio-runtime-worker ThreadId(1713) fenrir::services::backup::service: Rotating old backups (keeping 7)
+2026-03-23T19:19:12.214391Z  INFO tokio-runtime-worker ThreadId(1713) fenrir::services::backup::service: Removing old backup: /opt/fenrir/development/tmp/runtime/backups/postgres-20260305_100627
+2026-03-23T19:19:12.296937Z  INFO tokio-runtime-worker ThreadId(2411) fenrir::services::backup::service: Backup complete: /opt/fenrir/development/tmp/runtime/backups/postgres-20260323_191911 (17 MB)
+2026-03-23T19:19:12.297796Z  INFO tokio-runtime-worker ThreadId(2411) fenrir::services::scheduler::service: Scheduled backup completed successfully path=/opt/fenrir/development/tmp/runtime/backups/postgres-20260323_191911 size_mb=17
+2026-03-24T07:44:16.022942Z  WARN tokio-runtime-worker ThreadId(1706) fenrir::infra::telemetry::controller: readiness probe failed probe=services
+2026-03-25T07:58:08.192101Z  INFO tokio-runtime-worker ThreadId(1713) fenrir::services::module::runtime: restarting module module_id=athene-api
+2026-03-25T07:58:10.986324Z  WARN tokio-runtime-worker ThreadId(1713) fenrir::infra::modules::runtime::process: module process still running after SIGTERM; sending SIGKILL pid=16775
+2026-03-25T07:58:10.999950Z  WARN tokio-runtime-worker ThreadId(9411) fenrir::infra::modules::runtime::process: gateway proxy response read failed module=athene-web error=request or response body error: error reading a body from connection: unexpected EOF during chunk size line
+2026-03-25T07:58:11.089722Z  INFO tokio-runtime-worker ThreadId(1713) fenrir::infra::modules::runtime::process: module stopped module_id=athene-api instance_id=athene-api:primary pid=16775
+2026-03-25T07:58:11.091358Z  INFO tokio-runtime-worker ThreadId(1713) fenrir::services::module::runtime: module stopped successfully module_id=athene-api
+2026-03-25T07:58:11.099557Z  INFO tokio-runtime-worker ThreadId(1713) fenrir::services::module::runtime: event="module.lifecycle.preflight_started" module_id=athene-api assigned_port=Some(41004)
+2026-03-25T07:58:11.100030Z  INFO tokio-runtime-worker ThreadId(1713) fenrir::services::module::runtime: event="module.lifecycle.preflight_passed" module_id=athene-api assigned_port=Some(41004)
+2026-03-25T07:58:11.101430Z  INFO tokio-runtime-worker ThreadId(1713) fenrir::services::module::gateway: runtime gateway started module=athene-api endpoint=http://127.0.0.1:55887/call
+2026-03-25T07:58:11.103749Z  INFO tokio-runtime-worker ThreadId(1713) fenrir::services::module::runtime: event="module.lifecycle.boot_started" module_id=athene-api assigned_port=Some(41004)
+2026-03-25T07:58:11.133556Z  INFO tokio-runtime-worker ThreadId(1713) fenrir::infra::modules::runtime::process: module process started module_id=athene-api instance_id=athene-api:primary pid=31400 port=Some(41004)
+2026-03-25T07:58:11.136051Z  INFO tokio-runtime-worker ThreadId(1713) fenrir::services::module::runtime: module started successfully event="module.lifecycle.boot_succeeded" module_id=athene-api pid=Some(31400) port=Some(41004) latency_ms=32.28975
+2026-03-25T07:58:13.858237Z  INFO tokio-runtime-worker ThreadId(2410) fenrir::services::module::runtime: restarting module module_id=athene
+2026-03-25T07:58:14.714496Z  INFO tokio-runtime-worker ThreadId(2410) fenrir::infra::modules::runtime::process: module stopped module_id=athene instance_id=athene:primary pid=99277
+2026-03-25T07:58:14.716378Z  INFO tokio-runtime-worker ThreadId(2410) fenrir::services::module::runtime: module stopped successfully module_id=athene
+2026-03-25T07:58:14.727690Z  INFO tokio-runtime-worker ThreadId(2410) fenrir::services::module::runtime: event="module.lifecycle.preflight_started" module_id=athene assigned_port=Some(41002)
+2026-03-25T07:58:14.728313Z  INFO tokio-runtime-worker ThreadId(2410) fenrir::services::module::runtime: event="module.lifecycle.preflight_passed" module_id=athene assigned_port=Some(41002)
+2026-03-25T07:58:14.728999Z  INFO tokio-runtime-worker ThreadId(2410) fenrir::services::module::gateway: runtime gateway started module=athene endpoint=http://127.0.0.1:55907/call
+2026-03-25T07:58:14.734642Z  INFO tokio-runtime-worker ThreadId(2410) fenrir::services::module::runtime: event="module.lifecycle.boot_started" module_id=athene assigned_port=Some(41002)
+2026-03-25T07:58:14.754117Z  INFO tokio-runtime-worker ThreadId(2410) fenrir::infra::modules::runtime::process: module process started module_id=athene instance_id=athene:primary pid=31405 port=Some(41002)
+2026-03-25T07:58:14.756314Z  INFO tokio-runtime-worker ThreadId(2410) fenrir::services::module::runtime: module started successfully event="module.lifecycle.boot_succeeded" module_id=athene pid=Some(31405) port=Some(41002) latency_ms=21.626208000000002
+2026-03-25T07:58:26.502511Z  INFO tokio-runtime-worker ThreadId(1713) fenrir::services::module::runtime: restarting module module_id=auth-service
+2026-03-25T07:58:28.483285Z  INFO tokio-runtime-worker ThreadId(1713) fenrir::infra::modules::runtime::process: module stopped module_id=auth-service instance_id=auth-service:primary pid=23526
+2026-03-25T07:58:28.484769Z  INFO tokio-runtime-worker ThreadId(1713) fenrir::services::module::runtime: module stopped successfully module_id=auth-service
+2026-03-25T07:58:28.494019Z  INFO tokio-runtime-worker ThreadId(1713) fenrir::services::module::runtime: event="module.lifecycle.preflight_started" module_id=auth-service assigned_port=Some(41006)
+2026-03-25T07:58:28.494284Z  INFO tokio-runtime-worker ThreadId(1713) fenrir::services::module::runtime: event="module.lifecycle.preflight_passed" module_id=auth-service assigned_port=Some(41006)
+2026-03-25T07:58:28.494887Z  INFO tokio-runtime-worker ThreadId(1713) fenrir::services::module::gateway: runtime gateway started module=auth-service endpoint=http://127.0.0.1:55994/call
+2026-03-25T07:58:28.500781Z  INFO tokio-runtime-worker ThreadId(1713) fenrir::services::module::runtime: event="module.lifecycle.boot_started" module_id=auth-service assigned_port=Some(41006)
+2026-03-25T07:58:28.523314Z  INFO tokio-runtime-worker ThreadId(1713) fenrir::infra::modules::runtime::process: module process started module_id=auth-service instance_id=auth-service:primary pid=31477 port=Some(41006)
+2026-03-25T07:58:28.525718Z  INFO tokio-runtime-worker ThreadId(1713) fenrir::services::module::runtime: module started successfully event="module.lifecycle.boot_succeeded" module_id=auth-service pid=Some(31477) port=Some(41006) latency_ms=24.900458

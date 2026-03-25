@@ -208,11 +208,10 @@ impl RuntimeGatewayContext {
     ) -> Result<GatewayResponsePayload, GatewayError> {
         let host = self.host.upgrade().ok_or(GatewayError::ModuleUnavailable)?;
         let target_id = normalize_target(&payload.target)?;
-        let ingress = host
-            .resolve_ingress_target(target_id)
+        let ingresses = host
+            .resolve_ingress_targets(target_id)
             .await
             .map_err(GatewayError::Ingress)?;
-        let url = build_target_url(&ingress, &payload.path, &payload.query)?;
         let method = parse_method(payload.verb.as_deref())?;
 
         let token = host
@@ -221,7 +220,11 @@ impl RuntimeGatewayContext {
             .ok_or(GatewayError::MissingToken)?;
 
         let mut attempt = 0;
+        let mut candidate_index = 0usize;
+        let last_candidate = ingresses.len().saturating_sub(1);
         loop {
+            let ingress = &ingresses[candidate_index];
+            let url = build_target_url(ingress, &payload.path, &payload.query)?;
             match self
                 .send_request(
                     &method,
@@ -245,7 +248,15 @@ impl RuntimeGatewayContext {
                         body,
                     });
                 }
-                Err(err) if should_retry(&err, attempt, self.retries) => {
+                Err(err) if should_fail_over(&err, candidate_index, ingresses.len()) => {
+                    candidate_index += 1;
+                    sleep(self.backoff).await;
+                    continue;
+                }
+                Err(err)
+                    if should_retry(&err, attempt, self.retries)
+                        && candidate_index == last_candidate =>
+                {
                     attempt += 1;
                     sleep(self.backoff).await;
                     continue;
@@ -487,6 +498,16 @@ fn encode_query(params: &HashMap<String, String>) -> String {
 
 fn should_retry(err: &GatewayError, attempt: u32, max_retries: u32) -> bool {
     if attempt >= max_retries {
+        return false;
+    }
+    matches!(
+        err,
+        GatewayError::Http(e) if e.is_timeout() || e.is_connect()
+    )
+}
+
+fn should_fail_over(err: &GatewayError, candidate_index: usize, candidate_count: usize) -> bool {
+    if candidate_index + 1 >= candidate_count {
         return false;
     }
     matches!(

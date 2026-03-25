@@ -18,7 +18,7 @@ pub use app::AppServices;
 pub use backup::{BackupError, BackupResult, BackupService, BackupStatus};
 pub use db_connector::{DbConnectorEndpoint, DbConnectorService};
 pub use db_shell::DbShellService;
-pub use diagnostics::{ServiceDiagnostics, ServiceMetricSnapshot};
+pub use diagnostics::{ServiceDiagnostics, ServiceMetricSnapshot, ServiceRuntimeMetricsSnapshot};
 pub use jobs::{JobLogError, JobLogSnapshot};
 pub use managed::{block_on_managed, ManagedService, ServiceControlError, ServiceControlOutcome};
 pub use module::{

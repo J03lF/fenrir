@@ -73,6 +73,7 @@ fn test_manifest() -> InstalledModule {
                 key_id: String::new(),
                 signature: String::new(),
             },
+            dependencies: vec![],
             tags: vec![],
             published_at: None,
         },
@@ -104,6 +105,8 @@ async fn load_state_reattaches_running_process() {
     );
 
     let state = PersistedModuleState {
+        instance_id: "fenrir-api:primary".into(),
+        primary: true,
         module_id: "fenrir-api".into(),
         version: "1.2.3".into(),
         pid: std::process::id(),

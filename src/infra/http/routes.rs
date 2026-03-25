@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, SystemTime};
 use axum::body::Body;
 use axum::extract::{ConnectInfo, OriginalUri, Path as AxumPath, Query, State};
 use axum::http::{
-    header::{HeaderName as AxumHeaderName, AUTHORIZATION, HOST},
+    header::{HeaderName as AxumHeaderName, ACCEPT, AUTHORIZATION, HOST},
     HeaderMap, HeaderValue, Method, Request, StatusCode, Uri,
 };
 use axum::middleware::{self, Next};
@@ -58,7 +58,8 @@ use crate::services::{
     },
     AppServices, ServiceActionKind, ServiceControlError, ServiceIngressAccess,
     ServiceIngressMetadata, ServiceIngressProtocol, ServiceMetricSnapshot, ServiceRateLimit,
-    ServiceRegistry, ServiceSecurityMetadata, ServiceSnapshot, ServiceStatus, TokenExchangeError,
+    ServiceRegistry, ServiceRuntimeMetricsSnapshot, ServiceSecurityMetadata, ServiceSnapshot,
+    ServiceStatus, TokenExchangeError,
 };
 use crate::utils::messages::infra::http::{self as http_messages, ProblemText};
 use crate::utils::{
@@ -66,7 +67,7 @@ use crate::utils::{
 };
 use fenrir_module_kit::{ModuleTokenExchangeRequest, ModuleTokenExchangeResponse};
 
-use super::gateway::{HTTP_GATEWAY_CLIENT, SERVICE_RATE_LIMITER};
+use super::gateway::{HTTP_GATEWAY_CLIENT, HTTP_GATEWAY_STREAMING_CLIENT, SERVICE_RATE_LIMITER};
 use super::server::HTTP_SERVICE_ID;
 use super::state::{HttpInfo, HttpState};
 
@@ -168,6 +169,8 @@ struct ServiceSummary {
     ingress: Option<ServiceIngressView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     diagnostics: Option<ServiceHealthView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime_metrics: Option<ServiceRuntimeMetricsView>,
 }
 
 #[derive(Clone, Serialize)]
@@ -205,6 +208,16 @@ struct ServiceHealthView {
     latency_p50_ms: Option<f64>,
     latency_p95_ms: Option<f64>,
     error_rate_pct: Option<f64>,
+}
+
+#[derive(Clone, Serialize)]
+struct ServiceRuntimeMetricsView {
+    updated_at: Option<String>,
+    stale: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    payload: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -247,6 +260,15 @@ struct AuditHistoryQuery {
     limit: Option<usize>,
 }
 
+#[derive(Deserialize, Default)]
+struct ModuleAnalyticsQuery {
+    module: Option<String>,
+    level: Option<String>,
+    search: Option<String>,
+    limit: Option<usize>,
+    tail: Option<usize>,
+}
+
 #[derive(Serialize)]
 struct TelemetryHistoryResponse {
     range: String,
@@ -257,6 +279,56 @@ struct TelemetryHistoryResponse {
 struct AuditHistoryResponse {
     range: String,
     events: Vec<AuditEventView>,
+}
+
+#[derive(Serialize)]
+struct ModuleAnalyticsResponse {
+    filter: ModuleAnalyticsFilterView,
+    counts: ModuleAnalyticsCounts,
+    modules: Vec<ModuleAnalyticsModuleSummary>,
+    events: Vec<ModuleAnalyticsEventView>,
+}
+
+#[derive(Serialize)]
+struct ModuleAnalyticsFilterView {
+    module: Option<String>,
+    level: String,
+    search: Option<String>,
+    limit: usize,
+    tail: usize,
+}
+
+#[derive(Debug, Default, Clone, Serialize)]
+struct ModuleAnalyticsCounts {
+    total: usize,
+    error: usize,
+    warn: usize,
+    info: usize,
+    debug: usize,
+    trace: usize,
+    unavailable: usize,
+}
+
+#[derive(Serialize)]
+struct ModuleAnalyticsModuleSummary {
+    module_id: String,
+    total: usize,
+    error: usize,
+    warn: usize,
+    available: bool,
+    last_event_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ModuleAnalyticsEventView {
+    module_id: String,
+    level: String,
+    timestamp: Option<String>,
+    target: Option<String>,
+    message: String,
+    raw: String,
 }
 
 #[derive(Serialize)]
@@ -592,6 +664,7 @@ fn snapshot_to_summary(
         security: svc.descriptor.security.as_ref().map(security_view),
         ingress: svc.descriptor.ingress.as_ref().map(ingress_view),
         diagnostics: service_health_view(svc.status, metrics),
+        runtime_metrics: None,
     }
 }
 
@@ -612,6 +685,19 @@ fn service_health_view(
         latency_p95_ms: snapshot.latency_p95_ms,
         error_rate_pct: snapshot.error_rate_pct,
     })
+}
+
+fn service_runtime_metrics_view(
+    metrics: ServiceRuntimeMetricsSnapshot,
+) -> ServiceRuntimeMetricsView {
+    ServiceRuntimeMetricsView {
+        updated_at: metrics.updated_at.and_then(system_time_to_rfc3339),
+        stale: metrics.is_stale(Duration::from_secs(
+            crate::services::diagnostics::DEFAULT_RESOURCE_STALE_AFTER_SECS,
+        )),
+        last_error: metrics.last_error,
+        payload: metrics.payload,
+    }
 }
 
 fn health_state_label(
@@ -1091,8 +1177,13 @@ fn service_route_path(
 
 #[cfg(test)]
 mod service_route_path_tests {
-    use super::service_route_path;
+    use super::{
+        parse_module_analytics_line, service_route_path, should_fail_over_gateway_error,
+        should_fail_over_gateway_response, ModuleAnalyticsLevelFilter,
+    };
     use crate::services::ServiceIngressMetadata;
+    use axum::http::Method;
+    use reqwest::Client;
 
     #[test]
     fn avoids_duplicate_route_prefix_when_client_preprends_it() {
@@ -1120,6 +1211,73 @@ mod service_route_path_tests {
         let path = service_route_path(None, "/status", None);
         assert_eq!(path, "/status");
     }
+
+    #[test]
+    fn failover_only_on_safe_gateway_statuses_for_get() {
+        assert!(should_fail_over_gateway_response(
+            &Method::GET,
+            reqwest::StatusCode::BAD_GATEWAY
+        ));
+        assert!(should_fail_over_gateway_response(
+            &Method::GET,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        ));
+        assert!(!should_fail_over_gateway_response(
+            &Method::POST,
+            reqwest::StatusCode::BAD_GATEWAY
+        ));
+        assert!(!should_fail_over_gateway_response(
+            &Method::GET,
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR
+        ));
+    }
+
+    #[tokio::test]
+    async fn failover_only_on_connect_or_timeout_errors() {
+        let err = Client::new()
+            .get("http://127.0.0.1:9")
+            .send()
+            .await
+            .expect_err("connection should fail");
+        assert!(should_fail_over_gateway_error(&err));
+    }
+
+    #[test]
+    fn parses_structured_module_log_lines() {
+        let event = parse_module_analytics_line(
+            "athene-api",
+            "2026-03-18T11:21:19.141177Z  WARN tokio-runtime-worker ThreadId(09) athene_api::gateway: upstream request failed target=auth-service",
+            0,
+        )
+        .expect("line parsed");
+        assert_eq!(event.view.module_id, "athene-api");
+        assert_eq!(event.view.level, "warn");
+        assert_eq!(event.view.target.as_deref(), Some("athene_api::gateway"));
+        assert_eq!(
+            event.view.message,
+            "upstream request failed target=auth-service"
+        );
+        assert!(event.view.timestamp.is_some());
+    }
+
+    #[test]
+    fn analytics_issue_filter_only_matches_warn_and_error() {
+        let issues = ModuleAnalyticsLevelFilter::parse(Some("issues"));
+        let warn = parse_module_analytics_line(
+            "auth-service",
+            "2026-03-18T11:21:19.141177Z  WARN main auth::svc: slow downstream",
+            0,
+        )
+        .unwrap();
+        let info = parse_module_analytics_line(
+            "auth-service",
+            "2026-03-18T11:21:19.141177Z  INFO main auth::svc: started",
+            1,
+        )
+        .unwrap();
+        assert!(issues.matches(warn.level));
+        assert!(!issues.matches(info.level));
+    }
 }
 
 fn build_target_url(target: &ModuleIngressTarget, path: &str) -> String {
@@ -1136,8 +1294,12 @@ fn target_origin(target: &ModuleIngressTarget) -> String {
 
 fn target_log_label(target: &ModuleIngressTarget) -> String {
     match target {
-        ModuleIngressTarget::RuntimePort { module_id, port } => {
-            format!("module:{}@{}", module_id, port)
+        ModuleIngressTarget::RuntimePort {
+            module_id,
+            instance_id,
+            port,
+        } => {
+            format!("module:{}:{}@{}", module_id, instance_id, port)
         }
         ModuleIngressTarget::DevService {
             module_id,
@@ -1150,6 +1312,20 @@ fn target_log_label(target: &ModuleIngressTarget) -> String {
             endpoint,
         } => format!("{} ({module_id} -> {endpoint})", service_id),
     }
+}
+
+fn should_fail_over_gateway_response(method: &Method, status: reqwest::StatusCode) -> bool {
+    method == Method::GET
+        && matches!(
+            status,
+            reqwest::StatusCode::BAD_GATEWAY
+                | reqwest::StatusCode::SERVICE_UNAVAILABLE
+                | reqwest::StatusCode::GATEWAY_TIMEOUT
+        )
+}
+
+fn should_fail_over_gateway_error(err: &reqwest::Error) -> bool {
+    err.is_timeout() || err.is_connect()
 }
 
 fn map_reqwest_method(method: &Method) -> Result<ReqwestMethod, ServiceActionProblem> {
@@ -1179,16 +1355,13 @@ async fn convert_upstream_response(
     let status =
         StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let headers = response.headers().clone();
-    let body = response
-        .bytes()
-        .await
-        .map(|bytes| bytes.to_vec())
-        .map_err(|err| {
-            http_problem(
-                StatusCode::BAD_GATEWAY,
-                http_messages::problems::gateway_upstream_read_failed(err),
-            )
-        })?;
+
+    let is_streaming = headers
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| ct.starts_with("text/event-stream"))
+        .unwrap_or(false);
+
     let mut builder = Response::builder().status(status);
     {
         let headers_mut = builder.headers_mut().expect("response headers available");
@@ -1201,12 +1374,34 @@ async fn convert_upstream_response(
             }
         }
     }
-    builder.body(Body::from(body)).map_err(|err| {
-        http_problem(
-            StatusCode::BAD_GATEWAY,
-            http_messages::problems::gateway_upstream_conversion_failed(err),
-        )
-    })
+
+    if is_streaming {
+        builder
+            .body(Body::from_stream(response.bytes_stream()))
+            .map_err(|err| {
+                http_problem(
+                    StatusCode::BAD_GATEWAY,
+                    http_messages::problems::gateway_upstream_conversion_failed(err),
+                )
+            })
+    } else {
+        let body = response
+            .bytes()
+            .await
+            .map(|bytes| bytes.to_vec())
+            .map_err(|err| {
+                http_problem(
+                    StatusCode::BAD_GATEWAY,
+                    http_messages::problems::gateway_upstream_read_failed(err),
+                )
+            })?;
+        builder.body(Body::from(body)).map_err(|err| {
+            http_problem(
+                StatusCode::BAD_GATEWAY,
+                http_messages::problems::gateway_upstream_conversion_failed(err),
+            )
+        })
+    }
 }
 
 async fn list_installed_modules(State(state): State<HttpState>, headers: HeaderMap) -> Response {
@@ -1735,6 +1930,48 @@ async fn restart_module_runtime(
     }
 }
 
+async fn module_runtime_instances(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    if let Err(problem) = authorize(&state.auth, &state.services, &headers, Role::Operator) {
+        return problem.into_response();
+    }
+    let Some(service) = state.services.module_service() else {
+        return module_service_unavailable().into_response();
+    };
+    let module_id = match ModuleId::new(id.trim()) {
+        Ok(id) => id,
+        Err(err) => return module_validation_problem("invalid_module_id", err).into_response(),
+    };
+    match service.runtime_instances(&module_id).await {
+        Ok(instances) => (StatusCode::OK, Json(instances)).into_response(),
+        Err(err) => module_runtime_problem(err).into_response(),
+    }
+}
+
+async fn rolling_restart_module_runtime(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    if let Err(problem) = authorize(&state.auth, &state.services, &headers, Role::Operator) {
+        return problem.into_response();
+    }
+    let Some(service) = state.services.module_service() else {
+        return module_service_unavailable().into_response();
+    };
+    let module_id = match ModuleId::new(id.trim()) {
+        Ok(id) => id,
+        Err(err) => return module_validation_problem("invalid_module_id", err).into_response(),
+    };
+    match service.rolling_restart(&module_id).await {
+        Ok(report) => (StatusCode::OK, Json(report)).into_response(),
+        Err(err) => module_runtime_problem(err).into_response(),
+    }
+}
+
 async fn list_module_startup_reports(
     State(state): State<HttpState>,
     headers: HeaderMap,
@@ -2110,6 +2347,15 @@ async fn gateway_proxy(
                 )
             }
         };
+        if snapshot.status != ServiceStatus::Active {
+            return (
+                Err(http_problem(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    http_messages::problems::gateway_service_unavailable(&service_id),
+                )),
+                None,
+            );
+        }
         let ingress_owned = snapshot.descriptor.ingress.clone();
         let ingress = ingress_owned.as_ref();
         let access = ingress
@@ -2233,12 +2479,11 @@ async fn gateway_proxy(
                 audit_ctx,
             );
         }
-        let target = match module_service.resolve_ingress_target(&service_id).await {
-            Ok(target) => target,
+        let targets = match module_service.resolve_ingress_targets(&service_id).await {
+            Ok(targets) => targets,
             Err(err) => return (Err(map_ingress_error(err, &service_id)), audit_ctx),
         };
         let path = service_route_path(ingress, &tail, original_uri.query());
-        let target_url = build_target_url(&target, &path);
         let reqwest_method = match map_reqwest_method(&method) {
             Ok(method) => method,
             Err(problem) => return (Err(problem), audit_ctx),
@@ -2248,62 +2493,106 @@ async fn gateway_proxy(
             Err(problem) => return (Err(problem), audit_ctx),
         };
 
-        let mut builder = HTTP_GATEWAY_CLIENT
-            .request(reqwest_method, target_url)
-            .header("x-fenrir-gateway-service", &service_id)
-            .header("x-fenrir-gateway-protocol", kind.as_str());
+        let accepts_sse = headers
+            .get(ACCEPT)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.contains("text/event-stream"))
+            .unwrap_or(false);
 
-        if let Some(claims) = &claims {
-            builder = builder
-                .header("x-fenrir-actor", claims.actor.identifier())
-                .header("x-fenrir-tenant", claims.tenant_id.as_str());
-            if !claims.scopes.is_empty() {
-                let scopes = claims
-                    .scopes
-                    .iter()
-                    .map(|scope| scope.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                builder = builder.header("x-fenrir-scopes", scopes);
-            }
+        let client = if accepts_sse {
+            &*HTTP_GATEWAY_STREAMING_CLIENT
         } else {
-            builder = builder
-                .header("x-fenrir-actor", "public")
-                .header("x-fenrir-tenant", "public");
-        }
+            &*HTTP_GATEWAY_CLIENT
+        };
+        let request_method = method.clone();
+        let reqwest_method_template = reqwest_method.clone();
+        let mut saw_transport_failure = false;
 
-        for (name, value) in headers.iter() {
-            if name == HOST {
-                continue;
-            }
-            if let (Ok(header_name), Ok(header_value)) = (
-                ReqwestHeaderName::from_bytes(name.as_str().as_bytes()),
-                ReqwestHeaderValue::from_bytes(value.as_bytes()),
-            ) {
-                builder = builder.header(header_name, header_value);
-            }
-        }
+        for (index, target) in targets.iter().enumerate() {
+            let target_url = build_target_url(target, &path);
+            let target_label = target_log_label(target);
+            let mut builder = client
+                .request(reqwest_method_template.clone(), target_url)
+                .header("x-fenrir-gateway-service", &service_id)
+                .header("x-fenrir-gateway-protocol", kind.as_str());
 
-        let response = match builder.body(body_bytes).send().await {
-            Ok(resp) => resp,
-            Err(err) => {
+            if let Some(claims) = &claims {
+                builder = builder
+                    .header("x-fenrir-actor", claims.actor.identifier())
+                    .header("x-fenrir-tenant", claims.tenant_id.as_str());
+                if !claims.scopes.is_empty() {
+                    let scopes = claims
+                        .scopes
+                        .iter()
+                        .map(|scope| scope.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    builder = builder.header("x-fenrir-scopes", scopes);
+                }
+            } else {
+                builder = builder
+                    .header("x-fenrir-actor", "public")
+                    .header("x-fenrir-tenant", "public");
+            }
+
+            for (name, value) in headers.iter() {
+                if name == HOST {
+                    continue;
+                }
+                if let (Ok(header_name), Ok(header_value)) = (
+                    ReqwestHeaderName::from_bytes(name.as_str().as_bytes()),
+                    ReqwestHeaderValue::from_bytes(value.as_bytes()),
+                ) {
+                    builder = builder.header(header_name, header_value);
+                }
+            }
+
+            let response = match builder.body(body_bytes.clone()).send().await {
+                Ok(resp) => resp,
+                Err(err) => {
+                    tracing::warn!(
+                        service = %service_id,
+                        target = %target_label,
+                        error = %err,
+                        "module gateway upstream request failed"
+                    );
+                    if should_fail_over_gateway_error(&err) && index + 1 < targets.len() {
+                        saw_transport_failure = true;
+                        continue;
+                    }
+                    return (
+                        Err(http_problem(
+                            StatusCode::BAD_GATEWAY,
+                            http_messages::problems::gateway_upstream_unreachable(&service_id),
+                        )),
+                        audit_ctx,
+                    );
+                }
+            };
+
+            if should_fail_over_gateway_response(&request_method, response.status())
+                && index + 1 < targets.len()
+            {
                 tracing::warn!(
                     service = %service_id,
-                    target = %target_log_label(&target),
-                    error = %err,
-                    "module gateway upstream request failed"
+                    target = %target_label,
+                    status = %response.status(),
+                    "module gateway upstream returned failover-eligible status"
                 );
-                return (
-                    Err(http_problem(
-                        StatusCode::BAD_GATEWAY,
-                        http_messages::problems::gateway_upstream_unreachable(&service_id),
-                    )),
-                    audit_ctx,
-                );
+                continue;
             }
-        };
 
-        (convert_upstream_response(response).await, audit_ctx)
+            return (convert_upstream_response(response).await, audit_ctx);
+        }
+
+        let _ = saw_transport_failure;
+        (
+            Err(http_problem(
+                StatusCode::BAD_GATEWAY,
+                http_messages::problems::gateway_upstream_unreachable(&service_id),
+            )),
+            audit_ctx,
+        )
     }
     .await;
 
@@ -2326,6 +2615,10 @@ pub(super) fn build_router(state: HttpState) -> Router {
         .route("/health/live", get(health_live))
         .route("/health/ready", get(health_ready))
         .route("/services", get(list_services))
+        .route(
+            "/services/:id/runtime-metrics",
+            get(service_runtime_metrics),
+        )
         .route("/services/:id/start", post(start_service))
         .route("/services/:id/stop", post(stop_service))
         .route("/services/:id/restart", post(restart_service))
@@ -2338,6 +2631,7 @@ pub(super) fn build_router(state: HttpState) -> Router {
         .route("/logging/level", post(update_logging_level))
         .route("/metrics", get(metrics_snapshot))
         .route("/metrics/history", get(metrics_history))
+        .route("/analytics/module-events", get(module_analytics))
         .route("/audit/history", get(audit_history))
         .route("/audit", get(list_audit_events))
         .route("/events/stream", get(audit_events_stream))
@@ -2351,6 +2645,14 @@ pub(super) fn build_router(state: HttpState) -> Router {
         .route("/modules/runtime/:id/start", post(start_module_runtime))
         .route("/modules/runtime/:id/stop", post(stop_module_runtime))
         .route("/modules/runtime/:id/restart", post(restart_module_runtime))
+        .route(
+            "/modules/runtime/:id/instances",
+            get(module_runtime_instances),
+        )
+        .route(
+            "/modules/runtime/:id/rolling-restart",
+            post(rolling_restart_module_runtime),
+        )
         .route(
             "/modules/runtime/startup-reports",
             get(list_module_startup_reports),
@@ -2526,6 +2828,33 @@ async fn list_services(State(state): State<HttpState>, headers: HeaderMap) -> Re
         .collect();
     services.sort_by(|a, b| a.id.cmp(&b.id));
     (StatusCode::OK, Json(ServicesResponse { services })).into_response()
+}
+
+async fn service_runtime_metrics(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    if let Some(response) = ensure_viewer_access(&state, &headers) {
+        return response;
+    }
+    if state.registry.get(&id).is_none() {
+        return http_problem(
+            StatusCode::NOT_FOUND,
+            http_messages::problems::service_unknown(&id),
+        )
+        .into_response();
+    }
+    match state.services.service_runtime_metrics(&id) {
+        Some(metrics) => {
+            (StatusCode::OK, Json(service_runtime_metrics_view(metrics))).into_response()
+        }
+        None => http_problem(
+            StatusCode::NOT_FOUND,
+            ProblemText::new("runtime_metrics_unavailable", "runtime metrics unavailable"),
+        )
+        .into_response(),
+    }
 }
 
 async fn list_scheduler_jobs(State(state): State<HttpState>, headers: HeaderMap) -> Response {
@@ -2871,6 +3200,156 @@ async fn audit_history(
         )
         .into_response(),
     }
+}
+
+async fn module_analytics(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Query(query): Query<ModuleAnalyticsQuery>,
+) -> Response {
+    if let Err(problem) = authorize(&state.auth, &state.services, &headers, Role::Viewer) {
+        return problem.into_response();
+    }
+
+    let Some(service) = state.services.module_service() else {
+        return module_service_unavailable().into_response();
+    };
+
+    let level_filter = ModuleAnalyticsLevelFilter::parse(query.level.as_deref());
+    let selected_module = query
+        .module
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "all")
+        .map(str::to_string);
+    let search = query
+        .search
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let search_normalized = search.as_ref().map(|value| value.to_lowercase());
+    let limit = query.limit.unwrap_or(200).clamp(1, 1000);
+    let tail = query.tail.unwrap_or(250).clamp(50, 2000);
+
+    let modules = match service.list_installed().await {
+        Ok(modules) => modules,
+        Err(err) => return module_error_problem(err).into_response(),
+    };
+
+    let mut summaries = Vec::new();
+    let mut parsed_events = Vec::new();
+    let mut counts = ModuleAnalyticsCounts::default();
+    let mut sequence = 0usize;
+
+    for installed in modules {
+        let Ok(module_id) = installed.manifest.module_id() else {
+            continue;
+        };
+        if selected_module
+            .as_deref()
+            .map(|selected| selected != module_id.as_str())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+
+        match service.logs(&module_id, Some(tail)).await {
+            Ok(lines) => {
+                let mut module_events = Vec::new();
+                for line in lines {
+                    let Some(parsed) =
+                        parse_module_analytics_line(module_id.as_str(), &line, sequence)
+                    else {
+                        sequence = sequence.saturating_add(1);
+                        continue;
+                    };
+                    sequence = sequence.saturating_add(1);
+                    if !level_filter.matches(parsed.level) {
+                        continue;
+                    }
+                    if !matches_module_analytics_search(&parsed.view, search_normalized.as_deref())
+                    {
+                        continue;
+                    }
+                    module_events.push(parsed);
+                }
+
+                let mut module_counts = ModuleAnalyticsCounts::default();
+                let mut last_event_at = None;
+                for event in &module_events {
+                    module_counts.record(event.level);
+                    last_event_at =
+                        latest_optional_timestamp(last_event_at, event.sort_timestamp_ms);
+                }
+
+                counts.total += module_counts.total;
+                counts.error += module_counts.error;
+                counts.warn += module_counts.warn;
+                counts.info += module_counts.info;
+                counts.debug += module_counts.debug;
+                counts.trace += module_counts.trace;
+
+                summaries.push(ModuleAnalyticsModuleSummary {
+                    module_id: module_id.to_string(),
+                    total: module_counts.total,
+                    error: module_counts.error,
+                    warn: module_counts.warn,
+                    available: true,
+                    last_event_at: last_event_at.and_then(format_timestamp_millis),
+                    note: None,
+                });
+
+                parsed_events.extend(module_events);
+            }
+            Err(err) => {
+                counts.unavailable += 1;
+                summaries.push(ModuleAnalyticsModuleSummary {
+                    module_id: module_id.to_string(),
+                    total: 0,
+                    error: 0,
+                    warn: 0,
+                    available: false,
+                    last_event_at: None,
+                    note: Some(err.to_string()),
+                });
+            }
+        }
+    }
+
+    parsed_events.sort_by(|left, right| {
+        right
+            .sort_timestamp_ms
+            .cmp(&left.sort_timestamp_ms)
+            .then_with(|| right.sequence.cmp(&left.sequence))
+    });
+    let events = parsed_events
+        .into_iter()
+        .take(limit)
+        .map(|event| event.view)
+        .collect();
+    summaries.sort_by(|left, right| {
+        right
+            .error
+            .cmp(&left.error)
+            .then_with(|| right.warn.cmp(&left.warn))
+            .then_with(|| right.total.cmp(&left.total))
+            .then_with(|| left.module_id.cmp(&right.module_id))
+    });
+
+    Json(ModuleAnalyticsResponse {
+        filter: ModuleAnalyticsFilterView {
+            module: selected_module,
+            level: level_filter.as_str().to_string(),
+            search,
+            limit,
+            tail,
+        },
+        counts,
+        modules: summaries,
+        events,
+    })
+    .into_response()
 }
 
 async fn update_logging_level(
@@ -3237,6 +3716,203 @@ async fn bulk_service_action(
             (StatusCode::OK, Json(response)).into_response()
         }
         Err(problem) => problem.into_response(),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModuleAnalyticsLevel {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+impl ModuleAnalyticsLevel {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_uppercase().as_str() {
+            "TRACE" => Some(Self::Trace),
+            "DEBUG" => Some(Self::Debug),
+            "INFO" => Some(Self::Info),
+            "WARN" | "WARNING" => Some(Self::Warn),
+            "ERROR" => Some(Self::Error),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Trace => "trace",
+            Self::Debug => "debug",
+            Self::Info => "info",
+            Self::Warn => "warn",
+            Self::Error => "error",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModuleAnalyticsLevelFilter {
+    Issues,
+    All,
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
+}
+
+impl ModuleAnalyticsLevelFilter {
+    fn parse(value: Option<&str>) -> Self {
+        match value
+            .unwrap_or("issues")
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "all" => Self::All,
+            "error" => Self::Error,
+            "warn" | "warning" => Self::Warn,
+            "info" => Self::Info,
+            "debug" => Self::Debug,
+            "trace" => Self::Trace,
+            _ => Self::Issues,
+        }
+    }
+
+    fn matches(self, level: ModuleAnalyticsLevel) -> bool {
+        match self {
+            Self::Issues => matches!(
+                level,
+                ModuleAnalyticsLevel::Warn | ModuleAnalyticsLevel::Error
+            ),
+            Self::All => true,
+            Self::Error => level == ModuleAnalyticsLevel::Error,
+            Self::Warn => level == ModuleAnalyticsLevel::Warn,
+            Self::Info => level == ModuleAnalyticsLevel::Info,
+            Self::Debug => level == ModuleAnalyticsLevel::Debug,
+            Self::Trace => level == ModuleAnalyticsLevel::Trace,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Issues => "issues",
+            Self::All => "all",
+            Self::Error => "error",
+            Self::Warn => "warn",
+            Self::Info => "info",
+            Self::Debug => "debug",
+            Self::Trace => "trace",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ParsedModuleAnalyticsEvent {
+    level: ModuleAnalyticsLevel,
+    sort_timestamp_ms: Option<i128>,
+    sequence: usize,
+    view: ModuleAnalyticsEventView,
+}
+
+impl ModuleAnalyticsCounts {
+    fn record(&mut self, level: ModuleAnalyticsLevel) {
+        self.total += 1;
+        match level {
+            ModuleAnalyticsLevel::Error => self.error += 1,
+            ModuleAnalyticsLevel::Warn => self.warn += 1,
+            ModuleAnalyticsLevel::Info => self.info += 1,
+            ModuleAnalyticsLevel::Debug => self.debug += 1,
+            ModuleAnalyticsLevel::Trace => self.trace += 1,
+        }
+    }
+}
+
+fn parse_module_analytics_line(
+    module_id: &str,
+    raw_line: &str,
+    sequence: usize,
+) -> Option<ParsedModuleAnalyticsEvent> {
+    let raw = raw_line.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    let level = raw
+        .split_whitespace()
+        .find_map(ModuleAnalyticsLevel::parse)?;
+    let timestamp = raw
+        .split_whitespace()
+        .next()
+        .and_then(parse_rfc3339_timestamp);
+    let (prefix, message) = raw
+        .split_once(": ")
+        .map(|(left, right)| (left, right.to_string()))
+        .unwrap_or((raw, raw.to_string()));
+    let target = prefix
+        .split_whitespace()
+        .last()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case(level.as_str()))
+        .map(str::to_string);
+
+    Some(ParsedModuleAnalyticsEvent {
+        level,
+        sort_timestamp_ms: timestamp,
+        sequence,
+        view: ModuleAnalyticsEventView {
+            module_id: module_id.to_string(),
+            level: level.as_str().to_string(),
+            timestamp: timestamp.and_then(format_timestamp_millis),
+            target,
+            message,
+            raw: raw.to_string(),
+        },
+    })
+}
+
+fn matches_module_analytics_search(event: &ModuleAnalyticsEventView, search: Option<&str>) -> bool {
+    let Some(search) = search else {
+        return true;
+    };
+    let search = search.trim();
+    if search.is_empty() {
+        return true;
+    }
+    let module = event.module_id.to_lowercase();
+    let level = event.level.to_lowercase();
+    let target = event.target.as_deref().unwrap_or("").to_lowercase();
+    let message = event.message.to_lowercase();
+    let raw = event.raw.to_lowercase();
+    module.contains(search)
+        || level.contains(search)
+        || target.contains(search)
+        || message.contains(search)
+        || raw.contains(search)
+}
+
+fn parse_rfc3339_timestamp(value: &str) -> Option<i128> {
+    OffsetDateTime::parse(value.trim(), &Rfc3339)
+        .ok()
+        .map(|timestamp| timestamp.unix_timestamp_nanos())
+}
+
+fn format_timestamp_millis(value: i128) -> Option<String> {
+    let seconds = (value / 1_000_000_000) as i64;
+    let nanos = (value.rem_euclid(1_000_000_000)) as u32;
+    OffsetDateTime::from_unix_timestamp(seconds)
+        .ok()
+        .and_then(|timestamp| timestamp.replace_nanosecond(nanos).ok())
+        .and_then(|timestamp| timestamp.format(&Rfc3339).ok())
+}
+
+fn latest_optional_timestamp(current: Option<i128>, next: Option<i128>) -> Option<i128> {
+    match (current, next) {
+        (Some(current), Some(next)) => Some(current.max(next)),
+        (Some(current), None) => Some(current),
+        (None, Some(next)) => Some(next),
+        (None, None) => None,
     }
 }
 

@@ -136,6 +136,30 @@ fn default_runtime_scheduler_dir() -> String {
     "scheduler".to_string()
 }
 
+fn default_replacement_enabled() -> bool {
+    true
+}
+
+fn default_replacement_default_strategy() -> ModuleRolloutStrategy {
+    ModuleRolloutStrategy::RollingReplace
+}
+
+fn default_replacement_max_surge() -> usize {
+    1
+}
+
+fn default_replacement_max_unavailable() -> usize {
+    0
+}
+
+fn default_replacement_warmup_timeout_ms() -> u64 {
+    30_000
+}
+
+fn default_replacement_promotion_interval_ms() -> u64 {
+    30_000
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct AppSection {
     pub name: String,
@@ -915,6 +939,8 @@ pub struct ModuleRuntimeSection {
     #[serde(default)]
     pub clients: ModuleRuntimeClientSection,
     #[serde(default)]
+    pub rollout: ModuleRuntimeRolloutSection,
+    #[serde(default)]
     pub env_passthrough_prefixes: Vec<String>,
 }
 
@@ -925,6 +951,7 @@ impl Default for ModuleRuntimeSection {
             ports: ModuleRuntimePortSection::default(),
             default_service_scopes: Vec::new(),
             clients: ModuleRuntimeClientSection::default(),
+            rollout: ModuleRuntimeRolloutSection::default(),
             env_passthrough_prefixes: Vec::new(),
         }
     }
@@ -1035,8 +1062,55 @@ pub struct ModuleRuntimeClientTlsSection {
     pub accept_invalid_certs: bool,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct ModuleRuntimeRolloutSection {
+    #[serde(default = "default_true")]
+    pub watch_config: bool,
+    #[serde(default = "default_rollout_watch_debounce_ms")]
+    pub watch_debounce_ms: u64,
+    #[serde(default = "default_true")]
+    pub restart_on_override_change: bool,
+    #[serde(default = "default_rollout_drain_before_restart_ms")]
+    pub drain_before_restart_ms: u64,
+    #[serde(default = "default_rollout_inter_restart_delay_ms")]
+    pub inter_restart_delay_ms: u64,
+    #[serde(default = "default_rollout_health_timeout_ms")]
+    pub health_check_timeout_ms: u64,
+    #[serde(default = "default_rollout_health_poll_interval_ms")]
+    pub health_poll_interval_ms: u64,
+    #[serde(default = "default_true")]
+    pub rollback_on_failure: bool,
+    #[serde(default = "default_true")]
+    pub abort_on_first_failure: bool,
+    #[serde(default)]
+    pub replacement: ModuleRuntimeReplacementSection,
+}
+
+impl Default for ModuleRuntimeRolloutSection {
+    fn default() -> Self {
+        Self {
+            watch_config: default_true(),
+            watch_debounce_ms: default_rollout_watch_debounce_ms(),
+            restart_on_override_change: default_true(),
+            drain_before_restart_ms: default_rollout_drain_before_restart_ms(),
+            inter_restart_delay_ms: default_rollout_inter_restart_delay_ms(),
+            health_check_timeout_ms: default_rollout_health_timeout_ms(),
+            health_poll_interval_ms: default_rollout_health_poll_interval_ms(),
+            rollback_on_failure: default_true(),
+            abort_on_first_failure: default_true(),
+            replacement: ModuleRuntimeReplacementSection::default(),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct ModuleServiceOverride {
+    #[serde(default)]
+    pub profile: Option<String>,
+    #[serde(default)]
+    pub replicas: Option<usize>,
+    #[serde(default)]
+    pub rollout: ModuleServiceRolloutConfig,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     #[serde(default)]
@@ -1058,6 +1132,14 @@ pub struct ModuleServicePolicyOverride {
 
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct ModuleServiceProfile {
+    #[serde(default)]
+    pub replicas: Option<usize>,
+    #[serde(default)]
+    pub rollout: ModuleServiceRolloutConfig,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub secrets: BTreeMap<String, String>,
     pub internal_only: Option<bool>,
     #[serde(default)]
     pub allowed_roles: Vec<String>,
@@ -1071,6 +1153,68 @@ pub struct ModuleServiceProfile {
     pub rate_limit_per_second: Option<u32>,
     #[serde(default)]
     pub disable_rate_limit: bool,
+}
+
+#[derive(Debug, Deserialize, serde::Serialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ModuleRolloutStrategy {
+    #[default]
+    Restart,
+    RollingReplace,
+    CanaryReplace,
+    WorkerHandover,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ModuleRuntimeReplacementSection {
+    #[serde(default = "default_replacement_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_replacement_default_strategy")]
+    pub default_strategy: ModuleRolloutStrategy,
+    #[serde(default = "default_replacement_max_surge")]
+    pub default_max_surge: usize,
+    #[serde(default = "default_replacement_max_unavailable")]
+    pub default_max_unavailable: usize,
+    #[serde(default = "default_replacement_warmup_timeout_ms")]
+    pub default_warmup_timeout_ms: u64,
+    #[serde(default = "default_replacement_promotion_interval_ms")]
+    pub default_promotion_interval_ms: u64,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ModuleServiceRolloutConfig {
+    #[serde(default)]
+    pub strategy: Option<ModuleRolloutStrategy>,
+    #[serde(default)]
+    pub max_surge: Option<usize>,
+    #[serde(default)]
+    pub max_unavailable: Option<usize>,
+    #[serde(default)]
+    pub warmup_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub drain_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub traffic_steps: Vec<u8>,
+    #[serde(default)]
+    pub promotion_interval_ms: Option<u64>,
+    #[serde(default = "default_true")]
+    pub rollback_on_regression: bool,
+    #[serde(default)]
+    pub stickiness: bool,
+    #[serde(default)]
+    pub success_criteria: ModuleRolloutSuccessCriteria,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ModuleRolloutSuccessCriteria {
+    #[serde(default)]
+    pub max_error_rate_percent: Option<f32>,
+    #[serde(default)]
+    pub max_p95_latency_ms: Option<u64>,
+    #[serde(default)]
+    pub max_retry_rate_percent: Option<f32>,
+    #[serde(default)]
+    pub max_queue_backlog: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -1175,6 +1319,26 @@ fn default_client_retries() -> u32 {
 
 fn default_client_backoff_ms() -> u64 {
     200
+}
+
+fn default_rollout_health_timeout_ms() -> u64 {
+    15_000
+}
+
+fn default_rollout_watch_debounce_ms() -> u64 {
+    750
+}
+
+fn default_rollout_drain_before_restart_ms() -> u64 {
+    750
+}
+
+fn default_rollout_inter_restart_delay_ms() -> u64 {
+    250
+}
+
+fn default_rollout_health_poll_interval_ms() -> u64 {
+    500
 }
 
 fn default_health_probe_interval_secs() -> u64 {
@@ -1550,42 +1714,82 @@ impl ModuleRuntimeClientSection {
 
 impl ModulesSection {
     pub fn validate_services(&self) -> Result<(), ConfigError> {
+        for (profile_name, profile) in &self.service_profiles {
+            profile.validate(profile_name)?;
+        }
         for (service_id, override_cfg) in &self.services {
-            override_cfg.validate(service_id)?;
+            override_cfg.validate(service_id, &self.service_profiles)?;
         }
         Ok(())
     }
 }
 
 impl ModuleServiceOverride {
-    fn validate(&self, service_id: &str) -> Result<(), ConfigError> {
+    fn validate(
+        &self,
+        service_id: &str,
+        profiles: &HashMap<String, ModuleServiceProfile>,
+    ) -> Result<(), ConfigError> {
         if service_id.trim().is_empty() {
             return Err(ConfigError::Invalid(
                 "modules.services keys must not be empty",
             ));
         }
-        for key in self.env.keys().chain(self.secrets.keys()) {
-            let trimmed = key.trim();
-            if trimmed.is_empty() {
+        if let Some(profile_name) = self
+            .profile
+            .as_ref()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            if !profiles.contains_key(profile_name) {
                 return Err(ConfigError::InvalidMessage(format!(
-                    "modules.services.{service_id} env keys must not be empty"
-                )));
-            }
-            if trimmed.contains(char::is_whitespace) {
-                return Err(ConfigError::InvalidMessage(format!(
-                    "modules.services.{service_id} env key '{trimmed}' must not contain whitespace"
+                    "modules.services.{service_id}.profile references unknown service profile '{profile_name}'"
                 )));
             }
         }
+        validate_env_key_set(
+            format!("modules.services.{service_id}"),
+            &self.env,
+            &self.secrets,
+        )?;
+        self.rollout
+            .validate(&format!("modules.services.{service_id}"))?;
         if let Some(tenant) = &self.policy.tenant {
-            tenant.validate(service_id)?;
+            tenant.validate_with_path(&format!("modules.services.{service_id}.policy.tenant"))?;
+        }
+        Ok(())
+    }
+}
+
+impl ModuleServiceProfile {
+    fn validate(&self, profile_name: &str) -> Result<(), ConfigError> {
+        validate_env_key_set(
+            format!("modules.service_profiles.{profile_name}"),
+            &self.env,
+            &self.secrets,
+        )?;
+        self.rollout
+            .validate(&format!("modules.service_profiles.{profile_name}"))?;
+        if let Some(tenant) = &self.tenant {
+            tenant
+                .validate_with_path(&format!("modules.service_profiles.{profile_name}.tenant"))?;
+        }
+        if self.disable_rate_limit && self.rate_limit_per_second.is_some() {
+            return Err(ConfigError::InvalidMessage(format!(
+                "modules.service_profiles.{profile_name} cannot set both disable_rate_limit and rate_limit_per_second"
+            )));
+        }
+        if matches!(self.rate_limit_per_second, Some(0)) {
+            return Err(ConfigError::InvalidMessage(format!(
+                "modules.service_profiles.{profile_name}.rate_limit_per_second must be > 0"
+            )));
         }
         Ok(())
     }
 }
 
 impl ModuleServiceTenantConfig {
-    fn validate(&self, service_id: &str) -> Result<(), ConfigError> {
+    fn validate_with_path(&self, path: &str) -> Result<(), ConfigError> {
         match self.mode {
             ModuleServiceTenantMode::Any => Ok(()),
             ModuleServiceTenantMode::Fixed => {
@@ -1596,12 +1800,12 @@ impl ModuleServiceTenantConfig {
                     .filter(|v| !v.is_empty())
                     .ok_or_else(|| {
                         ConfigError::InvalidMessage(format!(
-                            "modules.services.{service_id}.policy.tenant.value must be set for mode=fixed"
+                            "{path}.value must be set for mode=fixed"
                         ))
                     })?;
                 if value.contains(char::is_whitespace) {
                     return Err(ConfigError::InvalidMessage(format!(
-                        "modules.services.{service_id}.policy.tenant.value must not contain whitespace"
+                        "{path}.value must not contain whitespace"
                     )));
                 }
                 Ok(())
@@ -1609,7 +1813,7 @@ impl ModuleServiceTenantConfig {
             ModuleServiceTenantMode::AllowList => {
                 if self.allow.is_empty() {
                     return Err(ConfigError::InvalidMessage(format!(
-                        "modules.services.{service_id}.policy.tenant.allow must list at least one tenant for mode=allow_list"
+                        "{path}.allow must list at least one tenant for mode=allow_list"
                     )));
                 }
                 if self
@@ -1618,13 +1822,34 @@ impl ModuleServiceTenantConfig {
                     .any(|value| value.trim().is_empty() || value.contains(char::is_whitespace))
                 {
                     return Err(ConfigError::InvalidMessage(format!(
-                        "modules.services.{service_id}.policy.tenant.allow entries must be non-empty and without whitespace"
+                        "{path}.allow entries must be non-empty and without whitespace"
                     )));
                 }
                 Ok(())
             }
         }
     }
+}
+
+fn validate_env_key_set(
+    path: String,
+    env: &BTreeMap<String, String>,
+    secrets: &BTreeMap<String, String>,
+) -> Result<(), ConfigError> {
+    for key in env.keys().chain(secrets.keys()) {
+        let trimmed = key.trim();
+        if trimmed.is_empty() {
+            return Err(ConfigError::InvalidMessage(format!(
+                "{path} env keys must not be empty"
+            )));
+        }
+        if trimmed.contains(char::is_whitespace) {
+            return Err(ConfigError::InvalidMessage(format!(
+                "{path} env key '{trimmed}' must not contain whitespace"
+            )));
+        }
+    }
+    Ok(())
 }
 
 impl ModuleRuntimeSection {
@@ -1634,6 +1859,7 @@ impl ModuleRuntimeSection {
         }
         self.ports.validate()?;
         self.clients.validate()?;
+        self.rollout.validate()?;
         for prefix in &self.env_passthrough_prefixes {
             let value = prefix.trim();
             if value.is_empty() {
@@ -1652,6 +1878,155 @@ impl ModuleRuntimeSection {
             {
                 return Err(ConfigError::InvalidMessage(format!(
                     "modules.runtime.env_passthrough_prefixes entry '{value}' must contain only A-Z, 0-9 and '_'"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl ModuleRuntimeRolloutSection {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.watch_debounce_ms == 0 {
+            return Err(ConfigError::Invalid(
+                "modules.runtime.rollout.watch_debounce_ms must be > 0",
+            ));
+        }
+        if self.health_check_timeout_ms == 0 {
+            return Err(ConfigError::Invalid(
+                "modules.runtime.rollout.health_check_timeout_ms must be > 0",
+            ));
+        }
+        if self.health_poll_interval_ms == 0 {
+            return Err(ConfigError::Invalid(
+                "modules.runtime.rollout.health_poll_interval_ms must be > 0",
+            ));
+        }
+        if self.inter_restart_delay_ms > self.health_check_timeout_ms {
+            return Err(ConfigError::Invalid(
+                "modules.runtime.rollout.inter_restart_delay_ms must be <= health_check_timeout_ms",
+            ));
+        }
+        self.replacement.validate()?;
+        Ok(())
+    }
+}
+
+impl ModuleRuntimeReplacementSection {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.default_max_surge == 0 {
+            return Err(ConfigError::Invalid(
+                "modules.runtime.rollout.replacement.default_max_surge must be > 0",
+            ));
+        }
+        if self.default_warmup_timeout_ms == 0 {
+            return Err(ConfigError::Invalid(
+                "modules.runtime.rollout.replacement.default_warmup_timeout_ms must be > 0",
+            ));
+        }
+        if self.default_promotion_interval_ms == 0 {
+            return Err(ConfigError::Invalid(
+                "modules.runtime.rollout.replacement.default_promotion_interval_ms must be > 0",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl ModuleServiceRolloutConfig {
+    pub fn is_configured(&self) -> bool {
+        self.strategy.is_some()
+            || self.max_surge.is_some()
+            || self.max_unavailable.is_some()
+            || self.warmup_timeout_ms.is_some()
+            || self.drain_timeout_ms.is_some()
+            || !self.traffic_steps.is_empty()
+            || self.promotion_interval_ms.is_some()
+            || self.stickiness
+            || self.success_criteria.is_configured()
+    }
+
+    pub fn validate(&self, path: &str) -> Result<(), ConfigError> {
+        if let Some(max_surge) = self.max_surge {
+            if max_surge == 0 {
+                return Err(ConfigError::InvalidMessage(format!(
+                    "{path}.rollout.max_surge must be > 0"
+                )));
+            }
+        }
+        if let Some(warmup_timeout_ms) = self.warmup_timeout_ms {
+            if warmup_timeout_ms == 0 {
+                return Err(ConfigError::InvalidMessage(format!(
+                    "{path}.rollout.warmup_timeout_ms must be > 0"
+                )));
+            }
+        }
+        if let Some(drain_timeout_ms) = self.drain_timeout_ms {
+            if drain_timeout_ms == 0 {
+                return Err(ConfigError::InvalidMessage(format!(
+                    "{path}.rollout.drain_timeout_ms must be > 0"
+                )));
+            }
+        }
+        if let Some(promotion_interval_ms) = self.promotion_interval_ms {
+            if promotion_interval_ms == 0 {
+                return Err(ConfigError::InvalidMessage(format!(
+                    "{path}.rollout.promotion_interval_ms must be > 0"
+                )));
+            }
+        }
+        if !self.traffic_steps.is_empty() {
+            let mut previous = 0u8;
+            for step in &self.traffic_steps {
+                if *step == 0 || *step > 100 {
+                    return Err(ConfigError::InvalidMessage(format!(
+                        "{path}.rollout.traffic_steps entries must be between 1 and 100"
+                    )));
+                }
+                if *step < previous {
+                    return Err(ConfigError::InvalidMessage(format!(
+                        "{path}.rollout.traffic_steps must be monotonic ascending"
+                    )));
+                }
+                previous = *step;
+            }
+            if *self.traffic_steps.last().unwrap_or(&100) != 100 {
+                return Err(ConfigError::InvalidMessage(format!(
+                    "{path}.rollout.traffic_steps must end with 100"
+                )));
+            }
+        }
+        self.success_criteria
+            .validate(&format!("{path}.rollout.success_criteria"))?;
+        Ok(())
+    }
+}
+
+impl ModuleRolloutSuccessCriteria {
+    pub fn is_configured(&self) -> bool {
+        self.max_error_rate_percent.is_some()
+            || self.max_p95_latency_ms.is_some()
+            || self.max_retry_rate_percent.is_some()
+            || self.max_queue_backlog.is_some()
+    }
+
+    pub fn validate(&self, path: &str) -> Result<(), ConfigError> {
+        for (field, value) in [
+            ("max_error_rate_percent", self.max_error_rate_percent),
+            ("max_retry_rate_percent", self.max_retry_rate_percent),
+        ] {
+            if let Some(value) = value {
+                if !(0.0..=100.0).contains(&value) {
+                    return Err(ConfigError::InvalidMessage(format!(
+                        "{path}.{field} must be between 0 and 100"
+                    )));
+                }
+            }
+        }
+        if let Some(max_p95_latency_ms) = self.max_p95_latency_ms {
+            if max_p95_latency_ms == 0 {
+                return Err(ConfigError::InvalidMessage(format!(
+                    "{path}.max_p95_latency_ms must be > 0"
                 )));
             }
         }

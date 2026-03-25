@@ -1,6 +1,13 @@
-use std::{env, path::PathBuf, sync::Arc};
+use std::{
+    env,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result};
+use notify::{Config as NotifyConfig, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::infra::db::connector::start_connector_server;
@@ -8,8 +15,8 @@ use crate::infra::http::HTTP_SERVICE_ID;
 use crate::infra::{logging, ssh, telemetry};
 use crate::security::service::ServiceScope;
 use crate::services::{
-    DbConnectorService, ServiceDescriptor, ServiceKind, ServiceSecurityMetadata, ServiceStatus,
-    ServiceTag, ServiceTenantGuard,
+    DbConnectorService, ModuleService, ServiceDescriptor, ServiceKind, ServiceSecurityMetadata,
+    ServiceStatus, ServiceTag, ServiceTenantGuard,
 };
 use crate::utils::messages::boot::{
     config_reload as config_reload_messages,
@@ -129,12 +136,18 @@ async fn initialize_db_connector(ctx: &BootContext) -> Result<()> {
 }
 
 fn spawn_config_reloader(ctx: &BootContext) -> Result<()> {
+    let logging = ctx.logging.clone();
+    let http_server = Arc::clone(&ctx.http_server);
+    let module_service = ctx.services.module_service();
+    let rollout_cfg = ctx.config.modules.runtime.rollout.clone();
+
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
 
-        let logging = ctx.logging.clone();
-        let http_server = Arc::clone(&ctx.http_server);
+        let logging = logging.clone();
+        let http_server = Arc::clone(&http_server);
+        let module_service = module_service.clone();
         tokio::spawn(async move {
             let mut hup = match signal(SignalKind::hangup()) {
                 Ok(signal) => signal,
@@ -149,37 +162,93 @@ fn spawn_config_reloader(ctx: &BootContext) -> Result<()> {
             };
 
             while hup.recv().await.is_some() {
-                match crate::config::load() {
-                    Ok(new_cfg) => {
-                        if let Err(err) =
-                            logging::reload(&logging, &new_cfg.telemetry.tracing.level)
-                        {
-                            tracing::warn!(
-                                error = %err,
-                                "{}",
-                                config_reload_messages::LOG_LEVEL_UPDATE_FAILED
-                            );
+                telemetry::record_counter("config.reload.signal_total", 1);
+                apply_runtime_config_reload(
+                    &logging,
+                    &http_server,
+                    module_service.clone(),
+                    "signal",
+                )
+                .await;
+            }
+        });
+    }
+
+    let watch_paths = config_watch_paths();
+    if rollout_cfg.watch_config && !watch_paths.is_empty() {
+        let logging = logging.clone();
+        let http_server = Arc::clone(&http_server);
+        let debounce = Duration::from_millis(rollout_cfg.watch_debounce_ms);
+        tokio::spawn(async move {
+            let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+            let mut watcher = match RecommendedWatcher::new(
+                move |res| {
+                    let _ = event_tx.send(res);
+                },
+                NotifyConfig::default(),
+            ) {
+                Ok(watcher) => watcher,
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "{}",
+                        config_reload_messages::CONFIG_RELOAD_FAILED
+                    );
+                    return;
+                }
+            };
+
+            for path in &watch_paths {
+                let mode = if path.is_dir() {
+                    RecursiveMode::Recursive
+                } else {
+                    RecursiveMode::NonRecursive
+                };
+                if let Err(err) = watcher.watch(path, mode) {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %err,
+                        "{}",
+                        config_reload_messages::CONFIG_RELOAD_FAILED
+                    );
+                }
+            }
+
+            let mut last_reload = Instant::now()
+                .checked_sub(debounce)
+                .unwrap_or_else(Instant::now);
+
+            while let Some(event) = event_rx.recv().await {
+                match event {
+                    Ok(event) if config_event_requires_reload(&event.kind) => {
+                        if last_reload.elapsed() < debounce {
+                            continue;
                         }
-                        telemetry::reload(&new_cfg);
-                        if let Err(err) = http_server.reload_tls(&new_cfg.server.http.tls).await {
-                            tracing::warn!(
-                                error = %err,
-                                "{}",
-                                config_reload_messages::TLS_RELOAD_FAILED
-                            );
-                        }
-                        tracing::info!("{}", config_reload_messages::CONFIG_RELOADED);
+                        last_reload = Instant::now();
+                        telemetry::record_counter("config.reload.filesystem_total", 1);
+                        apply_runtime_config_reload(
+                            &logging,
+                            &http_server,
+                            module_service.clone(),
+                            "filesystem",
+                        )
+                        .await;
                     }
+                    Ok(_) => {}
                     Err(err) => {
                         tracing::warn!(
                             error = %err,
                             "{}",
                             config_reload_messages::CONFIG_RELOAD_FAILED
-                        )
+                        );
                     }
                 }
             }
         });
+    } else if !rollout_cfg.watch_config {
+        tracing::info!(
+            "automatic config file watching disabled by modules.runtime.rollout.watch_config"
+        );
     }
 
     #[cfg(not(unix))]
@@ -188,4 +257,109 @@ fn spawn_config_reloader(ctx: &BootContext) -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn apply_runtime_config_reload(
+    logging_handle: &logging::ReloadHandle,
+    http_server: &Arc<crate::infra::http::HttpServer>,
+    module_service: Option<Arc<ModuleService>>,
+    trigger: &str,
+) {
+    match crate::config::load() {
+        Ok(new_cfg) => {
+            if let Err(err) = logging::reload(logging_handle, &new_cfg.telemetry.tracing.level) {
+                tracing::warn!(
+                    error = %err,
+                    "{}",
+                    config_reload_messages::LOG_LEVEL_UPDATE_FAILED
+                );
+            }
+            telemetry::reload(&new_cfg);
+            if let Err(err) = http_server.reload_tls(&new_cfg.server.http.tls).await {
+                tracing::warn!(
+                    error = %err,
+                    "{}",
+                    config_reload_messages::TLS_RELOAD_FAILED
+                );
+            }
+
+            if let Some(service) = module_service {
+                match crate::services::module::ModuleServiceOverrides::from_config(
+                    &new_cfg.modules.services,
+                    &new_cfg.modules.service_profiles,
+                ) {
+                    Ok(overrides) => match service
+                        .reload_service_overrides(
+                            overrides,
+                            new_cfg.modules.runtime.rollout.restart_on_override_change,
+                        )
+                        .await
+                    {
+                        Ok(report) => {
+                            tracing::info!(
+                                trigger,
+                                status = ?report.status,
+                                restarted = report.restarted_modules.len(),
+                                rolled_back = report.rollback_restarted_modules.len(),
+                                "module overrides reloaded automatically"
+                            );
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                trigger,
+                                error = %err,
+                                "automatic module override reload failed"
+                            );
+                        }
+                    },
+                    Err(err) => {
+                        tracing::warn!(
+                            trigger,
+                            error = %err,
+                            "automatic module override config invalid"
+                        );
+                    }
+                }
+            }
+
+            telemetry::record_counter("config.reload.success_total", 1);
+            tracing::info!(trigger, "{}", config_reload_messages::CONFIG_RELOADED);
+        }
+        Err(err) => {
+            telemetry::record_counter("config.reload.failure_total", 1);
+            tracing::warn!(
+                trigger,
+                error = %err,
+                "{}",
+                config_reload_messages::CONFIG_RELOAD_FAILED
+            )
+        }
+    }
+}
+
+fn config_event_requires_reload(kind: &EventKind) -> bool {
+    matches!(
+        kind,
+        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) | EventKind::Any
+    )
+}
+
+fn config_watch_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    push_existing_path(&mut paths, Path::new("config"));
+    push_existing_path(&mut paths, Path::new("bin/.fenrir-profile"));
+    push_existing_path(&mut paths, Path::new("secrets/.env"));
+    if let Some(path) = env::var_os("FENRIR_ENV_FILE") {
+        push_existing_path(&mut paths, Path::new(&path));
+    }
+    if let Some(path) = env::var_os("FENRIR_CONFIG_FILE") {
+        push_existing_path(&mut paths, Path::new(&path));
+    }
+    paths
+}
+
+fn push_existing_path(paths: &mut Vec<PathBuf>, path: &Path) {
+    if path.exists() && !paths.iter().any(|existing| existing == path) {
+        paths.push(path.to_path_buf());
+    }
 }

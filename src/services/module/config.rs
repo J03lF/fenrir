@@ -4,7 +4,8 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use crate::config::{
-    ConfigError, ModuleServiceOverride, ModuleServiceProfile, ModuleServiceTenantMode,
+    ConfigError, ModuleServiceOverride, ModuleServiceProfile, ModuleServiceRolloutConfig,
+    ModuleServiceTenantMode,
 };
 use crate::security::service::{ServiceRole, ServiceScope};
 use crate::services::types::{ServiceIngressAccess, ServiceRateLimit, ServiceTenantGuard};
@@ -14,6 +15,8 @@ use crate::services::{ServiceDescriptorOwned, ServiceIngressMetadata, ServiceSec
 pub struct ModuleServiceOverrides {
     env: HashMap<String, Vec<ModuleEnvVar>>,
     security: HashMap<String, ServiceSecurityOverride>,
+    replicas: HashMap<String, usize>,
+    rollout: HashMap<String, ModuleServiceRolloutConfig>,
     profiles: HashMap<String, ModuleServiceProfileResolved>,
 }
 
@@ -24,7 +27,20 @@ impl ModuleServiceOverrides {
     ) -> Result<Self, ConfigError> {
         let mut env_map: HashMap<String, Vec<ModuleEnvVar>> = HashMap::new();
         let mut security_map: HashMap<String, ServiceSecurityOverride> = HashMap::new();
+        let mut replica_map: HashMap<String, usize> = HashMap::new();
+        let mut rollout_map: HashMap<String, ModuleServiceRolloutConfig> = HashMap::new();
         let mut profile_map: HashMap<String, ModuleServiceProfileResolved> = HashMap::new();
+
+        for (profile_name_raw, profile) in profiles {
+            let profile_name = profile_name_raw.trim();
+            if profile_name.is_empty() {
+                return Err(ConfigError::Invalid(
+                    "modules.service_profiles keys must not be empty",
+                ));
+            }
+            let resolved = ModuleServiceProfileResolved::from_profile(profile_name, profile)?;
+            profile_map.insert(profile_name.to_string(), resolved);
+        }
 
         for (service_id_raw, cfg) in entries {
             let service_id = service_id_raw.trim();
@@ -33,7 +49,37 @@ impl ModuleServiceOverrides {
                     "modules.services keys must not be empty",
                 ));
             }
+
             let mut vars = Vec::new();
+            let mut combined_security = ServiceSecurityOverride::default();
+            let mut has_security_override = false;
+            let mut desired_replicas = None;
+            let mut rollout_config = ModuleServiceRolloutConfig::default();
+
+            if let Some(profile_name) = cfg
+                .profile
+                .as_ref()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+            {
+                let profile = profile_map.get(profile_name).ok_or_else(|| {
+                    ConfigError::InvalidMessage(format!(
+                        "modules.services.{service_id}.profile references unknown service profile '{profile_name}'"
+                    ))
+                })?;
+                vars.extend(profile.env_vars().iter().cloned());
+                desired_replicas = profile.replicas();
+                rollout_config = merge_rollout_config(&rollout_config, profile.rollout());
+                if let Some(profile_security) = profile.security_override() {
+                    combined_security = profile_security;
+                    has_security_override = true;
+                }
+            }
+
+            if let Some(value) = cfg.replicas {
+                desired_replicas = Some(value);
+            }
+
             for (key, value) in &cfg.env {
                 vars.push(ModuleEnvVar::new(service_id, key, value, false)?);
             }
@@ -47,26 +93,32 @@ impl ModuleServiceOverrides {
             if let Some(override_policy) =
                 ServiceSecurityOverride::from_policy(service_id, &cfg.policy)?
             {
-                security_map.insert(service_id.to_string(), override_policy);
+                combined_security = override_policy.apply_override(combined_security);
+                has_security_override = true;
             }
-        }
-
-        for (profile_name_raw, profile) in profiles {
-            let profile_name = profile_name_raw.trim();
-            if profile_name.is_empty() {
-                return Err(ConfigError::Invalid(
-                    "modules.service_profiles keys must not be empty",
-                ));
+            if has_security_override {
+                security_map.insert(service_id.to_string(), combined_security);
             }
-            let resolved = ModuleServiceProfileResolved::from_profile(profile_name, profile)?;
-            profile_map.insert(profile_name.to_string(), resolved);
+            if let Some(replicas) = desired_replicas {
+                replica_map.insert(service_id.to_string(), replicas);
+            }
+            rollout_config = merge_rollout_config(&rollout_config, &cfg.rollout);
+            if rollout_config.is_configured() {
+                rollout_map.insert(service_id.to_string(), rollout_config);
+            }
         }
 
         Ok(Self {
             env: env_map,
             security: security_map,
+            replicas: replica_map,
+            rollout: rollout_map,
             profiles: profile_map,
         })
+    }
+
+    pub fn env_snapshot(&self) -> HashMap<String, Vec<ModuleEnvVar>> {
+        self.env.clone()
     }
 
     pub fn env_for(&self, service_id: &str) -> Vec<ModuleEnvVar> {
@@ -88,6 +140,24 @@ impl ModuleServiceOverrides {
         None
     }
 
+    pub fn desired_replicas_for(&self, service_id: &str) -> Option<usize> {
+        for candidate in service_candidates(service_id) {
+            if let Some(value) = self.replicas.get(candidate) {
+                return Some(*value);
+            }
+        }
+        None
+    }
+
+    pub fn rollout_for(&self, service_id: &str) -> Option<ModuleServiceRolloutConfig> {
+        for candidate in service_candidates(service_id) {
+            if let Some(value) = self.rollout.get(candidate) {
+                return Some(value.clone());
+            }
+        }
+        None
+    }
+
     pub fn profile(&self, name: &str) -> Option<ModuleServiceProfileResolved> {
         self.profiles.get(name).cloned()
     }
@@ -101,7 +171,50 @@ fn service_candidates(service_id: &str) -> Vec<&str> {
     parts
 }
 
-#[derive(Clone, Debug)]
+fn merge_rollout_config(
+    base: &ModuleServiceRolloutConfig,
+    override_cfg: &ModuleServiceRolloutConfig,
+) -> ModuleServiceRolloutConfig {
+    ModuleServiceRolloutConfig {
+        strategy: override_cfg.strategy.or(base.strategy),
+        max_surge: override_cfg.max_surge.or(base.max_surge),
+        max_unavailable: override_cfg.max_unavailable.or(base.max_unavailable),
+        warmup_timeout_ms: override_cfg.warmup_timeout_ms.or(base.warmup_timeout_ms),
+        drain_timeout_ms: override_cfg.drain_timeout_ms.or(base.drain_timeout_ms),
+        traffic_steps: if override_cfg.traffic_steps.is_empty() {
+            base.traffic_steps.clone()
+        } else {
+            override_cfg.traffic_steps.clone()
+        },
+        promotion_interval_ms: override_cfg
+            .promotion_interval_ms
+            .or(base.promotion_interval_ms),
+        rollback_on_regression: override_cfg.rollback_on_regression,
+        stickiness: override_cfg.stickiness || base.stickiness,
+        success_criteria: merge_success_criteria(
+            &base.success_criteria,
+            &override_cfg.success_criteria,
+        ),
+    }
+}
+
+fn merge_success_criteria(
+    base: &crate::config::ModuleRolloutSuccessCriteria,
+    override_cfg: &crate::config::ModuleRolloutSuccessCriteria,
+) -> crate::config::ModuleRolloutSuccessCriteria {
+    crate::config::ModuleRolloutSuccessCriteria {
+        max_error_rate_percent: override_cfg
+            .max_error_rate_percent
+            .or(base.max_error_rate_percent),
+        max_p95_latency_ms: override_cfg.max_p95_latency_ms.or(base.max_p95_latency_ms),
+        max_retry_rate_percent: override_cfg
+            .max_retry_rate_percent
+            .or(base.max_retry_rate_percent),
+        max_queue_backlog: override_cfg.max_queue_backlog.or(base.max_queue_backlog),
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModuleEnvVar {
     key: String,
     source: ModuleEnvSource,
@@ -159,7 +272,7 @@ impl ModuleEnvVar {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum ModuleEnvSource {
     Literal(String),
     Env(String),
@@ -401,10 +514,22 @@ impl ServiceSecurityOverride {
         }
         base
     }
+
+    fn apply_override(self, base: ServiceSecurityOverride) -> ServiceSecurityOverride {
+        ServiceSecurityOverride {
+            internal_only: self.internal_only.or(base.internal_only),
+            allowed_roles: self.allowed_roles.or(base.allowed_roles),
+            required_scopes: self.required_scopes.or(base.required_scopes),
+            tenant_guard: self.tenant_guard.or(base.tenant_guard),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct ModuleServiceProfileResolved {
+    pub desired_replicas: Option<usize>,
+    pub rollout: ModuleServiceRolloutConfig,
+    pub env: Vec<ModuleEnvVar>,
     pub internal_only: Option<bool>,
     pub allowed_roles: Option<Vec<ServiceRole>>,
     pub required_scopes: Option<Vec<ServiceScope>>,
@@ -419,6 +544,18 @@ impl ModuleServiceProfileResolved {
         profile: &ModuleServiceProfile,
     ) -> Result<Self, ConfigError> {
         let mut resolved = ModuleServiceProfileResolved::default();
+        resolved.desired_replicas = profile.replicas;
+        resolved.rollout = profile.rollout.clone();
+        for (key, value) in &profile.env {
+            resolved
+                .env
+                .push(ModuleEnvVar::new(profile_name, key, value, false)?);
+        }
+        for (key, value) in &profile.secrets {
+            resolved
+                .env
+                .push(ModuleEnvVar::new(profile_name, key, value, true)?);
+        }
         if let Some(value) = profile.internal_only {
             resolved.internal_only = Some(value);
         }
@@ -532,5 +669,35 @@ impl ModuleServiceProfileResolved {
         }
         descriptor.ingress = Some(ingress);
         descriptor
+    }
+
+    pub fn security_override(&self) -> Option<ServiceSecurityOverride> {
+        let override_security = ServiceSecurityOverride {
+            internal_only: self.internal_only,
+            allowed_roles: self.allowed_roles.clone(),
+            required_scopes: self.required_scopes.clone(),
+            tenant_guard: self.tenant_guard.clone(),
+        };
+        if override_security.internal_only.is_some()
+            || override_security.allowed_roles.is_some()
+            || override_security.required_scopes.is_some()
+            || override_security.tenant_guard.is_some()
+        {
+            Some(override_security)
+        } else {
+            None
+        }
+    }
+
+    pub fn env_vars(&self) -> &[ModuleEnvVar] {
+        &self.env
+    }
+
+    pub fn replicas(&self) -> Option<usize> {
+        self.desired_replicas
+    }
+
+    pub fn rollout(&self) -> &ModuleServiceRolloutConfig {
+        &self.rollout
     }
 }

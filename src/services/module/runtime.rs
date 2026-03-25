@@ -31,8 +31,9 @@ use super::config::ModuleEnvResolutionError;
 use super::reported::{ReportedServiceEntry, ReportedServicesPayload};
 use super::service::{MODULE_SERVICE_MANIFEST_PATH, RESERVED_ENV_KEYS};
 use super::{
-    ModuleClientSettings, ModuleService, ModuleStartupPhaseReport, ModuleStartupPhaseStatus,
-    ModuleStartupReport, ModuleStartupStatus, ModuleStartupTrigger,
+    ModuleClientSettings, ModuleRollingRestartReport, ModuleRuntimeInstanceSnapshot, ModuleService,
+    ModuleStartupPhaseReport, ModuleStartupPhaseStatus, ModuleStartupReport, ModuleStartupStatus,
+    ModuleStartupTrigger,
 };
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
@@ -837,6 +838,7 @@ impl ModuleService {
             "FENRIR_MODULE_START_RUNTIME_TIMEOUT_MS",
             START_RUNTIME_TIMEOUT_MS_DEFAULT,
         );
+        let runtime_config = config.clone();
         let runtime_result = tokio::time::timeout(
             Duration::from_millis(runtime_timeout_ms),
             self.runtime.start(config),
@@ -964,6 +966,23 @@ impl ModuleService {
                 return Err(timeout_err);
             }
         };
+
+        let desired_replicas = self.desired_replica_count(&runtime_info.module_id).max(1);
+        if desired_replicas > 1 {
+            if let Err(err) = self
+                .runtime
+                .reconcile_instances(runtime_config.clone(), desired_replicas)
+                .await
+            {
+                self.update_module_service_status(
+                    &runtime_info.module_id,
+                    &manifest,
+                    ServiceStatus::Failed,
+                    Some(runtime_notes::start_failed(err.to_string())),
+                );
+                return Err(err);
+            }
+        }
 
         if let Some(token) = issued_token {
             self.audit_runtime_token_refresh(&runtime_info.module_id, &token);
@@ -1181,6 +1200,8 @@ impl ModuleService {
         self.revoke_service_token_if_any(module_id, "module-stop")
             .await;
         self.clear_health(module_id);
+        self.diagnostics
+            .clear_runtime_metrics(&Self::module_service_id(module_id));
         self.clear_reported_services(module_id).await;
         self.stop_gateway_if_any(module_id).await;
         Ok(())
@@ -1193,8 +1214,29 @@ impl ModuleService {
         self.runtime.status(module_id).await
     }
 
+    pub async fn runtime_instances(
+        &self,
+        module_id: &ModuleId,
+    ) -> Result<Vec<ModuleRuntimeInstanceSnapshot>, ModuleRuntimeError> {
+        let infos = self.runtime.list_instances(module_id).await?;
+        Ok(infos
+            .into_iter()
+            .map(ModuleRuntimeInstanceSnapshot::from_instance_info)
+            .collect())
+    }
+
     pub async fn list_running(&self) -> Result<Vec<ModuleRuntimeInfo>, ModuleRuntimeError> {
         self.runtime.list_running().await
+    }
+
+    pub async fn list_runtime_instances(
+        &self,
+    ) -> Result<Vec<ModuleRuntimeInstanceSnapshot>, ModuleRuntimeError> {
+        let infos = self.runtime.list_running().await?;
+        Ok(infos
+            .into_iter()
+            .map(ModuleRuntimeInstanceSnapshot::from_runtime_info)
+            .collect())
     }
 
     pub async fn restart(
@@ -1247,6 +1289,14 @@ impl ModuleService {
             .map(|info| info.restart_count.saturating_add(1))
             .unwrap_or(0);
 
+        self.update_module_service_status(
+            module_id,
+            &installed.manifest,
+            ServiceStatus::Standby,
+            Some("draining for controlled restart".to_string()),
+        );
+        sleep(self.rollout_settings.drain_before_restart).await;
+
         self.stop(module_id).await?;
 
         let mut info = self
@@ -1268,6 +1318,223 @@ impl ModuleService {
             Some(Self::runtime_status_note(&info)),
         );
         Ok(info)
+    }
+
+    pub async fn rolling_restart(
+        &self,
+        module_id: &ModuleId,
+    ) -> Result<ModuleRollingRestartReport, ModuleRuntimeError> {
+        let installed = self
+            .storage
+            .load(module_id)
+            .await
+            .map_err(|e| ModuleRuntimeError::InvalidState(e.to_string()))?
+            .ok_or_else(|| ModuleRuntimeError::NotInstalled {
+                module_id: module_id.to_string(),
+            })?;
+        let snapshots = self.runtime_instances(module_id).await?;
+        if snapshots.is_empty() {
+            return Err(ModuleRuntimeError::NotRunning {
+                module_id: module_id.to_string(),
+            });
+        }
+
+        let mut restarted_instances = Vec::new();
+        let mut health_verified = true;
+        let desired_instances = snapshots.len();
+        let env_vars = self.runtime.env(module_id).await.unwrap_or_default();
+        for (index, snapshot) in snapshots.iter().enumerate() {
+            let info = if desired_instances > 1 {
+                self.surge_replace_instance(
+                    module_id,
+                    &installed.manifest,
+                    snapshot,
+                    desired_instances,
+                    env_vars.clone(),
+                )
+                .await?
+            } else {
+                if snapshot.port.is_some() {
+                    self.update_instance_health(
+                        module_id,
+                        &snapshot.instance_id,
+                        false,
+                        Some("single-instance restart in progress".to_string()),
+                    );
+                }
+                let info = self
+                    .runtime
+                    .restart_instance(module_id, &snapshot.instance_id)
+                    .await?;
+                let _ = self
+                    .refresh_reported_services(module_id, &installed.manifest, info.port)
+                    .await;
+                info
+            };
+            let health_result = self
+                .verify_module_rollout_health(module_id, info.port)
+                .await;
+            if health_result.is_err() {
+                health_verified = false;
+            }
+            restarted_instances.push(ModuleRuntimeInstanceSnapshot {
+                instance_id: snapshot.instance_id.clone(),
+                primary: snapshot.primary,
+                ..ModuleRuntimeInstanceSnapshot::from_runtime_info(info)
+            });
+            if index + 1 < snapshots.len() && !self.rollout_settings.inter_restart_delay.is_zero() {
+                sleep(self.rollout_settings.inter_restart_delay).await;
+            }
+            if !health_verified && self.rollout_settings.abort_on_first_failure {
+                break;
+            }
+        }
+
+        let note = if snapshots.len() == 1 {
+            "single-instance restart executed; zero-downtime replacement requires replicas >= 2"
+                .to_string()
+        } else if health_verified {
+            format!(
+                "rolling replace completed across {} instances without dropping replica capacity",
+                restarted_instances.len()
+            )
+        } else {
+            format!(
+                "rolling replace aborted after {} instances because a health check failed",
+                restarted_instances.len()
+            )
+        };
+
+        Ok(ModuleRollingRestartReport {
+            module_id: module_id.clone(),
+            restarted_instances,
+            health_verified,
+            note,
+        })
+    }
+
+    async fn surge_replace_instance(
+        &self,
+        module_id: &ModuleId,
+        manifest: &ModuleManifest,
+        target: &ModuleRuntimeInstanceSnapshot,
+        desired_instances: usize,
+        env_vars: Vec<(String, String)>,
+    ) -> Result<ModuleRuntimeInfo, ModuleRuntimeError> {
+        let before = self.runtime.list_instances(module_id).await?;
+        let before_ids = before
+            .iter()
+            .map(|instance| instance.instance_id.clone())
+            .collect::<HashSet<_>>();
+        let surged = self
+            .runtime
+            .reconcile_instances(
+                ModuleStartConfig {
+                    module_id: module_id.clone(),
+                    port: None,
+                    env_vars: env_vars.clone(),
+                    auto_restart: false,
+                },
+                desired_instances.saturating_add(1),
+            )
+            .await?;
+
+        let surge_instance = surged
+            .iter()
+            .find(|instance| !before_ids.contains(&instance.instance_id))
+            .cloned()
+            .ok_or_else(|| {
+                ModuleRuntimeError::InvalidState(format!(
+                    "failed to identify surge instance for module {module_id}"
+                ))
+            })?;
+
+        let surge_health = self
+            .verify_module_rollout_health(module_id, surge_instance.runtime.port)
+            .await;
+        if surge_health.is_err() {
+            if surge_instance.runtime.port.is_some() {
+                self.update_instance_health(
+                    module_id,
+                    &surge_instance.instance_id,
+                    false,
+                    Some("surge instance failed readiness".to_string()),
+                );
+            }
+            let _ = self
+                .runtime
+                .reconcile_instances(
+                    ModuleStartConfig {
+                        module_id: module_id.clone(),
+                        port: None,
+                        env_vars,
+                        auto_restart: false,
+                    },
+                    desired_instances,
+                )
+                .await;
+            return Err(ModuleRuntimeError::InvalidState(
+                surge_health.unwrap_or_else(|err| err),
+            ));
+        }
+        if surge_instance.runtime.port.is_some() {
+            self.update_instance_health(module_id, &surge_instance.instance_id, true, None);
+        }
+
+        if target.port.is_some() {
+            self.update_instance_health(
+                module_id,
+                &target.instance_id,
+                false,
+                Some("instance draining for surge replacement".to_string()),
+            );
+        }
+
+        let restarted = self
+            .runtime
+            .restart_instance(module_id, &target.instance_id)
+            .await?;
+        let _ = self
+            .refresh_reported_services(module_id, manifest, restarted.port)
+            .await;
+
+        let restart_health = self
+            .verify_module_rollout_health(module_id, restarted.port)
+            .await;
+        if restart_health.is_err() {
+            if restarted.port.is_some() {
+                self.update_instance_health(
+                    module_id,
+                    &target.instance_id,
+                    false,
+                    Some("restarted instance failed readiness".to_string()),
+                );
+            }
+            return Err(ModuleRuntimeError::InvalidState(
+                restart_health.unwrap_or_else(|err| err),
+            ));
+        }
+        if restarted.port.is_some() {
+            self.update_instance_health(module_id, &target.instance_id, true, None);
+        }
+
+        let _ = self
+            .runtime
+            .reconcile_instances(
+                ModuleStartConfig {
+                    module_id: module_id.clone(),
+                    port: None,
+                    env_vars,
+                    auto_restart: false,
+                },
+                desired_instances,
+            )
+            .await?;
+        let _ = self
+            .refresh_reported_services(module_id, manifest, restarted.port)
+            .await;
+
+        Ok(restarted)
     }
 
     pub async fn logs(
@@ -1306,7 +1573,7 @@ impl ModuleService {
             )));
         };
         let _ = self
-            .apply_reported_services(module_id, &installed.manifest, port, payload)
+            .apply_reported_services(module_id, &installed.manifest, vec![(port, payload)])
             .await?;
         Ok(())
     }
@@ -1316,6 +1583,12 @@ impl ModuleService {
         module_id: &ModuleId,
     ) -> Result<Vec<(String, String)>, ModuleRuntimeError> {
         self.runtime.env(module_id).await
+    }
+
+    fn desired_replica_count(&self, module_id: &ModuleId) -> usize {
+        let service_id = Self::module_service_id(module_id);
+        self.with_overrides(|config| config.desired_replicas_for(&service_id))
+            .unwrap_or(1)
     }
 
     pub(super) async fn ensure_gateway_endpoint(
@@ -1462,7 +1735,7 @@ impl ModuleService {
         env: &mut Vec<(String, String)>,
         service_id: &str,
     ) -> Result<(), ModuleRuntimeError> {
-        let overrides = self.overrides.env_for(service_id);
+        let overrides = self.with_overrides(|config| config.env_for(service_id));
         if overrides.is_empty() {
             return Ok(());
         }
@@ -1614,62 +1887,60 @@ impl ModuleService {
         &self,
         module_id: &ModuleId,
         manifest: &ModuleManifest,
-        port: Option<u16>,
+        preferred_port: Option<u16>,
     ) -> Result<bool, ModuleRuntimeError> {
-        let Some(port) = port else {
+        let mut ports = self
+            .runtime
+            .list_instances(module_id)
+            .await?
+            .into_iter()
+            .filter(|instance| {
+                matches!(instance.runtime.status, ModuleRuntimeStatus::Running)
+                    && instance.runtime.port.is_some()
+            })
+            .filter_map(|instance| instance.runtime.port)
+            .collect::<Vec<_>>();
+        if let Some(preferred_port) = preferred_port {
+            ports.sort_by_key(|port| if *port == preferred_port { 0 } else { 1 });
+            ports.dedup();
+        }
+        if ports.is_empty() {
             self.clear_reported_services(module_id).await;
             return Ok(false);
-        };
+        }
 
         let attempt_count = self.client_settings.retries.saturating_add(1).max(2);
         let mut attempt = 0u32;
         let mut last_error: Option<String> = None;
 
         while attempt < attempt_count {
-            match self.fetch_reported_services(module_id, port).await {
-                Ok(Some(payload)) => {
-                    if self
-                        .apply_reported_services(module_id, manifest, port, payload)
-                        .await?
-                    {
-                        return Ok(true);
-                    }
-                    break;
-                }
-                Ok(None) => {
-                    if attempt + 1 < attempt_count {
-                        tracing::debug!(
-                            module = %module_id,
-                            attempt = attempt + 1,
-                            "module service manifest not yet reachable, retrying"
-                        );
-                        sleep(self.client_settings.backoff).await;
-                        attempt += 1;
-                        continue;
+            let mut manifests = Vec::new();
+            for port in &ports {
+                match self.fetch_reported_services(module_id, *port).await {
+                    Ok(Some(payload)) => manifests.push((*port, payload)),
+                    Ok(None) => {}
+                    Err(err) => {
+                        last_error = Some(err.to_string());
                     }
                 }
-                Err(err) => {
-                    let message = err.to_string();
-                    if attempt + 1 < attempt_count {
-                        tracing::debug!(
-                            module = %module_id,
-                            error = %message,
-                            attempt = attempt + 1,
-                            "failed to fetch module service manifest, retrying"
-                        );
-                        last_error = Some(message);
-                        sleep(self.client_settings.backoff).await;
-                        attempt += 1;
-                        continue;
-                    } else {
-                        tracing::debug!(
-                            module = %module_id,
-                            error = %message,
-                            "giving up on module service manifest fetch"
-                        );
-                        last_error = Some(message);
-                    }
-                }
+            }
+
+            if self
+                .apply_reported_services(module_id, manifest, manifests)
+                .await?
+            {
+                return Ok(true);
+            }
+
+            if attempt + 1 < attempt_count {
+                tracing::debug!(
+                    module = %module_id,
+                    attempt = attempt + 1,
+                    "module service manifest not yet reachable on any running instance, retrying"
+                );
+                sleep(self.client_settings.backoff).await;
+                attempt += 1;
+                continue;
             }
             break;
         }
@@ -1819,10 +2090,13 @@ impl ModuleService {
         &self,
         module_id: &ModuleId,
         manifest: &ModuleManifest,
-        port: u16,
-        payload: ReportedServicesPayload,
+        payloads: Vec<(u16, ReportedServicesPayload)>,
     ) -> Result<bool, ModuleRuntimeError> {
-        if payload.services.is_empty() {
+        let payloads = payloads
+            .into_iter()
+            .filter(|(_, payload)| !payload.services.is_empty())
+            .collect::<Vec<_>>();
+        if payloads.is_empty() {
             self.clear_reported_services(module_id).await;
             return Ok(false);
         }
@@ -1830,11 +2104,12 @@ impl ModuleService {
         self.clear_reported_services(module_id).await;
 
         let mut registered = Vec::new();
-        let mut endpoints = Vec::new();
+        let mut endpoints: HashMap<String, Vec<String>> = HashMap::new();
+        let (primary_port, primary_payload) = &payloads[0];
 
-        for entry in payload.services {
+        for entry in &primary_payload.services {
             match self
-                .build_descriptor_from_report(module_id, manifest, port, entry)
+                .build_descriptor_from_report(module_id, manifest, *primary_port, entry.clone())
                 .await
             {
                 Ok((descriptor, endpoint, suffix)) => {
@@ -1845,10 +2120,10 @@ impl ModuleService {
                         Some(format!("endpoint {endpoint}")),
                     );
                     registered.push(descriptor_id.clone());
-                    endpoints.push((
+                    endpoints.insert(
                         Self::module_runtime_service_uri(module_id, &suffix),
-                        endpoint,
-                    ));
+                        vec![endpoint],
+                    );
                 }
                 Err(err) => {
                     tracing::warn!(
@@ -1864,6 +2139,21 @@ impl ModuleService {
             return Ok(false);
         }
 
+        for (port, payload) in payloads.iter().skip(1) {
+            for entry in &payload.services {
+                if entry.service_id.trim().is_empty() {
+                    continue;
+                }
+                let uri = Self::module_runtime_service_uri(module_id, entry.service_id.trim());
+                let endpoint =
+                    Self::reported_service_endpoint(*port, entry.route_prefix.as_deref());
+                let entry_endpoints = endpoints.entry(uri).or_default();
+                if !entry_endpoints.iter().any(|existing| existing == &endpoint) {
+                    entry_endpoints.push(endpoint);
+                }
+            }
+        }
+
         {
             let mut guard = self.runtime_services.write().await;
             guard.insert(module_id.clone(), registered);
@@ -1873,8 +2163,9 @@ impl ModuleService {
             let prefix = format!("service://module:{}::", module_id);
             let mut guard = self.service_endpoints.write().await;
             guard.retain(|uri, _| !uri.starts_with(&prefix));
-            for (uri, endpoint) in endpoints {
-                guard.insert(uri, endpoint);
+            for (uri, mut endpoint_list) in endpoints {
+                endpoint_list.sort();
+                guard.insert(uri, endpoint_list);
             }
         }
 
@@ -1951,7 +2242,8 @@ impl ModuleService {
         descriptor = descriptor.with_security(security);
 
         if let Some(profile_name) = entry.profile.as_deref() {
-            if let Some(profile) = self.overrides.profile(profile_name) {
+            if let Some(profile) = self.with_overrides(|overrides| overrides.profile(profile_name))
+            {
                 descriptor = profile.apply(descriptor);
             } else {
                 tracing::warn!(
@@ -1968,9 +2260,17 @@ impl ModuleService {
             .as_ref()
             .and_then(|ing| ing.route_prefix.clone())
             .unwrap_or_else(|| "/".to_string());
-        let endpoint = format!("http://127.0.0.1:{port}{route}", route = route_base);
+        let endpoint = Self::reported_service_endpoint(port, Some(&route_base));
 
         Ok((descriptor, endpoint, suffix_owned))
+    }
+
+    fn reported_service_endpoint(port: u16, route_prefix: Option<&str>) -> String {
+        let route = route_prefix
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("/");
+        format!("http://127.0.0.1:{port}{route}")
     }
 
     pub(super) async fn clear_reported_services(&self, module_id: &ModuleId) {
@@ -1999,9 +2299,10 @@ impl ModuleService {
             let guard = self.service_endpoints.read().await;
             guard
                 .iter()
-                .map(|(uri, endpoint)| ServiceSnapshotEntry {
+                .map(|(uri, endpoints)| ServiceSnapshotEntry {
                     uri: uri.clone(),
-                    endpoint: endpoint.clone(),
+                    endpoint: endpoints.first().cloned().unwrap_or_default(),
+                    endpoints: endpoints.clone(),
                 })
                 .collect()
         };
@@ -2032,6 +2333,7 @@ struct ServiceSnapshotFile {
 struct ServiceSnapshotEntry {
     uri: String,
     endpoint: String,
+    endpoints: Vec<String>,
 }
 
 fn map_kind(value: Option<&str>) -> ServiceKind {

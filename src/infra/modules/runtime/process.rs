@@ -26,8 +26,8 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
 use crate::domain::module::{
-    ModuleId, ModuleRuntimeError, ModuleRuntimeInfo, ModuleRuntimeKind, ModuleRuntimePort,
-    ModuleRuntimeStatus, ModuleStartConfig, ModuleStoragePort, ModuleVersion,
+    ModuleId, ModuleRuntimeError, ModuleRuntimeInfo, ModuleRuntimeInstanceInfo, ModuleRuntimeKind,
+    ModuleRuntimePort, ModuleRuntimeStatus, ModuleStartConfig, ModuleStoragePort, ModuleVersion,
 };
 use crate::services::ServiceDiagnostics;
 use crate::utils::messages;
@@ -61,11 +61,15 @@ const RUNTIME_MANIFEST_PATH: &str = ".fenrir/runtime.toml";
 const PROCESS_TERMINATE_GRACE_MS: u64 = 2_000;
 const PROCESS_FORCE_GRACE_MS: u64 = 1_000;
 const PROCESS_EXIT_POLL_MS: u64 = 100;
+const PRIMARY_INSTANCE_SUFFIX: &str = "primary";
+const REPLICA_INSTANCE_PREFIX: &str = "replica";
 
 #[derive(Debug, Deserialize)]
 struct RuntimeManifest {
     #[serde(default)]
     runtime: RuntimeManifestSection,
+    #[serde(default)]
+    migrations: Option<RuntimeMigrationsSection>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -74,6 +78,17 @@ struct RuntimeManifestSection {
     mode: RuntimeMode,
     #[serde(default)]
     static_site: Option<RuntimeStaticSiteSection>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RuntimeMigrationsSection {
+    /// Relative path to the migration directory within the module (default: "migrations").
+    #[serde(default = "default_migrations_dir")]
+    pub dir: String,
+}
+
+fn default_migrations_dir() -> String {
+    "migrations".to_string()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
@@ -139,6 +154,7 @@ pub struct ProcessModuleRuntime {
 
 #[derive(Debug)]
 struct RunningModuleState {
+    instance_id: String,
     module_id: ModuleId,
     version: ModuleVersion,
     port: Option<u16>,
@@ -146,6 +162,7 @@ struct RunningModuleState {
     restart_count: u32,
     log_file: PathBuf,
     env: Option<Vec<(String, String)>>,
+    primary: bool,
     kind: RunningModuleKind,
 }
 
@@ -161,6 +178,117 @@ enum RunningModuleKind {
 }
 
 impl ProcessModuleRuntime {
+    fn primary_instance_id(module_id: &str) -> String {
+        format!("{module_id}:{PRIMARY_INSTANCE_SUFFIX}")
+    }
+
+    fn replica_instance_id(module_id: &str, ordinal: usize) -> String {
+        format!("{module_id}:{REPLICA_INSTANCE_PREFIX}:{ordinal}")
+    }
+
+    fn next_replica_instance_id(
+        module_id: &str,
+        modules: &HashMap<String, RunningModuleState>,
+    ) -> String {
+        let mut max_ordinal = 0usize;
+        for state in modules
+            .values()
+            .filter(|state| state.module_id.as_str() == module_id)
+        {
+            if let Some(ordinal) = Self::replica_ordinal(&state.instance_id) {
+                max_ordinal = max_ordinal.max(ordinal);
+            }
+        }
+        Self::replica_instance_id(module_id, max_ordinal.saturating_add(1))
+    }
+
+    fn replica_ordinal(instance_id: &str) -> Option<usize> {
+        let (_, ordinal) = instance_id.rsplit_once(&format!(":{REPLICA_INSTANCE_PREFIX}:"))?;
+        ordinal.parse::<usize>().ok()
+    }
+
+    fn build_log_file_path(&self, module_id: &str, primary: bool, instance_id: &str) -> PathBuf {
+        let log_dir = self.state_dir.join("logs");
+        if primary {
+            log_dir.join(format!("{module_id}.log"))
+        } else {
+            let sanitized = instance_id.replace(':', "__");
+            log_dir.join(format!("{module_id}__{sanitized}.log"))
+        }
+    }
+
+    fn select_primary_instance<'a>(
+        module_id: &str,
+        modules: &'a HashMap<String, RunningModuleState>,
+    ) -> Option<&'a RunningModuleState> {
+        modules
+            .values()
+            .filter(|state| state.module_id.as_str() == module_id)
+            .max_by(|left, right| {
+                left.primary.cmp(&right.primary).then_with(|| {
+                    left.started_at
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .cmp(
+                            &right
+                                .started_at
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap_or_default(),
+                        )
+                })
+            })
+    }
+
+    fn module_instances<'a>(
+        module_id: &str,
+        modules: &'a HashMap<String, RunningModuleState>,
+    ) -> Vec<&'a RunningModuleState> {
+        let mut states = modules
+            .values()
+            .filter(|state| state.module_id.as_str() == module_id)
+            .collect::<Vec<_>>();
+        states.sort_by(|left, right| {
+            right
+                .primary
+                .cmp(&left.primary)
+                .then_with(|| left.instance_id.cmp(&right.instance_id))
+        });
+        states
+    }
+
+    fn info_from_state(&self, state: &RunningModuleState) -> ModuleRuntimeInfo {
+        let (status, pid, kind) = match &state.kind {
+            RunningModuleKind::Process { pid } => {
+                let status = if self.is_process_alive(*pid) {
+                    ModuleRuntimeStatus::Running
+                } else {
+                    ModuleRuntimeStatus::Failed
+                };
+                (status, Some(*pid), ModuleRuntimeKind::Process)
+            }
+            RunningModuleKind::StaticSite { handle, .. } => {
+                let status = if handle.is_finished() {
+                    ModuleRuntimeStatus::Failed
+                } else {
+                    ModuleRuntimeStatus::Running
+                };
+                (status, None, ModuleRuntimeKind::StaticSite)
+            }
+        };
+
+        ModuleRuntimeInfo {
+            module_id: state.module_id.clone(),
+            version: state.version.clone(),
+            status,
+            kind,
+            pid,
+            port: state.port,
+            started_at: Some(state.started_at),
+            stopped_at: None,
+            restart_count: state.restart_count,
+        }
+    }
+
     pub fn new(
         storage: Arc<dyn ModuleStoragePort>,
         state_dir: PathBuf,
@@ -401,7 +529,13 @@ impl ProcessModuleRuntime {
         }
 
         let started_at = UNIX_EPOCH + Duration::from_secs(persisted.started_at);
+        let instance_id = if persisted.instance_id.trim().is_empty() {
+            Self::primary_instance_id(module_id.as_str())
+        } else {
+            persisted.instance_id.clone()
+        };
         let state = RunningModuleState {
+            instance_id: instance_id.clone(),
             module_id: module_id.clone(),
             version: expected_version.clone(),
             port: persisted.port,
@@ -409,13 +543,13 @@ impl ProcessModuleRuntime {
             restart_count: persisted.restart_count,
             log_file: PathBuf::from(&persisted.log_file),
             env: None,
+            primary: persisted.primary,
             kind: RunningModuleKind::Process { pid: persisted.pid },
         };
 
-        let key = module_id.to_string();
         {
             let mut modules = self.running_modules.write().await;
-            modules.insert(key, state);
+            modules.insert(instance_id, state);
         }
 
         crate::infra::telemetry::register_service_process("module-runtime", persisted.pid);
@@ -761,6 +895,8 @@ impl ProcessModuleRuntime {
     async fn try_start_static_site(
         &self,
         module_id: &ModuleId,
+        instance_id: String,
+        primary: bool,
         port: Option<u16>,
         version: ModuleVersion,
         log_file: PathBuf,
@@ -805,6 +941,7 @@ impl ProcessModuleRuntime {
 
         let started_at = SystemTime::now();
         let state = RunningModuleState {
+            instance_id: instance_id.clone(),
             module_id: module_id.clone(),
             version: version.clone(),
             port: Some(actual_addr.port()),
@@ -812,6 +949,7 @@ impl ProcessModuleRuntime {
             restart_count: 0,
             log_file: log_file.clone(),
             env: Some(env),
+            primary,
             kind: RunningModuleKind::StaticSite {
                 shutdown: Some(shutdown_tx),
                 handle,
@@ -820,7 +958,7 @@ impl ProcessModuleRuntime {
 
         {
             let mut modules = self.running_modules.write().await;
-            modules.insert(module_id.to_string(), state);
+            modules.insert(instance_id, state);
         }
 
         if let Err(e) = self.save_state().await {
@@ -847,6 +985,199 @@ impl ProcessModuleRuntime {
             kind: ModuleRuntimeKind::StaticSite,
             pid: None,
             port: Some(actual_addr.port()),
+            started_at: Some(started_at),
+            stopped_at: None,
+            restart_count: 0,
+        })
+    }
+
+    async fn start_specific_instance(
+        &self,
+        module_id: &ModuleId,
+        instance_id: String,
+        primary: bool,
+        requested_port: Option<u16>,
+        env_vars: Vec<(String, String)>,
+    ) -> Result<ModuleRuntimeInfo, ModuleRuntimeError> {
+        let module_id_str = module_id.to_string();
+        let installed = self
+            .storage
+            .load(module_id)
+            .await
+            .map_err(|e| ModuleRuntimeError::InvalidState(e.to_string()))?
+            .ok_or_else(|| ModuleRuntimeError::NotInstalled {
+                module_id: module_id_str.clone(),
+            })?;
+
+        let version = ModuleVersion(installed.manifest.version.clone());
+        let module_path = PathBuf::from(&installed.path);
+        let port = if requested_port.is_some() {
+            requested_port
+        } else {
+            self.read_port_from_config(&module_path).await
+        };
+
+        let mut full_env = Self::sanitized_host_env();
+        full_env.extend(env_vars);
+
+        let log_dir = self.state_dir.join("logs");
+        fs::create_dir_all(&log_dir).await.map_err(|e| {
+            ModuleRuntimeError::Io(
+                messages::infra::modules::runtime::process::log_dir_create_failed(e),
+            )
+        })?;
+
+        let log_file = self.build_log_file_path(&module_id_str, primary, &instance_id);
+        Self::reset_log_file(&log_file)?;
+
+        let runtime_manifest = Self::load_runtime_manifest(&module_path);
+        let runtime_mode = runtime_manifest
+            .as_ref()
+            .map(|manifest| manifest.runtime.mode)
+            .unwrap_or(RuntimeMode::Auto);
+        let manifest_static_profile =
+            if matches!(runtime_mode, RuntimeMode::Auto | RuntimeMode::StaticSite) {
+                if let Some(manifest) = runtime_manifest.as_ref() {
+                    Self::static_profile_from_manifest(module_id, &module_path, manifest)?
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+        let mut static_profile = manifest_static_profile;
+        if static_profile.is_none()
+            && matches!(runtime_mode, RuntimeMode::Auto | RuntimeMode::StaticSite)
+        {
+            static_profile = Self::discover_static_profile(&module_path);
+        }
+
+        if matches!(runtime_mode, RuntimeMode::StaticSite) {
+            let profile = static_profile
+                .take()
+                .ok_or_else(|| ModuleRuntimeError::StartFailed {
+                    module_id: module_id_str.clone(),
+                    reason: messages::infra::modules::runtime::process::static_assets_not_found(
+                        module_path.display(),
+                    ),
+                })?;
+            return self
+                .try_start_static_site(
+                    module_id,
+                    instance_id,
+                    primary,
+                    requested_port,
+                    version.clone(),
+                    log_file.clone(),
+                    full_env.clone(),
+                    profile,
+                )
+                .await;
+        }
+
+        let binary_candidate = Self::locate_process_binary(&module_path, &module_id_str)?;
+        if binary_candidate.is_none() && matches!(runtime_mode, RuntimeMode::Auto) {
+            if let Some(profile) = static_profile {
+                return self
+                    .try_start_static_site(
+                        module_id,
+                        instance_id,
+                        primary,
+                        requested_port,
+                        version.clone(),
+                        log_file.clone(),
+                        full_env.clone(),
+                        profile,
+                    )
+                    .await;
+            }
+        }
+
+        let binary_path = binary_candidate.ok_or_else(|| ModuleRuntimeError::StartFailed {
+            module_id: module_id_str.clone(),
+            reason: messages::infra::modules::runtime::process::exec_not_found(
+                module_path.display(),
+                &module_id_str,
+            ),
+        })?;
+
+        let log_file_handle = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_file)
+            .map_err(|e| {
+                ModuleRuntimeError::Io(
+                    messages::infra::modules::runtime::process::log_file_open_failed(e),
+                )
+            })?;
+
+        self.run_bootstrap_script(module_id, &module_path, &full_env)
+            .await?;
+
+        let mut cmd = Command::new(&binary_path);
+        cmd.current_dir(&module_path)
+            .stdout(Stdio::from(log_file_handle.try_clone().unwrap()))
+            .stderr(Stdio::from(log_file_handle))
+            .stdin(Stdio::null())
+            .env_clear();
+        for (key, value) in &full_env {
+            cmd.env(key, value);
+        }
+
+        let child = cmd.spawn().map_err(|e| ModuleRuntimeError::StartFailed {
+            module_id: module_id_str.clone(),
+            reason: messages::infra::modules::runtime::process::spawn_failed(e),
+        })?;
+
+        let pid = child.id();
+        let started_at = SystemTime::now();
+
+        info!(
+            module_id = %module_id,
+            instance_id = %instance_id,
+            pid = pid,
+            port = ?port,
+            "{}",
+            messages::infra::modules::runtime::process::PROCESS_STARTED
+        );
+
+        use crate::infra::telemetry;
+        telemetry::register_service_process("module-runtime", pid);
+        let sample = telemetry::get_service_specific_metrics("module-runtime");
+        telemetry::update_service_resource("module-runtime", sample);
+
+        let state = RunningModuleState {
+            instance_id: instance_id.clone(),
+            module_id: module_id.clone(),
+            version: version.clone(),
+            port,
+            started_at,
+            restart_count: 0,
+            log_file: log_file.clone(),
+            env: Some(full_env.clone()),
+            primary,
+            kind: RunningModuleKind::Process { pid },
+        };
+
+        {
+            let mut modules = self.running_modules.write().await;
+            modules.insert(instance_id, state);
+        }
+
+        if let Err(e) = self.save_state().await {
+            error!(
+                "{}",
+                messages::infra::modules::runtime::process::state_persist_failed(e)
+            );
+        }
+
+        Ok(ModuleRuntimeInfo {
+            module_id: module_id.clone(),
+            version,
+            status: ModuleRuntimeStatus::Running,
+            kind: ModuleRuntimeKind::Process,
+            pid: Some(pid),
+            port,
             started_at: Some(started_at),
             stopped_at: None,
             restart_count: 0,
@@ -1011,6 +1342,49 @@ impl ProcessModuleRuntime {
         }
         true
     }
+
+    async fn stop_instance_by_id(
+        &self,
+        module_id: &ModuleId,
+        instance_id: &str,
+    ) -> Result<(), ModuleRuntimeError> {
+        let state = {
+            let mut modules = self.running_modules.write().await;
+            modules
+                .remove(instance_id)
+                .ok_or_else(|| ModuleRuntimeError::NotRunning {
+                    module_id: module_id.to_string(),
+                })?
+        };
+
+        match state.kind {
+            RunningModuleKind::Process { pid } => {
+                crate::infra::telemetry::unregister_service_process("module-runtime", pid);
+                self.kill_process(pid).await?;
+                let sample =
+                    crate::infra::telemetry::get_service_specific_metrics("module-runtime");
+                crate::infra::telemetry::update_service_resource("module-runtime", sample);
+            }
+            RunningModuleKind::StaticSite {
+                mut shutdown,
+                handle,
+            } => {
+                if let Some(tx) = shutdown.take() {
+                    let _ = tx.send(());
+                }
+                if let Err(err) = handle.await {
+                    warn!(
+                        module_id = %module_id,
+                        instance_id = %state.instance_id,
+                        error = %err,
+                        "failed to await static module task"
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -1020,270 +1394,97 @@ impl ModuleRuntimePort for ProcessModuleRuntime {
         config: ModuleStartConfig,
     ) -> Result<ModuleRuntimeInfo, ModuleRuntimeError> {
         let module_id_str = config.module_id.to_string();
-
-        // Check if already running
         {
             let modules = self.running_modules.read().await;
-            if modules.contains_key(&module_id_str) {
+            if Self::select_primary_instance(&module_id_str, &modules).is_some() {
                 return Err(ModuleRuntimeError::AlreadyRunning {
                     module_id: module_id_str,
                 });
             }
         }
 
-        // Get installed module
-        let installed = self
-            .storage
-            .load(&config.module_id)
-            .await
-            .map_err(|e| ModuleRuntimeError::InvalidState(e.to_string()))?
-            .ok_or_else(|| ModuleRuntimeError::NotInstalled {
-                module_id: module_id_str.clone(),
-            })?;
+        self.start_specific_instance(
+            &config.module_id,
+            Self::primary_instance_id(config.module_id.as_str()),
+            true,
+            config.port,
+            config.env_vars,
+        )
+        .await
+    }
 
-        let version = ModuleVersion(installed.manifest.version.clone());
-        let module_path = PathBuf::from(&installed.path);
-
-        // Read port from module's config.toml (if it exists) unless provided
-        let port = if config.port.is_some() {
-            config.port
-        } else {
-            self.read_port_from_config(&module_path).await
+    async fn stop(&self, module_id: &ModuleId) -> Result<(), ModuleRuntimeError> {
+        let module_id_str = module_id.to_string();
+        let instance_ids = {
+            let modules = self.running_modules.read().await;
+            let ids = Self::module_instances(&module_id_str, &modules)
+                .into_iter()
+                .map(|state| state.instance_id.clone())
+                .collect::<Vec<_>>();
+            if ids.is_empty() {
+                return Err(ModuleRuntimeError::NotRunning {
+                    module_id: module_id_str.clone(),
+                });
+            }
+            ids
         };
 
-        let mut full_env = Self::sanitized_host_env();
-        full_env.extend(config.env_vars);
-
-        // Setup log file
-        let log_dir = self.state_dir.join("logs");
-        fs::create_dir_all(&log_dir).await.map_err(|e| {
-            ModuleRuntimeError::Io(
-                messages::infra::modules::runtime::process::log_dir_create_failed(e),
-            )
-        })?;
-
-        let log_file = log_dir.join(format!("{}.log", module_id_str));
-        Self::reset_log_file(&log_file)?;
-
-        let runtime_manifest = Self::load_runtime_manifest(&module_path);
-        let runtime_mode = runtime_manifest
-            .as_ref()
-            .map(|manifest| manifest.runtime.mode)
-            .unwrap_or(RuntimeMode::Auto);
-        let manifest_static_profile =
-            if matches!(runtime_mode, RuntimeMode::Auto | RuntimeMode::StaticSite) {
-                if let Some(manifest) = runtime_manifest.as_ref() {
-                    Self::static_profile_from_manifest(&config.module_id, &module_path, manifest)?
-                } else {
-                    None
-                }
-            } else {
-                None
+        for instance_id in instance_ids {
+            let state = {
+                let mut modules = self.running_modules.write().await;
+                modules
+                    .remove(&instance_id)
+                    .ok_or_else(|| ModuleRuntimeError::NotRunning {
+                        module_id: module_id_str.clone(),
+                    })?
             };
-        let mut static_profile = manifest_static_profile;
-        if static_profile.is_none()
-            && matches!(runtime_mode, RuntimeMode::Auto | RuntimeMode::StaticSite)
-        {
-            static_profile = Self::discover_static_profile(&module_path);
-        }
 
-        if matches!(runtime_mode, RuntimeMode::StaticSite) {
-            let profile = static_profile
-                .take()
-                .ok_or_else(|| ModuleRuntimeError::StartFailed {
-                    module_id: module_id_str.clone(),
-                    reason: messages::infra::modules::runtime::process::static_assets_not_found(
-                        module_path.display(),
-                    ),
-                })?;
-            return self
-                .try_start_static_site(
-                    &config.module_id,
-                    config.port,
-                    version.clone(),
-                    log_file.clone(),
-                    full_env.clone(),
-                    profile,
-                )
-                .await;
-        }
-
-        let binary_candidate = Self::locate_process_binary(&module_path, &module_id_str)?;
-        if binary_candidate.is_none() && matches!(runtime_mode, RuntimeMode::Auto) {
-            if let Some(profile) = static_profile {
-                return self
-                    .try_start_static_site(
-                        &config.module_id,
-                        config.port,
-                        version.clone(),
-                        log_file.clone(),
-                        full_env.clone(),
-                        profile,
-                    )
-                    .await;
+            match state.kind {
+                RunningModuleKind::Process { pid } => {
+                    crate::infra::telemetry::unregister_service_process("module-runtime", pid);
+                    self.kill_process(pid).await?;
+                    info!(
+                        module_id = %module_id,
+                        instance_id = %state.instance_id,
+                        pid = pid,
+                        "{}",
+                        messages::infra::modules::runtime::process::MODULE_STOPPED
+                    );
+                    let sample =
+                        crate::infra::telemetry::get_service_specific_metrics("module-runtime");
+                    crate::infra::telemetry::update_service_resource("module-runtime", sample);
+                }
+                RunningModuleKind::StaticSite {
+                    mut shutdown,
+                    handle,
+                    ..
+                } => {
+                    if let Some(tx) = shutdown.take() {
+                        let _ = tx.send(());
+                    }
+                    if let Err(err) = handle.await {
+                        warn!(
+                            module_id = %module_id,
+                            instance_id = %state.instance_id,
+                            error = %err,
+                            "failed to await static module task"
+                        );
+                    }
+                    info!(
+                        module_id = %module_id,
+                        instance_id = %state.instance_id,
+                        "{}",
+                        messages::infra::modules::runtime::process::STATIC_SERVER_STOPPED
+                    );
+                }
             }
         }
 
-        let binary_path = binary_candidate.ok_or_else(|| ModuleRuntimeError::StartFailed {
-            module_id: module_id_str.clone(),
-            reason: messages::infra::modules::runtime::process::exec_not_found(
-                module_path.display(),
-                &module_id_str,
-            ),
-        })?;
-
-        let log_file_handle = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_file)
-            .map_err(|e| {
-                ModuleRuntimeError::Io(
-                    messages::infra::modules::runtime::process::log_file_open_failed(e),
-                )
-            })?;
-
-        self.run_bootstrap_script(&config.module_id, &module_path, &full_env)
-            .await?;
-
-        // Build command
-        let mut cmd = Command::new(&binary_path);
-        cmd.current_dir(&module_path)
-            .stdout(Stdio::from(log_file_handle.try_clone().unwrap()))
-            .stderr(Stdio::from(log_file_handle))
-            .stdin(Stdio::null())
-            .env_clear();
-
-        // Set environment variables
-        for (key, value) in &full_env {
-            cmd.env(key, value);
-        }
-
-        // Note: We don't set PORT env var - modules read from their own config
-
-        // Spawn process
-        let child = cmd.spawn().map_err(|e| ModuleRuntimeError::StartFailed {
-            module_id: module_id_str.clone(),
-            reason: messages::infra::modules::runtime::process::spawn_failed(e),
-        })?;
-
-        let pid = child.id();
-        let started_at = SystemTime::now();
-
-        info!(
-            module_id = %config.module_id,
-            pid = pid,
-            port = ?port,
-            "{}",
-            messages::infra::modules::runtime::process::PROCESS_STARTED
-        );
-
-        // Update telemetry with real module process metrics
-        use crate::infra::telemetry;
-        telemetry::register_service_process("module-runtime", pid);
-        let sample = telemetry::get_service_specific_metrics("module-runtime");
-        telemetry::update_service_resource("module-runtime", sample);
-
-        // Store running state
-        let state = RunningModuleState {
-            module_id: config.module_id.clone(),
-            version: version.clone(),
-            port,
-            started_at,
-            restart_count: 0,
-            log_file: log_file.clone(),
-            env: Some(full_env.clone()),
-            kind: RunningModuleKind::Process { pid },
-        };
-
-        {
-            let mut modules = self.running_modules.write().await;
-            modules.insert(module_id_str.clone(), state);
-        }
-
-        // Persist state
         if let Err(e) = self.save_state().await {
             error!(
                 "{}",
                 messages::infra::modules::runtime::process::state_persist_failed(e)
             );
-        }
-
-        Ok(ModuleRuntimeInfo {
-            module_id: config.module_id,
-            version,
-            status: ModuleRuntimeStatus::Running,
-            kind: ModuleRuntimeKind::Process,
-            pid: Some(pid),
-            port,
-            started_at: Some(started_at),
-            stopped_at: None,
-            restart_count: 0,
-        })
-    }
-
-    async fn stop(&self, module_id: &ModuleId) -> Result<(), ModuleRuntimeError> {
-        let module_id_str = module_id.to_string();
-
-        let state = {
-            let mut modules = self.running_modules.write().await;
-            modules
-                .remove(&module_id_str)
-                .ok_or_else(|| ModuleRuntimeError::NotRunning {
-                    module_id: module_id_str.clone(),
-                })?
-        };
-
-        match state.kind {
-            RunningModuleKind::Process { pid } => {
-                crate::infra::telemetry::unregister_service_process("module-runtime", pid);
-
-                self.kill_process(pid).await?;
-
-                if let Err(e) = self.save_state().await {
-                    error!(
-                        "{}",
-                        messages::infra::modules::runtime::process::state_persist_failed(e)
-                    );
-                }
-
-                info!(
-                    module_id = %module_id,
-                    pid = pid,
-                    "{}",
-                    messages::infra::modules::runtime::process::MODULE_STOPPED
-                );
-
-                let sample =
-                    crate::infra::telemetry::get_service_specific_metrics("module-runtime");
-                crate::infra::telemetry::update_service_resource("module-runtime", sample);
-            }
-            RunningModuleKind::StaticSite {
-                mut shutdown,
-                handle,
-                ..
-            } => {
-                if let Some(tx) = shutdown.take() {
-                    let _ = tx.send(());
-                }
-                if let Err(err) = handle.await {
-                    warn!(
-                        module_id = %module_id,
-                        error = %err,
-                        "failed to await static module task"
-                    );
-                }
-                if let Err(e) = self.save_state().await {
-                    error!(
-                        "{}",
-                        messages::infra::modules::runtime::process::state_persist_failed(e)
-                    );
-                }
-                info!(
-                    module_id = %module_id,
-                    "{}",
-                    messages::infra::modules::runtime::process::STATIC_SERVER_STOPPED
-                );
-            }
         }
 
         Ok(())
@@ -1292,119 +1493,198 @@ impl ModuleRuntimePort for ProcessModuleRuntime {
     async fn status(&self, module_id: &ModuleId) -> Result<ModuleRuntimeInfo, ModuleRuntimeError> {
         let modules = self.running_modules.read().await;
         let module_id_str = module_id.to_string();
-
-        let state = modules
-            .get(&module_id_str)
-            .ok_or_else(|| ModuleRuntimeError::NotRunning {
+        let state = Self::select_primary_instance(&module_id_str, &modules).ok_or_else(|| {
+            ModuleRuntimeError::NotRunning {
                 module_id: module_id_str.clone(),
-            })?;
-
-        let (status, pid, kind) = match &state.kind {
-            RunningModuleKind::Process { pid } => {
-                let status = if self.is_process_alive(*pid) {
-                    ModuleRuntimeStatus::Running
-                } else {
-                    ModuleRuntimeStatus::Failed
-                };
-                (status, Some(*pid), ModuleRuntimeKind::Process)
             }
-            RunningModuleKind::StaticSite { handle, .. } => {
-                let status = if handle.is_finished() {
-                    ModuleRuntimeStatus::Failed
-                } else {
-                    ModuleRuntimeStatus::Running
-                };
-                (status, None, ModuleRuntimeKind::StaticSite)
-            }
-        };
-
-        Ok(ModuleRuntimeInfo {
-            module_id: state.module_id.clone(),
-            version: state.version.clone(),
-            status,
-            kind,
-            pid,
-            port: state.port,
-            started_at: Some(state.started_at),
-            stopped_at: None,
-            restart_count: state.restart_count,
-        })
+        })?;
+        Ok(self.info_from_state(state))
     }
 
     async fn list_running(&self) -> Result<Vec<ModuleRuntimeInfo>, ModuleRuntimeError> {
         let modules = self.running_modules.read().await;
-
+        let mut seen = std::collections::BTreeSet::new();
         let mut result = Vec::new();
         for state in modules.values() {
-            let (status, pid, kind) = match &state.kind {
-                RunningModuleKind::Process { pid } => {
-                    let status = if self.is_process_alive(*pid) {
-                        ModuleRuntimeStatus::Running
-                    } else {
-                        ModuleRuntimeStatus::Failed
-                    };
-                    (status, Some(*pid), ModuleRuntimeKind::Process)
-                }
-                RunningModuleKind::StaticSite { handle, .. } => {
-                    let status = if handle.is_finished() {
-                        ModuleRuntimeStatus::Failed
-                    } else {
-                        ModuleRuntimeStatus::Running
-                    };
-                    (status, None, ModuleRuntimeKind::StaticSite)
-                }
-            };
-
-            result.push(ModuleRuntimeInfo {
-                module_id: state.module_id.clone(),
-                version: state.version.clone(),
-                status,
-                kind,
-                pid,
-                port: state.port,
-                started_at: Some(state.started_at),
-                stopped_at: None,
-                restart_count: state.restart_count,
-            });
+            let module_key = state.module_id.to_string();
+            if !seen.insert(module_key.clone()) {
+                continue;
+            }
+            if let Some(primary) = Self::select_primary_instance(&module_key, &modules) {
+                result.push(self.info_from_state(primary));
+            }
         }
-
         Ok(result)
     }
 
     async fn restart(&self, module_id: &ModuleId) -> Result<ModuleRuntimeInfo, ModuleRuntimeError> {
-        // Get current config before stopping
-        let (port, restart_count) = {
-            let modules = self.running_modules.read().await;
-            let module_id_str = module_id.to_string();
+        let instances = self.list_instances(module_id).await?;
+        let mut primary_info = None;
+        for instance in instances {
+            let restarted = self
+                .restart_instance(module_id, &instance.instance_id)
+                .await?;
+            if primary_info.is_none() {
+                primary_info = Some(restarted);
+            }
+        }
+        primary_info.ok_or_else(|| ModuleRuntimeError::NotRunning {
+            module_id: module_id.to_string(),
+        })
+    }
 
-            let state =
-                modules
-                    .get(&module_id_str)
-                    .ok_or_else(|| ModuleRuntimeError::NotRunning {
-                        module_id: module_id_str.clone(),
-                    })?;
+    async fn list_instances(
+        &self,
+        module_id: &ModuleId,
+    ) -> Result<Vec<ModuleRuntimeInstanceInfo>, ModuleRuntimeError> {
+        let modules = self.running_modules.read().await;
+        let states = Self::module_instances(module_id.as_str(), &modules);
+        if states.is_empty() {
+            return Err(ModuleRuntimeError::NotRunning {
+                module_id: module_id.to_string(),
+            });
+        }
+        Ok(states
+            .into_iter()
+            .map(|state| ModuleRuntimeInstanceInfo {
+                instance_id: state.instance_id.clone(),
+                primary: state.primary,
+                runtime: self.info_from_state(state),
+            })
+            .collect())
+    }
 
-            (state.port, state.restart_count + 1)
+    async fn restart_instance(
+        &self,
+        module_id: &ModuleId,
+        instance_id: &str,
+    ) -> Result<ModuleRuntimeInfo, ModuleRuntimeError> {
+        let module_id_str = module_id.to_string();
+        let state = {
+            let mut modules = self.running_modules.write().await;
+            modules
+                .remove(instance_id)
+                .ok_or_else(|| ModuleRuntimeError::NotRunning {
+                    module_id: module_id_str.clone(),
+                })?
         };
+        if state.module_id != *module_id {
+            return Err(ModuleRuntimeError::NotRunning {
+                module_id: module_id_str,
+            });
+        }
 
-        // Stop the module
-        self.stop(module_id).await?;
+        let port = state.port;
+        let env_vars = state.env.clone().unwrap_or_default();
+        let primary = state.primary;
+        let restart_count = state.restart_count.saturating_add(1);
+        let instance_id_owned = state.instance_id.clone();
 
-        // Wait a bit
+        match state.kind {
+            RunningModuleKind::Process { pid } => {
+                crate::infra::telemetry::unregister_service_process("module-runtime", pid);
+                self.kill_process(pid).await?;
+            }
+            RunningModuleKind::StaticSite {
+                mut shutdown,
+                handle,
+            } => {
+                if let Some(tx) = shutdown.take() {
+                    let _ = tx.send(());
+                }
+                if let Err(err) = handle.await {
+                    warn!(
+                        module_id = %module_id,
+                        instance_id = %instance_id_owned,
+                        error = %err,
+                        "failed to await static module task during restart"
+                    );
+                }
+            }
+        }
+
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Start again
-        let config = ModuleStartConfig {
-            module_id: module_id.clone(),
-            port,
-            env_vars: vec![],
-            auto_restart: false,
-        };
-
-        let mut info = self.start(config).await?;
+        let mut info = self
+            .start_specific_instance(
+                module_id,
+                instance_id_owned.clone(),
+                primary,
+                port,
+                env_vars,
+            )
+            .await?;
         info.restart_count = restart_count;
-
+        {
+            let mut modules = self.running_modules.write().await;
+            if let Some(restarted) = modules.get_mut(&instance_id_owned) {
+                restarted.restart_count = restart_count;
+            }
+        }
+        if let Err(err) = self.save_state().await {
+            error!(
+                "{}",
+                messages::infra::modules::runtime::process::state_persist_failed(err)
+            );
+        }
         Ok(info)
+    }
+
+    async fn reconcile_instances(
+        &self,
+        config: ModuleStartConfig,
+        desired_instances: usize,
+    ) -> Result<Vec<ModuleRuntimeInstanceInfo>, ModuleRuntimeError> {
+        if desired_instances == 0 {
+            let _ = self.stop(&config.module_id).await;
+            return Ok(Vec::new());
+        }
+
+        let module_id_str = config.module_id.to_string();
+        let current_instances = self
+            .list_instances(&config.module_id)
+            .await
+            .unwrap_or_default();
+        let current_count = current_instances.len();
+
+        if current_count == 0 {
+            let _ = self.start(config.clone()).await?;
+        } else if current_count < desired_instances {
+            let additional = desired_instances - current_count;
+            for _ in 0..additional {
+                let instance_id = {
+                    let modules = self.running_modules.read().await;
+                    Self::next_replica_instance_id(&module_id_str, &modules)
+                };
+                self.start_specific_instance(
+                    &config.module_id,
+                    instance_id,
+                    false,
+                    None,
+                    config.env_vars.clone(),
+                )
+                .await?;
+            }
+        } else if current_count > desired_instances {
+            let remove_count = current_count - desired_instances;
+            let instances = self.list_instances(&config.module_id).await?;
+            for instance in instances
+                .into_iter()
+                .filter(|entry| !entry.primary)
+                .rev()
+                .take(remove_count)
+            {
+                self.stop_instance_by_id(&config.module_id, &instance.instance_id)
+                    .await?;
+            }
+        }
+
+        if let Err(err) = self.save_state().await {
+            error!(
+                "{}",
+                messages::infra::modules::runtime::process::state_persist_failed(err)
+            );
+        }
+        self.list_instances(&config.module_id).await
     }
 
     async fn logs(
@@ -1414,12 +1694,11 @@ impl ModuleRuntimePort for ProcessModuleRuntime {
     ) -> Result<Vec<String>, ModuleRuntimeError> {
         let modules = self.running_modules.read().await;
         let module_id_str = module_id.to_string();
-
-        let state = modules
-            .get(&module_id_str)
-            .ok_or_else(|| ModuleRuntimeError::NotRunning {
+        let state = Self::select_primary_instance(&module_id_str, &modules).ok_or_else(|| {
+            ModuleRuntimeError::NotRunning {
                 module_id: module_id_str.clone(),
-            })?;
+            }
+        })?;
 
         let contents = fs::read_to_string(&state.log_file).await.map_err(|e| {
             ModuleRuntimeError::Io(
@@ -1441,11 +1720,11 @@ impl ModuleRuntimePort for ProcessModuleRuntime {
     async fn env(&self, module_id: &ModuleId) -> Result<Vec<(String, String)>, ModuleRuntimeError> {
         let modules = self.running_modules.read().await;
         let module_id_str = module_id.to_string();
-        let state = modules
-            .get(&module_id_str)
-            .ok_or_else(|| ModuleRuntimeError::NotRunning {
+        let state = Self::select_primary_instance(&module_id_str, &modules).ok_or_else(|| {
+            ModuleRuntimeError::NotRunning {
                 module_id: module_id_str.clone(),
-            })?;
+            }
+        })?;
         match &state.env {
             Some(env) => Ok(env.clone()),
             None => Err(ModuleRuntimeError::EnvUnavailable {
@@ -1457,6 +1736,10 @@ impl ModuleRuntimePort for ProcessModuleRuntime {
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct PersistedModuleState {
+    #[serde(default)]
+    instance_id: String,
+    #[serde(default = "default_true")]
+    primary: bool,
     module_id: String,
     version: String,
     pid: u32,
@@ -1470,6 +1753,8 @@ impl PersistedModuleState {
     fn from_running_state(state: &RunningModuleState) -> Option<Self> {
         match &state.kind {
             RunningModuleKind::Process { pid } => Some(Self {
+                instance_id: state.instance_id.clone(),
+                primary: state.primary,
                 module_id: state.module_id.to_string(),
                 version: state.version.to_string(),
                 pid: *pid,
@@ -1485,6 +1770,10 @@ impl PersistedModuleState {
             RunningModuleKind::StaticSite { .. } => None,
         }
     }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Clone)]

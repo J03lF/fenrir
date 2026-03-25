@@ -250,6 +250,8 @@ struct DbRuntimeSection {
 struct ServiceSnapshotEntry {
     uri: String,
     endpoint: String,
+    #[serde(default)]
+    endpoints: Vec<String>,
 }
 
 #[derive(Deserialize)]

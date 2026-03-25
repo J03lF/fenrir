@@ -2571,6 +2571,47 @@ label.series-toggle:hover {
   color: var(--color-info);
 }
 
+.analytics-toolbar .search-box {
+  min-width: 220px;
+  max-width: 320px;
+}
+
+.analytics-select-wrap {
+  display: flex;
+  align-items: center;
+}
+
+.analytics-select-wrap select {
+  min-width: 220px;
+  padding: 10px 14px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font-size: 0.85rem;
+}
+
+.analytics-select-wrap select:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+.analytics-levels button[data-analytics-level="issues"][data-active='true'] {
+  background: linear-gradient(135deg, #ef4444, #f59e0b);
+  box-shadow: 0 2px 8px rgba(239, 68, 68, 0.28);
+}
+
+.pill.info {
+  background: rgba(59, 130, 246, 0.15);
+  color: var(--color-info);
+}
+
+.pill.debug {
+  background: rgba(148, 163, 184, 0.14);
+  color: var(--text-muted);
+}
+
 /* Legacy styles (keep for compatibility) */
 .audit-header {
   flex-wrap: wrap;

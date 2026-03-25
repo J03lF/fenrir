@@ -12,9 +12,21 @@ const DEFAULT_WINDOW: Duration = Duration::from_secs(1);
 pub static HTTP_GATEWAY_CLIENT: Lazy<Client> = Lazy::new(|| {
     Client::builder()
         .pool_max_idle_per_host(8)
+        .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(30))
         .build()
         .expect("gateway http client")
+});
+
+/// Client for long-lived streaming connections (SSE). No overall timeout so the
+/// stream can stay open indefinitely; connect_timeout still guards against
+/// unreachable upstreams.
+pub static HTTP_GATEWAY_STREAMING_CLIENT: Lazy<Client> = Lazy::new(|| {
+    Client::builder()
+        .pool_max_idle_per_host(4)
+        .connect_timeout(Duration::from_secs(5))
+        .build()
+        .expect("gateway streaming http client")
 });
 
 pub struct GatewayRateLimiter {

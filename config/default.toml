@@ -216,6 +216,25 @@ retries = 2
 backoff_ms = 200
 health_probe_interval_seconds = 30
 
+[modules.runtime.rollout]
+watch_config = true
+watch_debounce_ms = 750
+restart_on_override_change = true
+drain_before_restart_ms = 750
+inter_restart_delay_ms = 250
+health_check_timeout_ms = 15000
+health_poll_interval_ms = 500
+rollback_on_failure = true
+abort_on_first_failure = true
+
+[modules.runtime.rollout.replacement]
+enabled = true
+default_strategy = "rolling_replace"
+default_max_surge = 1
+default_max_unavailable = 0
+default_warmup_timeout_ms = 30000
+default_promotion_interval_ms = 30000
+
 [modules.runtime.clients.tls]
 # ca_cert_path = "config/certs/control-plane-ca.pem"
 # client_cert_path = "config/certs/control-plane-client.crt"
@@ -223,6 +242,68 @@ health_probe_interval_seconds = 30
 accept_invalid_certs = false
 
 [modules.services]
+[modules.service_profiles.control_plane_standard.env]
+FENRIR_CONTROL_PLANE_TIMEOUT_MS = "2500"
+FENRIR_CONTROL_PLANE_CONNECT_TIMEOUT_MS = "1000"
+FENRIR_CONTROL_PLANE_RETRY_ATTEMPTS = "2"
+FENRIR_CONTROL_PLANE_RETRY_BACKOFF_MS = "200"
+FENRIR_CONTROL_PLANE_POOL_IDLE_TIMEOUT_MS = "90000"
+FENRIR_CONTROL_PLANE_POOL_MAX_IDLE_PER_HOST = "32"
+
+[modules.service_profiles.notification_delivery_standard.env]
+ATHENE_NOTIFICATION_DELIVERY_CONCURRENCY = "4"
+ATHENE_NOTIFICATION_QUEUE_CAPACITY = "512"
+ATHENE_NOTIFICATION_DELIVERY_RETRIES = "3"
+ATHENE_NOTIFICATION_DELIVERY_RETRY_BACKOFF_MS = "500"
+
+[modules.service_profiles.notification_worker_standard.env]
+ATHENE_NOTIFICATION_DELIVERY_CONCURRENCY = "8"
+ATHENE_NOTIFICATION_QUEUE_BATCH_SIZE = "32"
+ATHENE_NOTIFICATION_QUEUE_POLL_INTERVAL_SECONDS = "5"
+
+[modules.services."module:athene-api"]
+profile = "control_plane_standard"
+# replicas = 2
+# [modules.services."module:athene-api".rollout]
+# strategy = "canary_replace"
+# max_surge = 1
+# max_unavailable = 0
+# warmup_timeout_ms = 30000
+# drain_timeout_ms = 15000
+# traffic_steps = [10, 25, 50, 100]
+# promotion_interval_ms = 30000
+# rollback_on_regression = true
+# stickiness = false
+# [modules.services."module:athene-api".rollout.success_criteria]
+# max_error_rate_percent = 1.0
+# max_p95_latency_ms = 500
+# max_retry_rate_percent = 2.0
+
+[modules.services."module:athene"]
+profile = "control_plane_standard"
+# replicas = 2
+# [modules.services."module:athene".rollout]
+# strategy = "rolling_replace"
+
+[modules.services."module:auth-service"]
+profile = "notification_delivery_standard"
+# replicas = 2
+# [modules.services."module:auth-service".rollout]
+# strategy = "rolling_replace"
+# max_surge = 1
+# max_unavailable = 0
+# warmup_timeout_ms = 45000
+# drain_timeout_ms = 20000
+
+[modules.services."module:notification-service"]
+profile = "notification_worker_standard"
+# replicas = 2
+# [modules.services."module:notification-service".rollout]
+# strategy = "worker_handover"
+# max_surge = 1
+# warmup_timeout_ms = 45000
+# drain_timeout_ms = 30000
+
 # Example service overrides:
 # [modules.services."module:fenrir-api".env]
 # PUBLIC_URL = "https://tickets.local"

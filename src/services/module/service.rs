@@ -41,6 +41,7 @@ use tokio::{
     sync::{Mutex, RwLock},
 };
 
+use super::clients::ModuleRolloutSettings;
 use super::clients::{ModuleClientSettings, ModuleHealthHttpClient};
 use super::config::ModuleServiceOverrides;
 use super::dev::{
@@ -54,10 +55,13 @@ use super::ports::ModulePortAllocator;
 use super::scaffold::generate_module_scaffold;
 use super::token_audit::{record_module_token_exchange, ModuleTokenAuditContext};
 use super::types::{
-    DistributionAction, DistributionPlanEntry, ModuleIngressError, ModuleIngressTarget,
-    ModuleReleaseOutcome, ModuleScaffoldOptions, ModuleScaffoldSummary, ModuleStartupReport,
-    ModuleUpdateInfo, RegisteredDevService,
+    DistributionAction, DistributionPlanEntry, ModuleCanaryRoutingStatus, ModuleIngressError,
+    ModuleIngressTarget, ModuleOverrideReloadAction, ModuleOverrideReloadModuleReport,
+    ModuleOverrideReloadReport, ModuleOverrideReloadStatus, ModuleReleaseOutcome,
+    ModuleScaffoldOptions, ModuleScaffoldSummary, ModuleStartupReport, ModuleUpdateInfo,
+    RegisteredDevService,
 };
+use crate::config::{ModuleRolloutStrategy, ModuleServiceRolloutConfig};
 
 const DEFAULT_SERVICE_TENANT: &str = "default";
 const FAILURE_WINDOW_SECS: u64 = 120;
@@ -99,6 +103,19 @@ pub(super) struct ModuleHealth {
     failure_count: u32,
     last_failure: Option<SystemTime>,
     quarantined_until: Option<SystemTime>,
+}
+
+#[derive(Clone, Default)]
+pub(super) struct RuntimeInstanceHealth {
+    ready: bool,
+    last_error: Option<String>,
+}
+
+#[derive(Clone, Default)]
+pub(super) struct ModuleCanaryAllocation {
+    traffic_percent: u8,
+    instance_ids: Vec<String>,
+    last_changed_at: Option<SystemTime>,
 }
 
 #[derive(Clone)]
@@ -157,6 +174,7 @@ pub struct ModuleServiceInit {
     pub dev_sources: Option<PathBuf>,
     pub overrides: ModuleServiceOverrides,
     pub client_settings: ModuleClientSettings,
+    pub rollout_settings: ModuleRolloutSettings,
     pub health_client: ModuleHealthHttpClient,
     pub default_service_scopes: Vec<ServiceScope>,
     pub env_passthrough_prefixes: Vec<String>,
@@ -175,8 +193,9 @@ pub struct ModuleService {
     pub(super) port_allocator: Arc<ModulePortAllocator>,
     pub(super) security: Arc<SecurityManager>,
     pub(super) dev_sources: Option<DevSourceConfig>,
-    pub(super) overrides: Arc<ModuleServiceOverrides>,
+    pub(super) overrides: Arc<SyncRwLock<ModuleServiceOverrides>>,
     pub(super) client_settings: ModuleClientSettings,
+    pub(super) rollout_settings: ModuleRolloutSettings,
     pub(super) health_client: ModuleHealthHttpClient,
     pub(super) diagnostics: Arc<ServiceDiagnostics>,
     pub(super) runtime_gateways: Arc<RuntimeGatewayRegistry>,
@@ -193,9 +212,14 @@ pub struct ModuleService {
     pub(super) env_passthrough_prefixes: Vec<String>,
     pub(super) control_plane_url: SyncRwLock<Option<String>>,
     pub(super) health: SyncRwLock<HashMap<ModuleId, ModuleHealth>>,
+    pub(super) instance_health:
+        SyncRwLock<HashMap<ModuleId, HashMap<String, RuntimeInstanceHealth>>>,
     pub(super) manifest_client: Client,
     pub(super) service_snapshot_path: Option<PathBuf>,
-    pub(super) service_endpoints: Arc<RwLock<HashMap<String, String>>>,
+    pub(super) service_endpoints: Arc<RwLock<HashMap<String, Vec<String>>>>,
+    pub(super) runtime_ingress_cursor: Arc<Mutex<HashMap<String, usize>>>,
+    pub(super) canary_allocations: Arc<SyncRwLock<HashMap<ModuleId, ModuleCanaryAllocation>>>,
+    pub(super) canary_request_cursor: Arc<Mutex<HashMap<String, u64>>>,
     pub(super) startup_reports: Arc<RwLock<HashMap<ModuleId, ModuleStartupReport>>>,
     pub(super) app_services: Weak<AppServices>,
     pub(super) self_ref: Weak<ModuleService>,
@@ -315,15 +339,45 @@ impl ModuleService {
                         .record_probe("module-runtime", latency_ms, false);
                 }
             }
+            self.reconcile_dynamic_canary_rollouts().await;
         }
     }
 
     async fn run_health_probe_cycle(&self) -> Result<(), ModuleRuntimeError> {
-        let running = self.runtime.list_running().await?;
-        for info in running {
-            if let Some(port) = info.port {
-                self.probe_runtime_service(&info.module_id, port).await;
+        let installed = self
+            .storage
+            .list()
+            .await
+            .map_err(|err| ModuleRuntimeError::InvalidState(err.to_string()))?;
+        for module in installed {
+            let Ok(module_id) = ModuleId::new(&module.manifest.id) else {
+                continue;
+            };
+            let instances = match self.runtime.list_instances(&module_id).await {
+                Ok(instances) => instances,
+                Err(ModuleRuntimeError::NotRunning { .. }) => {
+                    self.clear_instance_health(&module_id);
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
+            let mut active_ids = Vec::new();
+            let mut module_ready = false;
+            for instance in instances {
+                if !matches!(instance.runtime.status, ModuleRuntimeStatus::Running) {
+                    continue;
+                }
+                let Some(port) = instance.runtime.port else {
+                    continue;
+                };
+                active_ids.push(instance.instance_id.clone());
+                let ready = self
+                    .probe_runtime_instance(&module_id, &instance.instance_id, port)
+                    .await;
+                module_ready |= ready;
             }
+            self.prune_instance_health(&module_id, &active_ids);
+            self.sync_module_service_status(&module_id, module_ready);
         }
         Ok(())
     }
@@ -332,10 +386,36 @@ impl ModuleService {
         self.run_health_probe_cycle().await
     }
 
-    async fn probe_runtime_service(&self, module_id: &ModuleId, port: u16) {
+    async fn probe_runtime_instance(
+        &self,
+        module_id: &ModuleId,
+        instance_id: &str,
+        port: u16,
+    ) -> bool {
+        let result = self
+            .probe_runtime_instance_with_result(module_id, Some(instance_id), port)
+            .await;
+        result.is_ok()
+    }
+
+    async fn probe_runtime_service_with_result(
+        &self,
+        module_id: &ModuleId,
+        port: u16,
+    ) -> Result<(), String> {
+        self.probe_runtime_instance_with_result(module_id, None, port)
+            .await
+    }
+
+    async fn probe_runtime_instance_with_result(
+        &self,
+        module_id: &ModuleId,
+        instance_id: Option<&str>,
+        port: u16,
+    ) -> Result<(), String> {
         let service_id = Self::module_service_id(module_id);
         let Some(snapshot) = self.service_registry.get(&service_id) else {
-            return;
+            return Err("service registry entry missing".to_string());
         };
         let health_path = snapshot
             .descriptor
@@ -343,31 +423,275 @@ impl ModuleService {
             .as_ref()
             .and_then(|meta| meta.health_endpoint.clone())
             .unwrap_or_else(|| "/health".to_string());
-        let url = format!("http://127.0.0.1:{port}{health_path}");
         let started_at = Instant::now();
-        match self.health_client.check(&url).await {
-            Ok(()) => {
-                let latency_ms = started_at.elapsed().as_secs_f64() * 1000.0;
-                self.diagnostics.record_probe(&service_id, latency_ms, true);
-                if snapshot.status != ServiceStatus::Active {
-                    self.service_registry.set_status(
-                        &service_id,
-                        ServiceStatus::Active,
-                        Some(module_service_notes::HEALTHY.to_string()),
-                    );
+        let probe_paths = Self::runtime_probe_paths(&health_path);
+        let mut last_error = None;
+        let mut ready = false;
+        for path in probe_paths {
+            let url = format!("http://127.0.0.1:{port}{path}");
+            match self.health_client.check(&url).await {
+                Ok(()) => {
+                    ready = true;
+                    break;
                 }
-            }
-            Err(err) => {
-                let latency_ms = started_at.elapsed().as_secs_f64() * 1000.0;
-                self.diagnostics
-                    .record_probe(&service_id, latency_ms, false);
-                self.service_registry.set_status(
-                    &service_id,
-                    ServiceStatus::Degraded,
-                    Some(format!("health probe failed: {err}")),
-                );
+                Err(err) => last_error = Some(format!("{path}: {err}")),
             }
         }
+
+        if ready {
+            let latency_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+            self.diagnostics.record_probe(&service_id, latency_ms, true);
+            self.sync_runtime_metrics(&service_id, port).await;
+            if let Some(instance_id) = instance_id {
+                self.update_instance_health(module_id, instance_id, true, None);
+            }
+            Ok(())
+        } else {
+            let latency_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+            self.diagnostics
+                .record_probe(&service_id, latency_ms, false);
+            let error = last_error.unwrap_or_else(|| "readiness probe failed".to_string());
+            self.diagnostics.record_runtime_metrics_failure(
+                &service_id,
+                format!("health probe failed: {error}"),
+            );
+            if let Some(instance_id) = instance_id {
+                self.update_instance_health(module_id, instance_id, false, Some(error.clone()));
+            }
+            let message = format!("health probe failed: {error}");
+            Err(message)
+        }
+    }
+
+    fn runtime_probe_paths(health_path: &str) -> Vec<String> {
+        let normalized = if health_path.trim().is_empty() {
+            "/health".to_string()
+        } else {
+            health_path.trim().to_string()
+        };
+        let mut paths = vec!["/ready".to_string()];
+        if !paths.iter().any(|path| path == &normalized) {
+            paths.push(normalized);
+        }
+        paths
+    }
+
+    async fn sync_runtime_metrics(&self, service_id: &str, port: u16) {
+        let url = format!("http://127.0.0.1:{port}/metrics/internal");
+        match self.health_client.fetch_json(&url).await {
+            Ok(payload) => self.diagnostics.update_runtime_metrics(service_id, payload),
+            Err(err) => self.diagnostics.record_runtime_metrics_failure(
+                service_id,
+                format!("metrics scrape failed: {err}"),
+            ),
+        }
+    }
+
+    async fn reconcile_dynamic_canary_rollouts(&self) {
+        let allocations = match self.canary_allocations.read() {
+            Ok(guard) => guard
+                .iter()
+                .map(|(module_id, allocation)| (module_id.clone(), allocation.clone()))
+                .collect::<Vec<_>>(),
+            Err(_) => return,
+        };
+
+        for (module_id, allocation) in allocations {
+            let service_id = Self::module_service_id(&module_id);
+            let Some(rollout) = self.rollout_config_for(&service_id) else {
+                continue;
+            };
+            if !matches!(rollout.strategy, Some(ModuleRolloutStrategy::CanaryReplace)) {
+                continue;
+            }
+            if allocation.traffic_percent == 0 || allocation.traffic_percent >= 100 {
+                continue;
+            }
+
+            if self
+                .canary_instances_unhealthy(&module_id, &allocation.instance_ids)
+                .unwrap_or(true)
+            {
+                if rollout.rollback_on_regression {
+                    let _ = self.clear_canary_routing(&module_id).await;
+                    self.service_registry.set_status(
+                        &service_id,
+                        ServiceStatus::Degraded,
+                        Some(
+                            "canary routing rolled back because candidate instances are not ready"
+                                .to_string(),
+                        ),
+                    );
+                }
+                continue;
+            }
+
+            match self.evaluate_canary_success(&service_id, &rollout) {
+                CanaryEvaluation::Healthy => {}
+                CanaryEvaluation::Pending(reason) => {
+                    tracing::debug!(module_id = %module_id, reason = %reason, "canary promotion pending");
+                    continue;
+                }
+                CanaryEvaluation::Regressed(reason) => {
+                    tracing::warn!(module_id = %module_id, reason = %reason, "canary regression detected");
+                    if rollout.rollback_on_regression {
+                        let _ = self.clear_canary_routing(&module_id).await;
+                        self.service_registry.set_status(
+                            &service_id,
+                            ServiceStatus::Degraded,
+                            Some(format!("canary routing rolled back: {reason}")),
+                        );
+                    }
+                    continue;
+                }
+            }
+
+            let promotion_interval =
+                Duration::from_millis(rollout.promotion_interval_ms.unwrap_or(30_000));
+            let elapsed = allocation
+                .last_changed_at
+                .and_then(|ts| ts.elapsed().ok())
+                .unwrap_or(Duration::ZERO);
+            if elapsed < promotion_interval {
+                continue;
+            }
+
+            let next_percent = next_canary_percent(&rollout, allocation.traffic_percent);
+            if next_percent <= allocation.traffic_percent {
+                continue;
+            }
+
+            match self.canary_allocations.write() {
+                Ok(mut guard) => {
+                    if let Some(current) = guard.get_mut(&module_id) {
+                        current.traffic_percent = next_percent;
+                        current.last_changed_at = Some(SystemTime::now());
+                    }
+                }
+                Err(_) => continue,
+            }
+            tracing::info!(
+                module_id = %module_id,
+                service_id = %service_id,
+                from = allocation.traffic_percent,
+                to = next_percent,
+                "promoted canary traffic"
+            );
+        }
+    }
+
+    fn canary_instances_unhealthy(
+        &self,
+        module_id: &ModuleId,
+        instance_ids: &[String],
+    ) -> Option<bool> {
+        let guard = self.instance_health.read().ok()?;
+        let entries = guard.get(module_id)?;
+        Some(instance_ids.iter().any(|instance_id| {
+            !entries
+                .get(instance_id)
+                .map(|entry| entry.ready)
+                .unwrap_or(false)
+        }))
+    }
+
+    fn evaluate_canary_success(
+        &self,
+        service_id: &str,
+        rollout: &ModuleServiceRolloutConfig,
+    ) -> CanaryEvaluation {
+        let criteria = &rollout.success_criteria;
+        let diagnostics = self.diagnostics.snapshot(service_id);
+        if let Some(max_error_rate) = criteria.max_error_rate_percent {
+            let Some(snapshot) = diagnostics else {
+                return CanaryEvaluation::Pending(
+                    "waiting for service diagnostics before evaluating error rate".to_string(),
+                );
+            };
+            let Some(error_rate) = snapshot.error_rate_pct else {
+                return CanaryEvaluation::Pending(
+                    "waiting for error-rate samples before promotion".to_string(),
+                );
+            };
+            if error_rate > f64::from(max_error_rate) {
+                return CanaryEvaluation::Regressed(format!(
+                    "error rate {:.2}% exceeded threshold {:.2}%",
+                    error_rate, max_error_rate
+                ));
+            }
+        }
+
+        if let Some(max_latency_ms) = criteria.max_p95_latency_ms {
+            let Some(snapshot) = diagnostics else {
+                return CanaryEvaluation::Pending(
+                    "waiting for service diagnostics before evaluating latency".to_string(),
+                );
+            };
+            let Some(p95) = snapshot.latency_p95_ms else {
+                return CanaryEvaluation::Pending(
+                    "waiting for p95 latency samples before promotion".to_string(),
+                );
+            };
+            if p95 > max_latency_ms as f64 {
+                return CanaryEvaluation::Regressed(format!(
+                    "p95 latency {:.2}ms exceeded threshold {}ms",
+                    p95, max_latency_ms
+                ));
+            }
+        }
+
+        let runtime_metrics = self.diagnostics.runtime_metrics_snapshot(service_id);
+        if let Some(max_retry_rate) = criteria.max_retry_rate_percent {
+            let Some(snapshot) = runtime_metrics.as_ref() else {
+                return CanaryEvaluation::Pending(
+                    "waiting for runtime metrics before evaluating retry rate".to_string(),
+                );
+            };
+            match metric_value(
+                snapshot.payload.as_ref(),
+                &["retry_rate_percent", "retry_rate_pct", "retry_pct"],
+            ) {
+                Some(value) if value > max_retry_rate => {
+                    return CanaryEvaluation::Regressed(format!(
+                        "retry rate {:.2}% exceeded threshold {:.2}%",
+                        value, max_retry_rate
+                    ));
+                }
+                Some(_) => {}
+                None => {
+                    return CanaryEvaluation::Pending(
+                        "waiting for retry-rate runtime metrics before promotion".to_string(),
+                    )
+                }
+            }
+        }
+
+        if let Some(max_queue_backlog) = criteria.max_queue_backlog {
+            let Some(snapshot) = runtime_metrics.as_ref() else {
+                return CanaryEvaluation::Pending(
+                    "waiting for runtime metrics before evaluating queue backlog".to_string(),
+                );
+            };
+            match metric_value(
+                snapshot.payload.as_ref(),
+                &["queue_backlog", "backlog", "pending_jobs", "queued"],
+            ) {
+                Some(value) if value > max_queue_backlog as f32 => {
+                    return CanaryEvaluation::Regressed(format!(
+                        "queue backlog {:.0} exceeded threshold {}",
+                        value, max_queue_backlog
+                    ));
+                }
+                Some(_) => {}
+                None => {
+                    return CanaryEvaluation::Pending(
+                        "waiting for backlog runtime metrics before promotion".to_string(),
+                    )
+                }
+            }
+        }
+
+        CanaryEvaluation::Healthy
     }
 
     pub async fn export_runtime_environment(
@@ -745,6 +1069,15 @@ impl ModuleService {
             .record_probe("module-runtime", latency_ms, success);
         self.diagnostics
             .record_probe("module-lifecycle", latency_ms, success);
+        crate::infra::telemetry::record_counter("modules.lifecycle.total", 1);
+        crate::infra::telemetry::record_counter(
+            if success {
+                "modules.lifecycle.success_total"
+            } else {
+                "modules.lifecycle.failure_total"
+            },
+            1,
+        );
     }
 
     pub(super) async fn take_service_token(
@@ -800,6 +1133,17 @@ impl ModuleService {
         &self,
         service_id: &str,
     ) -> Result<ModuleIngressTarget, ModuleIngressError> {
+        let targets = self.resolve_ingress_targets(service_id).await?;
+        targets
+            .into_iter()
+            .next()
+            .ok_or_else(|| ModuleIngressError::ModuleNotRunning(service_id.to_string()))
+    }
+
+    pub async fn resolve_ingress_targets(
+        &self,
+        service_id: &str,
+    ) -> Result<Vec<ModuleIngressTarget>, ModuleIngressError> {
         let Some(stripped) = service_id.strip_prefix("module:") else {
             return Err(ModuleIngressError::UnsupportedService(
                 service_id.to_string(),
@@ -814,16 +1158,18 @@ impl ModuleService {
 
         if suffix.is_some() {
             if let Some(target) = self.resolve_override_service(&module_id, service_id).await {
-                return Ok(target);
+                return Ok(vec![target]);
             }
             if let Some(target) = self.resolve_declared_service(&module_id, service_id).await {
-                return Ok(target);
+                return Ok(vec![target]);
             }
             if self
                 .runtime_service_registered(&module_id, service_id)
                 .await
             {
-                return self.resolve_runtime_ingress_target(&module_id).await;
+                return self
+                    .resolve_runtime_ingress_targets(&module_id, service_id)
+                    .await;
             }
             return Err(ModuleIngressError::DeclaredServiceMissing {
                 module_id: module_id.to_string(),
@@ -832,10 +1178,11 @@ impl ModuleService {
         }
 
         if let Some(target) = self.resolve_first_override_service(&module_id).await {
-            return Ok(target);
+            return Ok(vec![target]);
         }
 
-        self.resolve_runtime_ingress_target(&module_id).await
+        self.resolve_runtime_ingress_targets(&module_id, service_id)
+            .await
     }
 
     pub fn new(init: ModuleServiceInit) -> Arc<Self> {
@@ -851,6 +1198,7 @@ impl ModuleService {
                 dev_sources,
                 overrides,
                 client_settings,
+                rollout_settings,
                 health_client,
                 default_service_scopes,
                 env_passthrough_prefixes,
@@ -874,8 +1222,9 @@ impl ModuleService {
                 port_allocator,
                 security,
                 dev_sources: dev_sources_cfg,
-                overrides: Arc::new(overrides),
+                overrides: Arc::new(SyncRwLock::new(overrides)),
                 client_settings,
+                rollout_settings,
                 health_client,
                 diagnostics: Arc::clone(&diagnostics),
                 runtime_gateways: Arc::new(RuntimeGatewayRegistry::new(
@@ -895,9 +1244,13 @@ impl ModuleService {
                 env_passthrough_prefixes,
                 control_plane_url: SyncRwLock::new(control_plane_url),
                 health: SyncRwLock::new(HashMap::new()),
+                instance_health: SyncRwLock::new(HashMap::new()),
                 manifest_client,
                 service_snapshot_path,
                 service_endpoints: Arc::new(RwLock::new(HashMap::new())),
+                runtime_ingress_cursor: Arc::new(Mutex::new(HashMap::new())),
+                canary_allocations: Arc::new(SyncRwLock::new(HashMap::new())),
+                canary_request_cursor: Arc::new(Mutex::new(HashMap::new())),
                 startup_reports: Arc::new(RwLock::new(HashMap::new())),
                 app_services: services,
                 self_ref: weak.clone(),
@@ -949,7 +1302,9 @@ impl ModuleService {
         &self,
         mut descriptor: ServiceDescriptorOwned,
     ) -> ServiceDescriptorOwned {
-        if let Some(policy) = self.overrides.security_override(descriptor.id()) {
+        if let Some(policy) =
+            self.with_overrides(|overrides| overrides.security_override(descriptor.id()))
+        {
             let base = descriptor
                 .security
                 .clone()
@@ -977,6 +1332,18 @@ impl ModuleService {
         );
     }
 
+    pub(super) fn replace_module_service_entry(
+        &self,
+        module_id: &ModuleId,
+        manifest: &ModuleManifest,
+        status: ServiceStatus,
+        note: Option<String>,
+    ) {
+        let descriptor =
+            self.apply_descriptor_overrides(Self::module_service_descriptor(module_id, manifest));
+        self.service_registry.register(descriptor, status, note);
+    }
+
     pub(super) fn update_module_service_status(
         &self,
         module_id: &ModuleId,
@@ -984,9 +1351,537 @@ impl ModuleService {
         status: ServiceStatus,
         note: impl Into<Option<String>>,
     ) {
-        self.ensure_module_service_entry(module_id, manifest);
-        self.service_registry
-            .set_status(&Self::module_service_id(module_id), status, note);
+        self.replace_module_service_entry(module_id, manifest, status, note.into());
+    }
+
+    pub(super) fn with_overrides<T>(&self, f: impl FnOnce(&ModuleServiceOverrides) -> T) -> T {
+        match self.overrides.read() {
+            Ok(guard) => f(&guard),
+            Err(_) => {
+                tracing::warn!("module override lock poisoned; using default override snapshot");
+                f(&ModuleServiceOverrides::default())
+            }
+        }
+    }
+
+    pub(super) fn rollout_config_for(
+        &self,
+        service_id: &str,
+    ) -> Option<ModuleServiceRolloutConfig> {
+        self.with_overrides(|overrides| overrides.rollout_for(service_id))
+    }
+
+    pub async fn canary_routing_status(
+        &self,
+        module_id: &ModuleId,
+    ) -> Result<ModuleCanaryRoutingStatus, ModuleRuntimeError> {
+        let service_id = Self::module_service_id(module_id);
+        let strategy = self
+            .rollout_config_for(&service_id)
+            .and_then(|config| config.strategy);
+        let allocation = self
+            .canary_allocations
+            .read()
+            .ok()
+            .and_then(|guard| guard.get(module_id).cloned())
+            .unwrap_or_default();
+        let instances = self.runtime_instances(module_id).await?;
+        let mut active_canary_instances = Vec::new();
+        let mut active_stable_instances = Vec::new();
+        for instance in instances {
+            if allocation
+                .instance_ids
+                .iter()
+                .any(|id| id == &instance.instance_id)
+            {
+                active_canary_instances.push(instance);
+            } else {
+                active_stable_instances.push(instance);
+            }
+        }
+        Ok(ModuleCanaryRoutingStatus {
+            module_id: module_id.clone(),
+            strategy,
+            traffic_percent: allocation.traffic_percent,
+            configured_instances: allocation.instance_ids,
+            active_canary_instances,
+            active_stable_instances,
+        })
+    }
+
+    pub async fn set_canary_routing(
+        &self,
+        module_id: &ModuleId,
+        traffic_percent: u8,
+        instance_ids: Option<Vec<String>>,
+    ) -> Result<ModuleCanaryRoutingStatus, ModuleRuntimeError> {
+        if traffic_percent > 100 {
+            return Err(ModuleRuntimeError::InvalidState(format!(
+                "canary traffic percent must be between 0 and 100, got {traffic_percent}"
+            )));
+        }
+
+        let service_id = Self::module_service_id(module_id);
+        let strategy = self
+            .rollout_config_for(&service_id)
+            .and_then(|config| config.strategy);
+        if !matches!(strategy, Some(ModuleRolloutStrategy::CanaryReplace)) {
+            return Err(ModuleRuntimeError::InvalidState(format!(
+                "module {module_id} is not configured for canary_replace rollout strategy"
+            )));
+        }
+
+        let runtime_instances = self.runtime_instances(module_id).await?;
+        let default_candidates = runtime_instances
+            .iter()
+            .filter(|instance| !instance.primary)
+            .map(|instance| instance.instance_id.clone())
+            .collect::<Vec<_>>();
+        let selected = instance_ids.unwrap_or(default_candidates);
+        if selected.is_empty() && traffic_percent > 0 {
+            return Err(ModuleRuntimeError::InvalidState(format!(
+                "module {module_id} has no candidate instances available for canary routing"
+            )));
+        }
+        for instance_id in &selected {
+            if !runtime_instances
+                .iter()
+                .any(|instance| &instance.instance_id == instance_id)
+            {
+                return Err(ModuleRuntimeError::InvalidState(format!(
+                    "module {module_id} has no runtime instance '{instance_id}'"
+                )));
+            }
+        }
+
+        match self.canary_allocations.write() {
+            Ok(mut guard) => {
+                if traffic_percent == 0 || selected.is_empty() {
+                    guard.remove(module_id);
+                } else {
+                    guard.insert(
+                        module_id.clone(),
+                        ModuleCanaryAllocation {
+                            traffic_percent,
+                            instance_ids: selected,
+                            last_changed_at: Some(SystemTime::now()),
+                        },
+                    );
+                }
+            }
+            Err(_) => {
+                return Err(ModuleRuntimeError::InvalidState(
+                    "module canary allocation lock poisoned".to_string(),
+                ))
+            }
+        }
+
+        let mut cursor = self.canary_request_cursor.lock().await;
+        cursor.remove(&service_id);
+        drop(cursor);
+        self.canary_routing_status(module_id).await
+    }
+
+    pub async fn start_canary_routing(
+        &self,
+        module_id: &ModuleId,
+        instance_ids: Option<Vec<String>>,
+    ) -> Result<ModuleCanaryRoutingStatus, ModuleRuntimeError> {
+        let service_id = Self::module_service_id(module_id);
+        let rollout = self.rollout_config_for(&service_id).ok_or_else(|| {
+            ModuleRuntimeError::InvalidState(format!(
+                "module {module_id} has no rollout configuration"
+            ))
+        })?;
+        if !matches!(rollout.strategy, Some(ModuleRolloutStrategy::CanaryReplace)) {
+            return Err(ModuleRuntimeError::InvalidState(format!(
+                "module {module_id} is not configured for canary_replace rollout strategy"
+            )));
+        }
+        let initial_percent = rollout
+            .traffic_steps
+            .iter()
+            .copied()
+            .find(|step| *step > 0)
+            .unwrap_or(10);
+        self.set_canary_routing(module_id, initial_percent, instance_ids)
+            .await
+    }
+
+    pub async fn clear_canary_routing(
+        &self,
+        module_id: &ModuleId,
+    ) -> Result<ModuleCanaryRoutingStatus, ModuleRuntimeError> {
+        match self.canary_allocations.write() {
+            Ok(mut guard) => {
+                guard.remove(module_id);
+            }
+            Err(_) => {
+                return Err(ModuleRuntimeError::InvalidState(
+                    "module canary allocation lock poisoned".to_string(),
+                ))
+            }
+        }
+        let mut cursor = self.canary_request_cursor.lock().await;
+        cursor.remove(&Self::module_service_id(module_id));
+        drop(cursor);
+        self.canary_routing_status(module_id).await
+    }
+
+    pub async fn reload_service_overrides(
+        &self,
+        overrides: ModuleServiceOverrides,
+        restart_running: bool,
+    ) -> Result<ModuleOverrideReloadReport, ModuleServiceError> {
+        crate::infra::telemetry::record_counter("modules.override_reload.total", 1);
+        let previous_overrides = self.with_overrides(Clone::clone);
+        let previous_env = previous_overrides.env_snapshot();
+        let next_env = overrides.env_snapshot();
+        match self.overrides.write() {
+            Ok(mut guard) => {
+                *guard = overrides;
+            }
+            Err(_) => {
+                return Err(ModuleServiceError::Storage(
+                    ModuleStorageError::InvalidState("module override lock poisoned".to_string()),
+                ));
+            }
+        }
+
+        let installed = self
+            .storage
+            .list()
+            .await
+            .map_err(ModuleServiceError::Storage)?;
+        let mut restarted = Vec::new();
+        let mut module_reports = Vec::new();
+        let mut rollout_failed = false;
+        let mut rollout_aborted = false;
+
+        for module in installed {
+            let module_id = ModuleId::new(&module.manifest.id).map_err(|err| {
+                ModuleServiceError::Storage(ModuleStorageError::InvalidState(err.to_string()))
+            })?;
+            let service_id = Self::module_service_id(&module_id);
+            let had_env = previous_env.get(&service_id);
+            let has_env = next_env.get(&service_id);
+            let env_changed = had_env != has_env;
+            let previous_replicas = previous_overrides
+                .desired_replicas_for(&service_id)
+                .unwrap_or(1);
+            let next_replicas = self
+                .with_overrides(|snapshot| snapshot.desired_replicas_for(&service_id))
+                .unwrap_or(1);
+            let replicas_changed = previous_replicas != next_replicas;
+
+            let current_snapshot = self.service_registry.get(&service_id);
+            let status = current_snapshot
+                .as_ref()
+                .map(|entry| entry.status)
+                .unwrap_or(ServiceStatus::Standby);
+            let note = current_snapshot.and_then(|entry| entry.note);
+            self.replace_module_service_entry(&module_id, &module.manifest, status, note);
+
+            if rollout_aborted && restart_running && env_changed {
+                module_reports.push(ModuleOverrideReloadModuleReport {
+                    module_id,
+                    action: ModuleOverrideReloadAction::Skipped,
+                    env_changed,
+                    health_checked: false,
+                    healthy: false,
+                    rolled_back: false,
+                    note: "restart skipped because a previous module failed rollout health checks"
+                        .to_string(),
+                });
+                continue;
+            }
+
+            match self.runtime.status(&module_id).await {
+                Ok(runtime_info) if matches!(runtime_info.status, ModuleRuntimeStatus::Running) => {
+                    if restart_running && env_changed {
+                        crate::infra::telemetry::record_counter(
+                            "modules.override_reload.restarted_total",
+                            1,
+                        );
+                        let info = self.restart(&module_id).await.map_err(|err| {
+                            ModuleServiceError::Storage(ModuleStorageError::InvalidState(
+                                err.to_string(),
+                            ))
+                        })?;
+                        let health = self
+                            .verify_module_rollout_health(&module_id, info.port)
+                            .await;
+                        let healthy = health.is_ok();
+                        if !healthy {
+                            rollout_failed = true;
+                            crate::infra::telemetry::record_counter(
+                                "modules.override_reload.health_failed_total",
+                                1,
+                            );
+                            if self.rollout_settings.abort_on_first_failure {
+                                rollout_aborted = true;
+                            }
+                        }
+                        restarted.push(info.module_id.clone());
+                        module_reports.push(ModuleOverrideReloadModuleReport {
+                            module_id: info.module_id,
+                            action: ModuleOverrideReloadAction::Restarted,
+                            env_changed,
+                            health_checked: true,
+                            healthy,
+                            rolled_back: false,
+                            note: health.unwrap_or_else(|err| err),
+                        });
+                        if healthy && !self.rollout_settings.inter_restart_delay.is_zero() {
+                            sleep(self.rollout_settings.inter_restart_delay).await;
+                        }
+                        continue;
+                    }
+
+                    if replicas_changed {
+                        if next_replicas == 0 {
+                            self.stop(&module_id).await.map_err(|err| {
+                                ModuleServiceError::Storage(ModuleStorageError::InvalidState(
+                                    err.to_string(),
+                                ))
+                            })?;
+                            module_reports.push(ModuleOverrideReloadModuleReport {
+                                module_id,
+                                action: ModuleOverrideReloadAction::Reconciled,
+                                env_changed,
+                                health_checked: false,
+                                healthy: true,
+                                rolled_back: false,
+                                note: "replica target reconciled to 0; module stopped".to_string(),
+                            });
+                            continue;
+                        }
+
+                        let env_vars = self.runtime.env(&module_id).await.unwrap_or_default();
+                        let instances = self
+                            .runtime
+                            .reconcile_instances(
+                                crate::domain::module::ModuleStartConfig {
+                                    module_id: module_id.clone(),
+                                    port: None,
+                                    env_vars,
+                                    auto_restart: false,
+                                },
+                                next_replicas,
+                            )
+                            .await
+                            .map_err(|err| {
+                                ModuleServiceError::Storage(ModuleStorageError::InvalidState(
+                                    err.to_string(),
+                                ))
+                            })?;
+                        let primary_port = instances
+                            .iter()
+                            .find(|instance| instance.primary)
+                            .and_then(|instance| instance.runtime.port);
+                        let health = self
+                            .verify_module_rollout_health(&module_id, primary_port)
+                            .await;
+                        let healthy = health.is_ok();
+                        module_reports.push(ModuleOverrideReloadModuleReport {
+                            module_id,
+                            action: ModuleOverrideReloadAction::Reconciled,
+                            env_changed,
+                            health_checked: primary_port.is_some(),
+                            healthy,
+                            rolled_back: false,
+                            note: if healthy {
+                                format!("replica target reconciled to {next_replicas}")
+                            } else {
+                                health.unwrap_or_else(|err| err)
+                            },
+                        });
+                        if !healthy {
+                            rollout_failed = true;
+                            if self.rollout_settings.abort_on_first_failure {
+                                rollout_aborted = true;
+                            }
+                        }
+                        continue;
+                    }
+
+                    if let Some(port) = runtime_info.port {
+                        let _ = self
+                            .refresh_reported_services(&module_id, &module.manifest, Some(port))
+                            .await;
+                    }
+                    module_reports.push(ModuleOverrideReloadModuleReport {
+                        module_id,
+                        action: if env_changed {
+                            ModuleOverrideReloadAction::DescriptorRefreshed
+                        } else {
+                            ModuleOverrideReloadAction::Unchanged
+                        },
+                        env_changed,
+                        health_checked: false,
+                        healthy: true,
+                        rolled_back: false,
+                        note: if env_changed {
+                            "runtime environment changed but restart was disabled".to_string()
+                        } else {
+                            "descriptor refreshed".to_string()
+                        },
+                    });
+                }
+                Ok(_) => {
+                    module_reports.push(ModuleOverrideReloadModuleReport {
+                        module_id,
+                        action: if env_changed {
+                            ModuleOverrideReloadAction::DescriptorRefreshed
+                        } else {
+                            ModuleOverrideReloadAction::Unchanged
+                        },
+                        env_changed,
+                        health_checked: false,
+                        healthy: true,
+                        rolled_back: false,
+                        note: "module not running".to_string(),
+                    });
+                }
+                Err(err) => {
+                    tracing::debug!(
+                        module = %module_id,
+                        error = %err,
+                        "skipping runtime refresh during override reload"
+                    );
+                    module_reports.push(ModuleOverrideReloadModuleReport {
+                        module_id,
+                        action: ModuleOverrideReloadAction::Unchanged,
+                        env_changed,
+                        health_checked: false,
+                        healthy: false,
+                        rolled_back: false,
+                        note: format!("runtime status unavailable: {err}"),
+                    });
+                }
+            }
+        }
+
+        if rollout_failed && self.rollout_settings.rollback_on_failure {
+            crate::infra::telemetry::record_counter("modules.override_reload.rollback_total", 1);
+            let rollback_restarted = self
+                .rollback_service_overrides(previous_overrides, &restarted)
+                .await?;
+            for report in &mut module_reports {
+                if restarted
+                    .iter()
+                    .any(|module_id| module_id == &report.module_id)
+                {
+                    report.rolled_back = true;
+                }
+            }
+            crate::infra::telemetry::record_counter("modules.override_reload.failure_total", 1);
+            crate::infra::telemetry::set_counter(
+                "modules.override_reload.last_restarted",
+                restarted.len() as u64,
+            );
+            crate::infra::telemetry::set_counter(
+                "modules.override_reload.last_rollback_restarted",
+                rollback_restarted.len() as u64,
+            );
+            return Ok(ModuleOverrideReloadReport {
+                status: ModuleOverrideReloadStatus::RolledBack,
+                restart_running,
+                restarted_modules: restarted,
+                rollback_restarted_modules: rollback_restarted,
+                modules: module_reports,
+            });
+        }
+
+        let status = if rollout_failed {
+            crate::infra::telemetry::record_counter("modules.override_reload.failure_total", 1);
+            ModuleOverrideReloadStatus::Failed
+        } else {
+            crate::infra::telemetry::record_counter("modules.override_reload.success_total", 1);
+            ModuleOverrideReloadStatus::Applied
+        };
+        crate::infra::telemetry::set_counter(
+            "modules.override_reload.last_restarted",
+            restarted.len() as u64,
+        );
+        crate::infra::telemetry::set_counter("modules.override_reload.last_rollback_restarted", 0);
+
+        Ok(ModuleOverrideReloadReport {
+            status,
+            restart_running,
+            restarted_modules: restarted,
+            rollback_restarted_modules: Vec::new(),
+            modules: module_reports,
+        })
+    }
+
+    async fn rollback_service_overrides(
+        &self,
+        previous_overrides: ModuleServiceOverrides,
+        restarted_modules: &[ModuleId],
+    ) -> Result<Vec<ModuleId>, ModuleServiceError> {
+        match self.overrides.write() {
+            Ok(mut guard) => {
+                *guard = previous_overrides;
+            }
+            Err(_) => {
+                return Err(ModuleServiceError::Storage(
+                    ModuleStorageError::InvalidState(
+                        "module override lock poisoned during rollback".to_string(),
+                    ),
+                ));
+            }
+        }
+
+        let mut rollback_restarted = Vec::new();
+        for module_id in restarted_modules.iter().rev() {
+            let info = self.restart(module_id).await.map_err(|err| {
+                ModuleServiceError::Storage(ModuleStorageError::InvalidState(format!(
+                    "rollback restart failed for {module_id}: {err}"
+                )))
+            })?;
+            let health = self
+                .verify_module_rollout_health(module_id, info.port)
+                .await;
+            if let Err(err) = health {
+                return Err(ModuleServiceError::Storage(
+                    ModuleStorageError::InvalidState(format!(
+                        "rollback health check failed for {module_id}: {err}"
+                    )),
+                ));
+            }
+            rollback_restarted.push(module_id.clone());
+        }
+        Ok(rollback_restarted)
+    }
+
+    pub(super) async fn verify_module_rollout_health(
+        &self,
+        module_id: &ModuleId,
+        port: Option<u16>,
+    ) -> Result<String, String> {
+        let Some(port) = port else {
+            return Ok("restart completed without a routable runtime port".to_string());
+        };
+
+        let started_at = Instant::now();
+        loop {
+            match self
+                .probe_runtime_service_with_result(module_id, port)
+                .await
+            {
+                Ok(()) => {
+                    let latency_ms = started_at.elapsed().as_millis();
+                    return Ok(format!("health check passed in {latency_ms}ms"));
+                }
+                Err(err) => {
+                    if started_at.elapsed() >= self.rollout_settings.health_check_timeout {
+                        return Err(err);
+                    }
+                    sleep(self.rollout_settings.health_poll_interval).await;
+                }
+            }
+        }
     }
 
     fn unregister_module_service(&self, module_id: &ModuleId) {
@@ -1030,15 +1925,13 @@ impl ModuleService {
     ) -> Option<ModuleIngressTarget> {
         let guard = self.dev_overrides.read().await;
         guard.get(module_id).and_then(|state| {
-            state
-                .services
-                .iter()
-                .next()
-                .map(|(svc_id, &endpoint)| ModuleIngressTarget::DevService {
+            state.services.iter().next().map(|(svc_id, &endpoint)| {
+                ModuleIngressTarget::DevService {
                     module_id: module_id.clone(),
                     service_id: svc_id.clone(),
                     endpoint,
-                })
+                }
+            })
         })
     }
 
@@ -1059,31 +1952,161 @@ impl ModuleService {
         })
     }
 
-    async fn resolve_runtime_ingress_target(
+    async fn resolve_runtime_ingress_targets(
         &self,
         module_id: &ModuleId,
-    ) -> Result<ModuleIngressTarget, ModuleIngressError> {
+        service_id: &str,
+    ) -> Result<Vec<ModuleIngressTarget>, ModuleIngressError> {
         if self.is_dev_override_active(module_id).await {
             return Err(ModuleIngressError::ModuleNotRunning(module_id.to_string()));
         }
-        match self.runtime.status(module_id).await {
-            Ok(info) => {
-                if !matches!(info.status, ModuleRuntimeStatus::Running) {
+        match self.runtime.list_instances(module_id).await {
+            Ok(instances) => {
+                let mut running = instances
+                    .into_iter()
+                    .filter(|instance| {
+                        matches!(instance.runtime.status, ModuleRuntimeStatus::Running)
+                            && instance.runtime.port.is_some()
+                    })
+                    .collect::<Vec<_>>();
+                if running.is_empty() {
                     return Err(ModuleIngressError::ModuleNotRunning(module_id.to_string()));
                 }
-                if let Some(port) = info.port {
-                    return Ok(ModuleIngressTarget::RuntimePort {
+                if let Some(ready_ids) = self.ready_runtime_instance_ids(module_id) {
+                    let ready = running
+                        .iter()
+                        .filter(|instance| ready_ids.iter().any(|id| id == &instance.instance_id))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if !ready.is_empty() {
+                        running = ready;
+                    }
+                }
+                let selected_pool = self
+                    .runtime_selection_pool(module_id, service_id, &running)
+                    .await;
+                let ordered_pool = self
+                    .ordered_runtime_selection_pool(service_id, &selected_pool)
+                    .await;
+                let mut targets = Vec::with_capacity(ordered_pool.len());
+                for selected in ordered_pool {
+                    let port = selected.runtime.port.ok_or_else(|| {
+                        ModuleIngressError::ModulePortUnknown(module_id.to_string())
+                    })?;
+                    targets.push(ModuleIngressTarget::RuntimePort {
                         module_id: module_id.clone(),
+                        instance_id: selected.instance_id.clone(),
                         port,
                     });
                 }
-                Err(ModuleIngressError::ModulePortUnknown(module_id.to_string()))
+                Ok(targets)
             }
             Err(ModuleRuntimeError::NotRunning { .. }) => {
                 Err(ModuleIngressError::ModuleNotRunning(module_id.to_string()))
             }
             Err(err) => Err(ModuleIngressError::Runtime(err)),
         }
+    }
+
+    async fn next_runtime_ingress_index(&self, service_id: &str, instance_count: usize) -> usize {
+        if instance_count <= 1 {
+            return 0;
+        }
+        let mut guard = self.runtime_ingress_cursor.lock().await;
+        let next = guard.entry(service_id.to_string()).or_insert(0);
+        let index = *next % instance_count;
+        *next = (index + 1) % instance_count;
+        index
+    }
+
+    async fn ordered_runtime_selection_pool(
+        &self,
+        service_id: &str,
+        selected_pool: &[crate::domain::module::ModuleRuntimeInstanceInfo],
+    ) -> Vec<crate::domain::module::ModuleRuntimeInstanceInfo> {
+        if selected_pool.len() <= 1 {
+            return selected_pool.to_vec();
+        }
+        let start = self
+            .next_runtime_ingress_index(service_id, selected_pool.len())
+            .await;
+        ordered_runtime_candidates(selected_pool, start)
+    }
+
+    async fn runtime_selection_pool(
+        &self,
+        module_id: &ModuleId,
+        service_id: &str,
+        running: &[crate::domain::module::ModuleRuntimeInstanceInfo],
+    ) -> Vec<crate::domain::module::ModuleRuntimeInstanceInfo> {
+        let canary_allocation = self
+            .canary_allocations
+            .read()
+            .ok()
+            .and_then(|guard| guard.get(module_id).cloned());
+        let rollout = self.rollout_config_for(service_id);
+        let Some(allocation) = canary_allocation else {
+            return running.to_vec();
+        };
+        if allocation.traffic_percent == 0
+            || !matches!(
+                rollout.and_then(|config| config.strategy),
+                Some(ModuleRolloutStrategy::CanaryReplace)
+            )
+        {
+            return running.to_vec();
+        }
+
+        let canary_pool = running
+            .iter()
+            .filter(|instance| {
+                allocation
+                    .instance_ids
+                    .iter()
+                    .any(|id| id == &instance.instance_id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let stable_pool = running
+            .iter()
+            .filter(|instance| {
+                !allocation
+                    .instance_ids
+                    .iter()
+                    .any(|id| id == &instance.instance_id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if canary_pool.is_empty() {
+            return stable_pool;
+        }
+        if stable_pool.is_empty() {
+            return canary_pool;
+        }
+
+        if self
+            .should_route_to_canary(service_id, allocation.traffic_percent)
+            .await
+        {
+            canary_pool
+        } else {
+            stable_pool
+        }
+    }
+
+    async fn should_route_to_canary(&self, service_id: &str, traffic_percent: u8) -> bool {
+        if traffic_percent == 0 {
+            return false;
+        }
+        if traffic_percent >= 100 {
+            return true;
+        }
+        let mut guard = self.canary_request_cursor.lock().await;
+        let next = guard.entry(service_id.to_string()).or_insert(0);
+        let bucket = (*next % 100) as u8;
+        *next = next.saturating_add(1);
+        bucket < traffic_percent
     }
 
     async fn runtime_service_registered(&self, module_id: &ModuleId, service_id: &str) -> bool {
@@ -1801,6 +2824,90 @@ impl ModuleService {
         }
     }
 
+    pub(super) fn update_instance_health(
+        &self,
+        module_id: &ModuleId,
+        instance_id: &str,
+        ready: bool,
+        error: Option<String>,
+    ) {
+        if let Ok(mut guard) = self.instance_health.write() {
+            let entry = guard.entry(module_id.clone()).or_default();
+            entry.insert(
+                instance_id.to_string(),
+                RuntimeInstanceHealth {
+                    ready,
+                    last_error: error,
+                },
+            );
+        }
+    }
+
+    pub(super) fn clear_instance_health(&self, module_id: &ModuleId) {
+        if let Ok(mut guard) = self.instance_health.write() {
+            guard.remove(module_id);
+        }
+    }
+
+    pub(super) fn prune_instance_health(
+        &self,
+        module_id: &ModuleId,
+        active_instance_ids: &[String],
+    ) {
+        if let Ok(mut guard) = self.instance_health.write() {
+            let Some(entries) = guard.get_mut(module_id) else {
+                return;
+            };
+            entries.retain(|instance_id, _| active_instance_ids.iter().any(|id| id == instance_id));
+            if entries.is_empty() {
+                guard.remove(module_id);
+            }
+        }
+    }
+
+    pub(super) fn ready_runtime_instance_ids(&self, module_id: &ModuleId) -> Option<Vec<String>> {
+        let guard = self.instance_health.read().ok()?;
+        let entries = guard.get(module_id)?;
+        let ready = entries
+            .iter()
+            .filter(|(_, health)| health.ready)
+            .map(|(instance_id, _)| instance_id.clone())
+            .collect::<Vec<_>>();
+        if ready.is_empty() {
+            None
+        } else {
+            Some(ready)
+        }
+    }
+
+    pub(super) fn sync_module_service_status(&self, module_id: &ModuleId, module_ready: bool) {
+        let service_id = Self::module_service_id(module_id);
+        let note = if module_ready {
+            Some(module_service_notes::HEALTHY.to_string())
+        } else {
+            self.instance_health
+                .read()
+                .ok()
+                .and_then(|guard| guard.get(module_id).cloned())
+                .and_then(|entries| {
+                    entries
+                        .values()
+                        .filter_map(|entry| entry.last_error.clone())
+                        .next()
+                })
+                .or_else(|| Some("all runtime instances failed readiness probes".to_string()))
+        };
+        self.service_registry.set_status(
+            &service_id,
+            if module_ready {
+                ServiceStatus::Active
+            } else {
+                ServiceStatus::Degraded
+            },
+            note,
+        );
+    }
+
     pub(super) fn annotate_quarantine(
         &self,
         module_id: &ModuleId,
@@ -1815,6 +2922,55 @@ impl ModuleService {
             Some(module_service_notes::quarantined(formatted)),
         );
     }
+}
+
+enum CanaryEvaluation {
+    Healthy,
+    Pending(String),
+    Regressed(String),
+}
+
+fn next_canary_percent(rollout: &ModuleServiceRolloutConfig, current: u8) -> u8 {
+    let steps = if rollout.traffic_steps.is_empty() {
+        vec![10, 25, 50, 100]
+    } else {
+        rollout.traffic_steps.clone()
+    };
+    steps
+        .into_iter()
+        .find(|step| *step > current)
+        .unwrap_or(current)
+}
+
+fn metric_value(payload: Option<&JsonValue>, keys: &[&str]) -> Option<f32> {
+    fn recurse(value: &JsonValue, keys: &[&str]) -> Option<f32> {
+        match value {
+            JsonValue::Object(map) => {
+                for key in keys {
+                    if let Some(value) = map.get(*key) {
+                        if let Some(number) = value.as_f64() {
+                            return Some(number as f32);
+                        }
+                        if let Some(text) = value.as_str() {
+                            if let Ok(parsed) = text.parse::<f32>() {
+                                return Some(parsed);
+                            }
+                        }
+                    }
+                }
+                for nested in map.values() {
+                    if let Some(found) = recurse(nested, keys) {
+                        return Some(found);
+                    }
+                }
+                None
+            }
+            JsonValue::Array(values) => values.iter().find_map(|nested| recurse(nested, keys)),
+            _ => None,
+        }
+    }
+
+    payload.and_then(|value| recurse(value, keys))
 }
 
 fn check_fenrir_compatibility(manifest: &ModuleManifest, fenrir_version: &str) -> bool {
@@ -1838,6 +2994,21 @@ fn runtime_service_present(
         .get(module_id)
         .map(|services| services.iter().any(|id| id == service_id))
         .unwrap_or(false)
+}
+
+fn ordered_runtime_candidates(
+    candidates: &[crate::domain::module::ModuleRuntimeInstanceInfo],
+    start: usize,
+) -> Vec<crate::domain::module::ModuleRuntimeInstanceInfo> {
+    if candidates.len() <= 1 {
+        return candidates.to_vec();
+    }
+    let start = start % candidates.len();
+    candidates[start..]
+        .iter()
+        .chain(candidates[..start].iter())
+        .cloned()
+        .collect()
 }
 
 async fn cleanup_runtime_state(
@@ -1885,10 +3056,11 @@ async fn cleanup_runtime_state(
 
 #[cfg(test)]
 mod tests {
-    use super::{check_fenrir_compatibility, runtime_service_present};
+    use super::{check_fenrir_compatibility, ordered_runtime_candidates, runtime_service_present};
     use crate::domain::module::{
         ChecksumAlgorithm, ModuleArtifactDescriptor, ModuleChecksum, ModuleId, ModuleManifest,
-        ModuleSignatureDescriptor, SignatureAlgorithm,
+        ModuleRuntimeInfo, ModuleRuntimeInstanceInfo, ModuleRuntimeKind, ModuleRuntimeStatus,
+        ModuleSignatureDescriptor, ModuleVersion, SignatureAlgorithm,
     };
     use std::collections::HashMap;
 
@@ -1934,6 +3106,39 @@ mod tests {
             &module,
             "module:fenrir-api::api-gateway"
         ));
+    }
+
+    #[test]
+    fn rotates_runtime_candidates_from_requested_start() {
+        let module_id = module("athene-api");
+        let instance = |id: &str, port: u16| ModuleRuntimeInstanceInfo {
+            instance_id: id.to_string(),
+            primary: id == "inst-1",
+            runtime: ModuleRuntimeInfo {
+                module_id: module_id.clone(),
+                version: ModuleVersion::parse("1.0.0").expect("version valid"),
+                status: ModuleRuntimeStatus::Running,
+                kind: ModuleRuntimeKind::Process,
+                pid: None,
+                port: Some(port),
+                started_at: None,
+                stopped_at: None,
+                restart_count: 0,
+            },
+        };
+        let ordered = ordered_runtime_candidates(
+            &[
+                instance("inst-1", 41004),
+                instance("inst-2", 41014),
+                instance("inst-3", 41024),
+            ],
+            1,
+        );
+        let ids = ordered
+            .iter()
+            .map(|instance| instance.instance_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["inst-2", "inst-3", "inst-1"]);
     }
 
     #[test]

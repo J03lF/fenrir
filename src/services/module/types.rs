@@ -1,8 +1,12 @@
-use std::{fmt, net::SocketAddr, path::PathBuf, str::FromStr};
+use std::{fmt, net::SocketAddr, path::PathBuf, str::FromStr, time::SystemTime};
 
 use thiserror::Error;
 
-use crate::domain::module::{ModuleId, ModuleInstallResult, ModuleRuntimeError, ModuleVersion};
+use crate::config::ModuleRolloutStrategy;
+use crate::domain::module::{
+    ModuleId, ModuleInstallResult, ModuleRuntimeError, ModuleRuntimeInfo,
+    ModuleRuntimeInstanceInfo, ModuleRuntimeStatus, ModuleVersion,
+};
 use crate::services::{ServiceIngressMetadata, ServiceKind, ServiceSecurityMetadata};
 use crate::utils::messages::services::module::types::distribution_action;
 
@@ -93,10 +97,90 @@ pub struct RegisteredDevService {
     pub ingress: Option<ServiceIngressMetadata>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ModuleRuntimeInstanceSnapshot {
+    pub instance_id: String,
+    pub module_id: ModuleId,
+    pub status: ModuleRuntimeStatus,
+    pub kind: crate::domain::module::ModuleRuntimeKind,
+    pub pid: Option<u32>,
+    pub port: Option<u16>,
+    pub endpoint: Option<String>,
+    pub started_at: Option<SystemTime>,
+    pub stopped_at: Option<SystemTime>,
+    pub restart_count: u32,
+    pub primary: bool,
+}
+
+impl ModuleRuntimeInstanceSnapshot {
+    pub fn from_runtime_info(info: ModuleRuntimeInfo) -> Self {
+        let instance_id = if let Some(port) = info.port {
+            format!("{}:port:{port}", info.module_id)
+        } else if let Some(pid) = info.pid {
+            format!("{}:pid:{pid}", info.module_id)
+        } else {
+            format!("{}:primary", info.module_id)
+        };
+        let endpoint = info.port.map(|port| format!("http://127.0.0.1:{port}"));
+        Self {
+            instance_id,
+            module_id: info.module_id,
+            status: info.status,
+            kind: info.kind,
+            pid: info.pid,
+            port: info.port,
+            endpoint,
+            started_at: info.started_at,
+            stopped_at: info.stopped_at,
+            restart_count: info.restart_count,
+            primary: true,
+        }
+    }
+
+    pub fn from_instance_info(instance: ModuleRuntimeInstanceInfo) -> Self {
+        let endpoint = instance
+            .runtime
+            .port
+            .map(|port| format!("http://127.0.0.1:{port}"));
+        Self {
+            instance_id: instance.instance_id,
+            module_id: instance.runtime.module_id,
+            status: instance.runtime.status,
+            kind: instance.runtime.kind,
+            pid: instance.runtime.pid,
+            port: instance.runtime.port,
+            endpoint,
+            started_at: instance.runtime.started_at,
+            stopped_at: instance.runtime.stopped_at,
+            restart_count: instance.runtime.restart_count,
+            primary: instance.primary,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ModuleRollingRestartReport {
+    pub module_id: ModuleId,
+    pub restarted_instances: Vec<ModuleRuntimeInstanceSnapshot>,
+    pub health_verified: bool,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ModuleCanaryRoutingStatus {
+    pub module_id: ModuleId,
+    pub strategy: Option<ModuleRolloutStrategy>,
+    pub traffic_percent: u8,
+    pub configured_instances: Vec<String>,
+    pub active_canary_instances: Vec<ModuleRuntimeInstanceSnapshot>,
+    pub active_stable_instances: Vec<ModuleRuntimeInstanceSnapshot>,
+}
+
 #[derive(Debug, Clone)]
 pub enum ModuleIngressTarget {
     RuntimePort {
         module_id: ModuleId,
+        instance_id: String,
         port: u16,
     },
     DevService {
@@ -257,6 +341,42 @@ pub struct ModuleStartupReport {
     pub completed_at: String,
     pub total_duration_ms: u64,
     pub phases: Vec<ModuleStartupPhaseReport>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModuleOverrideReloadStatus {
+    Applied,
+    RolledBack,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModuleOverrideReloadAction {
+    DescriptorRefreshed,
+    Reconciled,
+    Restarted,
+    Skipped,
+    Unchanged,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModuleOverrideReloadModuleReport {
+    pub module_id: ModuleId,
+    pub action: ModuleOverrideReloadAction,
+    pub env_changed: bool,
+    pub health_checked: bool,
+    pub healthy: bool,
+    pub rolled_back: bool,
+    pub note: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModuleOverrideReloadReport {
+    pub status: ModuleOverrideReloadStatus,
+    pub restart_running: bool,
+    pub restarted_modules: Vec<ModuleId>,
+    pub rollback_restarted_modules: Vec<ModuleId>,
+    pub modules: Vec<ModuleOverrideReloadModuleReport>,
 }
 
 // ============================================================================

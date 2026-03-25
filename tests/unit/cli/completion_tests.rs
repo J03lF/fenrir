@@ -181,6 +181,7 @@ fn test_config() -> Arc<AppConfig> {
             trust: ModuleTrustSection::default(),
             dev_sources: ModuleDevSourcesSection::default(),
             services: HashMap::new(),
+            service_profiles: HashMap::new(),
         },
         runtime: RuntimeSection::default(),
     })

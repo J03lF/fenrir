@@ -21,7 +21,7 @@ port = 2222
 user = "test"
 server_name = "fenrir-Test"
 host_key_path = "keys/server/ssh/host_ed25519"
-idle_close_seconds = 300
+
 
 [server.ssh.tls]
 allowed_ciphers = []
@@ -100,6 +100,7 @@ cleanup_interval_seconds = 300
 lifetime_seconds = 900
 idle_timeout_seconds = 300
 cleanup_interval_seconds = 60
+refresh_grace_seconds = 3600
 
 [db]
 default_engine = "postgres"

@@ -67,7 +67,7 @@ pub fn list_sql_files_in(dir: &Path) -> Result<Vec<String>> {
     }
     let mut files: Vec<String> = fs::read_dir(dir)?
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().is_file() && e.path().extension().map_or(false, |ext| ext == "sql"))
+        .filter(|e| e.path().is_file() && e.path().extension().is_some_and(|ext| ext == "sql"))
         .filter_map(|e| e.file_name().into_string().ok())
         .collect();
     files.sort();

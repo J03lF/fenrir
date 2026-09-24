@@ -281,10 +281,9 @@ pub fn boot() -> Result<BootContext, BootError> {
         crate::infra::telemetry::register_readiness_probe("services", {
             let registry = Arc::clone(&registry);
             move || {
-                registry
-                    .snapshot()
-                    .into_iter()
-                    .all(|svc| !matches!(svc.status, ServiceStatus::Failed))
+                registry.snapshot().into_iter().all(|svc| {
+                    !svc.descriptor.critical || !matches!(svc.status, ServiceStatus::Failed)
+                })
             }
         }),
         BootErrorCode::TelemetryProbe,
@@ -444,6 +443,7 @@ pub fn boot() -> Result<BootContext, BootError> {
         Arc::clone(&audit_log),
         Arc::clone(&diagnostics),
     ));
+    services.start_public_status_tracking();
     services.set_logging_handle(logging_handle.clone());
     let audit_sink: Arc<dyn AuditSink> = Arc::clone(&services) as Arc<dyn AuditSink>;
 

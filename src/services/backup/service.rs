@@ -488,7 +488,7 @@ impl BackupService {
         let mut backups = self.list_backups_internal().await?;
 
         // Sort by creation time (newest first)
-        backups.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        backups.sort_by_key(|b| std::cmp::Reverse(b.created_at));
 
         // Remove old backups
         if backups.len() > self.config.retention_count {

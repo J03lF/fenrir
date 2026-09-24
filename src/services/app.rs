@@ -22,6 +22,7 @@ use super::managed::{
     ServiceControlOutcome,
 };
 use super::module::ModuleService;
+use super::public_status::PublicStatusTracker;
 use super::registry::ServiceRegistry;
 use super::scheduler::{JobControlOutcome, ScheduledJobSnapshot, SchedulerError, SchedulerService};
 use super::security::{InstrumentedIdentityProvider, SessionService};
@@ -44,6 +45,7 @@ pub struct AppServices {
     identity: OnceCell<Arc<dyn IdentityProvider>>,
     db_runtime: OnceCell<Arc<crate::infra::db::runtime::DbRuntimeSupervisor>>,
     backup_service: OnceCell<Arc<BackupService>>,
+    public_status: Arc<PublicStatusTracker>,
 }
 
 impl AppServices {
@@ -71,6 +73,7 @@ impl AppServices {
             identity: OnceCell::new(),
             db_runtime: OnceCell::new(),
             backup_service: OnceCell::new(),
+            public_status: Arc::new(PublicStatusTracker::default()),
         }
     }
 
@@ -207,6 +210,14 @@ impl AppServices {
 
     pub fn diagnostics(&self) -> Arc<ServiceDiagnostics> {
         Arc::clone(&self.diagnostics)
+    }
+
+    pub fn start_public_status_tracking(&self) {
+        self.public_status.start(self.registry());
+    }
+
+    pub fn public_status_tracker(&self) -> Arc<PublicStatusTracker> {
+        Arc::clone(&self.public_status)
     }
 
     pub fn service_diagnostics(&self, id: &str) -> Option<ServiceMetricSnapshot> {

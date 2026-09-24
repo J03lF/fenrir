@@ -183,6 +183,15 @@ impl SecurityManager {
         Ok(self.service_tokens.validate(token)?)
     }
 
+    /// Validate with extended grace window — only for the token-exchange
+    /// endpoint so modules can recover expired tokens after system sleep.
+    pub fn validate_service_token_for_refresh(
+        &self,
+        token: &str,
+    ) -> Result<DelegatedTokenClaims, SecurityError> {
+        Ok(self.service_tokens.validate_for_refresh(token)?)
+    }
+
     pub fn sign_service_manifest(
         &self,
         token: &str,

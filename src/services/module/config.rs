@@ -256,6 +256,12 @@ impl ModuleEnvVar {
         })
     }
 
+    // ModuleEnvResolutionError carries the full secret-resolution context
+    // (service id, key name, env-var name, file path attempted) which is
+    // valuable in error messages and audit logs. Boxing it would lose
+    // ergonomics for every caller; the Result-large-err cost is paid only
+    // on the error path which is rare.
+    #[allow(clippy::result_large_err)]
     pub fn resolve_for(
         &self,
         service_id: &str,
@@ -345,6 +351,7 @@ impl ModuleEnvResolutionError {
     }
 }
 
+#[allow(clippy::result_large_err)] // see `resolve_for` for the rationale
 fn resolve_secret_value(
     service_id: &str,
     key: &str,
@@ -543,9 +550,11 @@ impl ModuleServiceProfileResolved {
         profile_name: &str,
         profile: &ModuleServiceProfile,
     ) -> Result<Self, ConfigError> {
-        let mut resolved = ModuleServiceProfileResolved::default();
-        resolved.desired_replicas = profile.replicas;
-        resolved.rollout = profile.rollout.clone();
+        let mut resolved = ModuleServiceProfileResolved {
+            desired_replicas: profile.replicas,
+            rollout: profile.rollout.clone(),
+            ..Default::default()
+        };
         for (key, value) in &profile.env {
             resolved
                 .env

@@ -130,6 +130,7 @@ fn test_config() -> Arc<AppConfig> {
                 lifetime_seconds: 900,
                 idle_timeout_seconds: 300,
                 cleanup_interval_seconds: 60,
+                refresh_grace_seconds: 3600,
             },
             identity: IdentitySection::default(),
             password_policy: PasswordPolicyConfig::default(),

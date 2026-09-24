@@ -139,11 +139,9 @@ impl SqlContext {
             TokenKind::Identifier => {
                 self.process_identifier(token, tokens, idx);
             }
-            TokenKind::Star => {
-                // SELECT * - next must be FROM
-                if self.clause == ClauseKind::SelectColumns {
-                    self.expecting = Expecting::FromKeyword;
-                }
+            TokenKind::Star if self.clause == ClauseKind::SelectColumns => {
+                // SELECT * — next must be FROM
+                self.expecting = Expecting::FromKeyword;
             }
             _ => {}
         }
@@ -194,34 +192,25 @@ impl SqlContext {
                 self.clause = ClauseKind::Where;
                 self.expecting = Expecting::ColumnOrExpression;
             }
-            "INTO" => {
-                if self.statement == Some(StatementKind::Insert) {
-                    self.clause = ClauseKind::InsertInto;
-                    self.expecting = Expecting::TableName;
-                }
+            "INTO" if self.statement == Some(StatementKind::Insert) => {
+                self.clause = ClauseKind::InsertInto;
+                self.expecting = Expecting::TableName;
             }
-            "SET" => {
-                if self.statement == Some(StatementKind::Update) {
-                    self.clause = ClauseKind::Set;
-                    self.expecting = Expecting::ColumnName;
-                }
+            "SET" if self.statement == Some(StatementKind::Update) => {
+                self.clause = ClauseKind::Set;
+                self.expecting = Expecting::ColumnName;
             }
             "VALUES" => {
                 self.clause = ClauseKind::Values;
                 self.expecting = Expecting::ValueList;
             }
-            "ORDER" => {
-                // Wait for BY
-                if idx + 1 < tokens.len() && tokens[idx + 1].is_keyword("BY") {
-                    self.clause = ClauseKind::OrderBy;
-                    self.expecting = Expecting::ColumnName;
-                }
+            "ORDER" if idx + 1 < tokens.len() && tokens[idx + 1].is_keyword("BY") => {
+                self.clause = ClauseKind::OrderBy;
+                self.expecting = Expecting::ColumnName;
             }
-            "GROUP" => {
-                if idx + 1 < tokens.len() && tokens[idx + 1].is_keyword("BY") {
-                    self.clause = ClauseKind::GroupBy;
-                    self.expecting = Expecting::ColumnName;
-                }
+            "GROUP" if idx + 1 < tokens.len() && tokens[idx + 1].is_keyword("BY") => {
+                self.clause = ClauseKind::GroupBy;
+                self.expecting = Expecting::ColumnName;
             }
             "BY" => {
                 // Already handled with ORDER/GROUP
@@ -230,11 +219,9 @@ impl SqlContext {
                 self.clause = ClauseKind::Having;
                 self.expecting = Expecting::AggregateOrColumn;
             }
-            "ON" => {
-                if self.clause == ClauseKind::Join {
-                    self.clause = ClauseKind::JoinOn;
-                    self.expecting = Expecting::JoinCondition;
-                }
+            "ON" if self.clause == ClauseKind::Join => {
+                self.clause = ClauseKind::JoinOn;
+                self.expecting = Expecting::JoinCondition;
             }
             "AS" => {
                 // Next token will be an alias
@@ -358,10 +345,8 @@ impl SqlContext {
                     ClauseKind::Set => self.expecting = Expecting::Value,
                     _ => {}
                 },
-                TokenKind::Keyword(SqlKeywordKind::Logical) => {
-                    if self.clause == ClauseKind::Where {
-                        self.expecting = Expecting::ColumnOrExpression;
-                    }
+                TokenKind::Keyword(SqlKeywordKind::Logical) if self.clause == ClauseKind::Where => {
+                    self.expecting = Expecting::ColumnOrExpression;
                 }
                 TokenKind::Dot => {
                     // After a dot, we expect a column name (qualified name)

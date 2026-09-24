@@ -1,0 +1,136 @@
+2026-09-01T14:04:32.345683Z  INFO main ThreadId(01) fenrir::infra::logging::init: file logging initialized log_path=logs/app.log
+2026-09-01T14:04:32.345857Z  INFO main ThreadId(01) fenrir::infra::logging::init: db log file prepared log_path=logs/db.log
+2026-09-01T14:04:32.348080Z  INFO main ThreadId(01) fenrir::infra::db::runtime::credentials: auto-generated db seal key path=/opt/fenrir/development/tmp/runtime/db/db-seal.key
+2026-09-01T14:04:33.275965Z  INFO main ThreadId(01) fenrir::infra::db::runtime: postgres using Unix socket (TCP disabled) socket_dir=/opt/fenrir/development/tmp/runtime/db/socket
+2026-09-01T14:04:33.478428Z  INFO main ThreadId(01) fenrir::infra::db::runtime: postgres unix socket ready socket=/opt/fenrir/development/tmp/runtime/db/socket/.s.PGSQL.5432
+2026-09-01T14:04:33.478555Z  INFO main ThreadId(01) fenrir::infra::db::runtime: embedded postgres started securely port=55432 pid=59602 auth="scram-sha-256" socket=true
+2026-09-01T14:04:33.478568Z  INFO main ThreadId(01) fenrir::infra::db::runtime: db runtime supervisor started (stub) mode=Embedded engine=Postgres dir=/opt/fenrir/development/tmp/runtime/db
+2026-09-01T14:04:33.479447Z  INFO main ThreadId(01) fenrir::boot::startup: core services registered in registry
+2026-09-01T14:04:33.491037Z  INFO main ThreadId(01) fenrir::infra::db::migrations::runner: applying database migration engine=postgres file=20241216_create_verification_codes.sql
+2026-09-01T14:04:33.501092Z  INFO main ThreadId(01) fenrir::infra::db::migrations::runner: applying database migration engine=postgres file=20241218_create_identity_tables.sql
+2026-09-01T14:04:33.513997Z  INFO main ThreadId(01) fenrir::infra::db::migrations::runner: applying database migration engine=postgres file=20260129_01_create_athene_users.sql
+2026-09-01T14:04:33.523576Z  INFO tokio-runtime-worker ThreadId(03) tokio_postgres::connection: NOTICE: trigger "trg_athene_users_updated_at" for relation "athene_users" does not exist, skipping
+2026-09-01T14:04:33.524401Z  INFO                 main ThreadId(01) fenrir::infra::db::migrations::runner: applying database migration engine=postgres file=20260129_02_create_athene_sessions.sql
+2026-09-01T14:04:33.532590Z  INFO                 main ThreadId(01) fenrir::infra::db::migrations::runner: applying database migration engine=postgres file=20260129_03_create_athene_feature_flags.sql
+2026-09-01T14:04:33.541082Z  INFO tokio-runtime-worker ThreadId(03) tokio_postgres::connection: NOTICE: trigger "trg_athene_feature_flags_updated_at" for relation "athene_feature_flags" does not exist, skipping
+2026-09-01T14:04:33.542216Z  INFO                 main ThreadId(01) fenrir::infra::db::migrations::runner: applying database migration engine=postgres file=20260129_04_create_athene_app_settings.sql
+2026-09-01T14:04:33.550532Z  INFO tokio-runtime-worker ThreadId(10) tokio_postgres::connection: NOTICE: trigger "trg_athene_app_settings_updated_at" for relation "athene_app_settings" does not exist, skipping
+2026-09-01T14:04:33.551049Z  INFO                 main ThreadId(01) fenrir::infra::db::migrations::runner: applying database migration engine=postgres file=20260129_05_create_athene_api_keys.sql
+2026-09-01T14:04:33.559637Z  INFO                 main ThreadId(01) fenrir::infra::db::migrations::runner: applying database migration engine=postgres file=20260129_06_create_athene_login_attempts.sql
+2026-09-01T14:04:33.567053Z  INFO                 main ThreadId(01) fenrir::infra::db::migrations::runner: applying database migration engine=postgres file=20260129_07_create_athene_password_reset_tokens.sql
+2026-09-01T14:04:33.575256Z  INFO                 main ThreadId(01) fenrir::infra::db::migrations::runner: applying database migration engine=postgres file=20260129_08_create_athene_user_settings.sql
+2026-09-01T14:04:33.583104Z  INFO tokio-runtime-worker ThreadId(10) tokio_postgres::connection: NOTICE: trigger "trg_athene_user_settings_updated_at" for relation "athene_user_settings" does not exist, skipping
+2026-09-01T14:04:33.585157Z  INFO                 main ThreadId(01) fenrir::infra::db::migrations::runner: applying database migration engine=postgres file=20260129_09_create_athene_audit_log.sql
+2026-09-01T14:04:33.592561Z  INFO                 main ThreadId(01) fenrir::infra::db::migrations::runner: applying database migration engine=postgres file=20260129_10_create_athene_email_queue.sql
+2026-09-01T14:04:33.600006Z  INFO                 main ThreadId(01) fenrir::infra::db::migrations::runner: applying database migration engine=postgres file=20260129_11_create_athene_setup_token.sql
+2026-09-01T14:04:33.607631Z  INFO                 main ThreadId(01) fenrir::infra::db::migrations::runner: applying database migration engine=postgres file=20260129_12_create_athene_login_challenges.sql
+2026-09-01T14:04:33.614491Z  INFO                 main ThreadId(01) fenrir::infra::db::migrations::runner: applying database migration engine=postgres file=20260129_13_add_athene_maintenance_until.sql
+2026-09-01T14:04:33.619151Z  INFO                 main ThreadId(01) fenrir::infra::db::migrations::runner: applying database migration engine=postgres file=20260211_14_add_athene_users_avatar_url.sql
+2026-09-01T14:04:33.624141Z  INFO                 main ThreadId(01) fenrir::infra::db::migrations::runner: applying database migration engine=postgres file=20260211_15_extend_maintenance_config.sql
+2026-09-01T14:04:33.629282Z  INFO                 main ThreadId(01) fenrir::infra::db::migrations::runner: applying database migration engine=postgres file=20260304_01_create_athene_work_management.sql
+2026-09-01T14:04:33.637086Z  INFO                 main ThreadId(01) fenrir::infra::db::migrations::runner: applying database migration engine=postgres file=20260528_01_recover_athene_email_queue.sql
+2026-09-01T14:04:33.641893Z  INFO                 main ThreadId(01) fenrir::boot::startup: database migrations applied engine=postgres applied=19 files=["20241216_create_verification_codes.sql", "20241218_create_identity_tables.sql", "20260129_01_create_athene_users.sql", "20260129_02_create_athene_sessions.sql", "20260129_03_create_athene_feature_flags.sql", "20260129_04_create_athene_app_settings.sql", "20260129_05_create_athene_api_keys.sql", "20260129_06_create_athene_login_attempts.sql", "20260129_07_create_athene_password_reset_tokens.sql", "20260129_08_create_athene_user_settings.sql", "20260129_09_create_athene_audit_log.sql", "20260129_10_create_athene_email_queue.sql", "20260129_11_create_athene_setup_token.sql", "20260129_12_create_athene_login_challenges.sql", "20260129_13_add_athene_maintenance_until.sql", "20260211_14_add_athene_users_avatar_url.sql", "20260211_15_extend_maintenance_config.sql", "20260304_01_create_athene_work_management.sql", "20260528_01_recover_athene_email_queue.sql"]
+2026-09-01T14:04:33.645387Z  INFO                 main ThreadId(01) fenrir::boot::startup: discovered module migration sources modules=2
+2026-09-01T14:04:33.645695Z  INFO                 main ThreadId(01) fenrir::infra::db::migrations::runner: applying module database migration engine=postgres module=athene file=0001_work_management.sql
+2026-09-01T14:04:33.649988Z  INFO tokio-runtime-worker ThreadId(10) tokio_postgres::connection: NOTICE: relation "athene_projects" already exists, skipping
+2026-09-01T14:04:33.650006Z  INFO tokio-runtime-worker ThreadId(10) tokio_postgres::connection: NOTICE: relation "athene_sla_policies" already exists, skipping
+2026-09-01T14:04:33.650012Z  INFO tokio-runtime-worker ThreadId(10) tokio_postgres::connection: NOTICE: relation "athene_tickets" already exists, skipping
+2026-09-01T14:04:33.650128Z  INFO tokio-runtime-worker ThreadId(10) tokio_postgres::connection: NOTICE: relation "idx_athene_tickets_project_id" already exists, skipping
+2026-09-01T14:04:33.650190Z  INFO tokio-runtime-worker ThreadId(10) tokio_postgres::connection: NOTICE: relation "idx_athene_tickets_status" already exists, skipping
+2026-09-01T14:04:33.650639Z  INFO                 main ThreadId(01) fenrir::infra::db::migrations::runner: applying module database migration engine=postgres module=athene file=0002_workflow_extensions.sql
+2026-09-01T14:04:33.656795Z  INFO                 main ThreadId(01) fenrir::infra::db::migrations::runner: applying module database migration engine=postgres module=athene file=0003_workspaces_invitations.sql
+2026-09-01T14:04:33.664973Z  INFO                 main ThreadId(01) fenrir::infra::db::migrations::runner: applying module database migration engine=postgres module=athene file=0004_dashboard_extensions.sql
+2026-09-01T14:04:33.669163Z  INFO tokio-runtime-worker ThreadId(10) tokio_postgres::connection: NOTICE: relation "athene_user_settings" already exists, skipping
+2026-09-01T14:04:33.671091Z  INFO                 main ThreadId(01) fenrir::infra::db::migrations::runner: applying module database migration engine=postgres module=athene file=0005_user_settings_palette.sql
+2026-09-01T14:04:33.675588Z  INFO                 main ThreadId(01) fenrir::infra::db::migrations::runner: applying module database migration engine=postgres module=athene file=0006_design_extensions.sql
+2026-09-01T14:04:33.689501Z  INFO                 main ThreadId(01) fenrir::infra::db::migrations::runner: applying module database migration engine=postgres module=athene file=0007_ticket_sequence.sql
+2026-09-01T14:04:33.696599Z  INFO                 main ThreadId(01) fenrir::infra::db::migrations::runner: applying module database migration engine=postgres module=auth-service file=0001_auth_schema.sql
+2026-09-01T14:04:33.700448Z  INFO tokio-runtime-worker ThreadId(10) tokio_postgres::connection: NOTICE: relation "athene_users" already exists, skipping
+2026-09-01T14:04:33.700590Z  INFO tokio-runtime-worker ThreadId(10) tokio_postgres::connection: NOTICE: relation "idx_athene_users_email" already exists, skipping
+2026-09-01T14:04:33.700601Z  INFO tokio-runtime-worker ThreadId(10) tokio_postgres::connection: NOTICE: relation "athene_sessions" already exists, skipping
+2026-09-01T14:04:33.700642Z  INFO tokio-runtime-worker ThreadId(10) tokio_postgres::connection: NOTICE: relation "idx_athene_sessions_user_id" already exists, skipping
+2026-09-01T14:04:33.700680Z  INFO tokio-runtime-worker ThreadId(10) tokio_postgres::connection: NOTICE: relation "idx_athene_sessions_expires_at" already exists, skipping
+2026-09-01T14:04:33.700687Z  INFO tokio-runtime-worker ThreadId(10) tokio_postgres::connection: NOTICE: relation "athene_login_challenges" already exists, skipping
+2026-09-01T14:04:33.700738Z  INFO tokio-runtime-worker ThreadId(10) tokio_postgres::connection: NOTICE: relation "idx_athene_login_challenges_email" already exists, skipping
+2026-09-01T14:04:33.700745Z  INFO tokio-runtime-worker ThreadId(10) tokio_postgres::connection: NOTICE: relation "idx_athene_login_challenges_expires_at" already exists, skipping
+2026-09-01T14:04:33.700749Z  INFO tokio-runtime-worker ThreadId(10) tokio_postgres::connection: NOTICE: relation "athene_login_attempts" already exists, skipping
+2026-09-01T14:04:33.701268Z  INFO tokio-runtime-worker ThreadId(10) tokio_postgres::connection: NOTICE: relation "athene_password_reset_tokens" already exists, skipping
+2026-09-01T14:04:33.701274Z  INFO tokio-runtime-worker ThreadId(10) tokio_postgres::connection: NOTICE: relation "idx_athene_password_reset_tokens_user_id" already exists, skipping
+2026-09-01T14:04:33.701281Z  INFO tokio-runtime-worker ThreadId(10) tokio_postgres::connection: NOTICE: relation "idx_athene_password_reset_tokens_expires_at" already exists, skipping
+2026-09-01T14:04:33.701472Z  INFO                 main ThreadId(01) fenrir::boot::startup: module database migrations applied engine=postgres applied=8 files=["athene:0001_work_management.sql", "athene:0002_workflow_extensions.sql", "athene:0003_workspaces_invitations.sql", "athene:0004_dashboard_extensions.sql", "athene:0005_user_settings_palette.sql", "athene:0006_design_extensions.sql", "athene:0007_ticket_sequence.sql", "auth-service:0001_auth_schema.sql"]
+2026-09-01T14:04:33.701715Z  INFO                 main ThreadId(01) fenrir::boot::startup: scheduler service started
+2026-09-01T14:04:33.701770Z  INFO tokio-runtime-worker ThreadId(10) fenrir::services::scheduler::service: scheduler heartbeat loop started
+2026-09-01T14:04:33.703285Z  INFO                 main ThreadId(01) fenrir::boot::startup: audit log persistence configured path=/opt/fenrir/development/tmp/runtime/audit/fenrir-audit-history.json capacity=2048 retention_hours=24 persist_seconds=30
+2026-09-01T14:04:33.706718Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: loaded 4 module states from disk
+2026-09-01T14:04:33.706962Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: reattached running module process module_id=athene pid=58776
+2026-09-01T14:04:33.706969Z  WARN                 main ThreadId(01) fenrir::infra::modules::runtime::process: module was running but process no longer exists module_id=notification-service pid=58780
+2026-09-01T14:04:33.707088Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: reattached running module process module_id=athene-api pid=58779
+2026-09-01T14:04:33.707209Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: reattached running module process module_id=auth-service pid=58778
+2026-09-01T14:04:33.716574Z  INFO                 main ThreadId(01) fenrir::security::identity::authority: identity store: using database backend
+2026-09-01T14:04:33.716846Z  INFO                 main ThreadId(01) fenrir::boot::startup: processing pending password from setup script user=jfu
+2026-09-01T14:04:33.798346Z  INFO                 main ThreadId(01) fenrir::boot::startup: password configured successfully user=jfu
+2026-09-01T14:04:33.798639Z  INFO                 main ThreadId(01) fenrir::services::scheduler::service: Automatic backup job registered schedule=daily
+2026-09-01T14:04:33.798663Z  INFO                 main ThreadId(01) fenrir::infra::http::server: HTTP control-plane authentication via identity broker with static token fallback
+2026-09-01T14:04:33.798710Z  INFO                 main ThreadId(01) fenrir::boot::startup: boot complete app=fenrir version=0.1.4
+2026-09-01T14:04:33.799021Z  INFO                 main ThreadId(01) fenrir::infra::db::connector: db connector ipc socket ready path=/opt/fenrir/development/tmp/runtime/ipc/db-connector.sock
+2026-09-01T14:04:33.799162Z  INFO tokio-runtime-worker ThreadId(03) fenrir::infra::db::connector: db connector task started task="db-connector-ipc"
+2026-09-01T14:04:33.800513Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.autostart_started" module_count=6 concurrency=4
+2026-09-01T14:04:33.801702Z  INFO                 main ThreadId(01) fenrir::services::module::gateway: runtime gateway started module=athene endpoint=http://127.0.0.1:60871/call
+2026-09-01T14:04:33.802056Z  INFO                 main ThreadId(01) fenrir::services::module::gateway: runtime gateway started module=athene-api endpoint=http://127.0.0.1:60874/call
+2026-09-01T14:04:33.802959Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.preflight_started" module_id=athene-webcomponents assigned_port=Some(41003)
+2026-09-01T14:04:33.802999Z  WARN                 main ThreadId(01) fenrir::services::module::ports: previous dynamic port was not available and will be reassigned module=athene-web port=41002
+2026-09-01T14:04:33.803184Z  INFO                 main ThreadId(01) fenrir::services::module::ports: assigned dynamic port to module module=athene-web port=41006
+2026-09-01T14:04:33.803188Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.preflight_started" module_id=athene-web assigned_port=Some(41006)
+2026-09-01T14:04:33.803209Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.preflight_passed" module_id=athene-webcomponents assigned_port=Some(41003)
+2026-09-01T14:04:33.803580Z  INFO                 main ThreadId(01) fenrir::services::module::gateway: runtime gateway started module=athene-webcomponents endpoint=http://127.0.0.1:60876/call
+2026-09-01T14:04:33.803813Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.boot_started" module_id=athene-webcomponents assigned_port=Some(41003)
+2026-09-01T14:04:33.803863Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.preflight_passed" module_id=athene-web assigned_port=Some(41006)
+2026-09-01T14:04:33.803900Z  INFO                 main ThreadId(01) fenrir::services::module::gateway: runtime gateway started module=athene-web endpoint=http://127.0.0.1:60877/call
+2026-09-01T14:04:33.804017Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.boot_started" module_id=athene-web assigned_port=Some(41006)
+2026-09-01T14:04:33.805481Z  WARN                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.boot_failed" module_id=athene-webcomponents latency_ms=1.663333 error=failed to start module `athene-webcomponents`: no executable module found in /Users/jfurocket/Documents/personal/modules/athene-webcomponents. Searched: athene-webcomponents, bin/athene-webcomponents, athene-webcomponents.exe, bin/athene-webcomponents.exe
+2026-09-01T14:04:33.805500Z  WARN                 main ThreadId(01) fenrir::services::module::runtime: auto-start failed module=athene-webcomponents error=failed to start module `athene-webcomponents`: no executable module found in /Users/jfurocket/Documents/personal/modules/athene-webcomponents. Searched: athene-webcomponents, bin/athene-webcomponents, athene-webcomponents.exe, bin/athene-webcomponents.exe
+2026-09-01T14:04:33.805515Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: module static server started module_id=athene-web port=41006 root=/Users/jfurocket/Documents/personal/modules/athene-web/dist/browser
+2026-09-01T14:04:33.805853Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: module started successfully event="module.lifecycle.boot_succeeded" module_id=athene-web pid=None port=Some(41006) latency_ms=1.385292
+2026-09-01T14:04:33.808861Z  INFO                 main ThreadId(01) fenrir::services::module::gateway: runtime gateway started module=auth-service endpoint=http://127.0.0.1:60882/call
+2026-09-01T14:04:33.808991Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.preflight_started" module_id=notification-service assigned_port=Some(41005)
+2026-09-01T14:04:33.809025Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.preflight_passed" module_id=notification-service assigned_port=Some(41005)
+2026-09-01T14:04:33.809072Z  INFO                 main ThreadId(01) fenrir::services::module::gateway: runtime gateway started module=notification-service endpoint=http://127.0.0.1:60884/call
+2026-09-01T14:04:33.809221Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.boot_started" module_id=notification-service assigned_port=Some(41005)
+2026-09-01T14:04:35.818674Z  INFO                 main ThreadId(01) fenrir::infra::modules::runtime::process: module process started module_id=notification-service instance_id=notification-service:primary pid=59645 port=Some(41005)
+2026-09-01T14:04:35.819718Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: module started successfully event="module.lifecycle.boot_succeeded" module_id=notification-service pid=Some(59645) port=Some(41005) latency_ms=2010.4903749999999
+2026-09-01T14:04:36.028672Z  INFO                 main ThreadId(01) fenrir::services::module::runtime: event="module.lifecycle.autostart_completed" module_count=6 concurrency=4
+2026-09-01T14:04:36.028728Z  INFO tokio-runtime-worker ThreadId(10) fenrir::boot::transports: ssh server task spawned
+2026-09-01T14:04:36.028737Z  INFO                 main ThreadId(01) fenrir::boot::transports: transport initialisation triggered
+2026-09-01T14:04:36.028765Z ERROR tokio-runtime-worker ThreadId(15) fenrir::boot::transports: http server start failed error=failed to bind HTTP server: 127.0.0.1:8080
+2026-09-01T14:04:36.029982Z  INFO tokio-runtime-worker ThreadId(10) fenrir::infra::ssh::server: starting SSH server host=127.0.0.1 port=2222
+2026-09-01T14:04:36.030015Z ERROR tokio-runtime-worker ThreadId(10) fenrir::boot::transports: ssh server exited with error error=Address already in use (os error 48)
+2026-09-01T14:05:01.852385Z  WARN tokio-runtime-worker ThreadId(15) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-09-01T14:05:01.854483Z  WARN tokio-runtime-worker ThreadId(15) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-09-01T14:05:01.855836Z  WARN tokio-runtime-worker ThreadId(15) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-09-01T14:05:31.851254Z  WARN tokio-runtime-worker ThreadId(10) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-09-01T14:05:31.851530Z  WARN tokio-runtime-worker ThreadId(10) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-09-01T14:05:31.851722Z  WARN tokio-runtime-worker ThreadId(10) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-09-01T14:06:01.852433Z  WARN tokio-runtime-worker ThreadId(03) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-09-01T14:06:01.853978Z  WARN tokio-runtime-worker ThreadId(03) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-09-01T14:06:01.854134Z  WARN tokio-runtime-worker ThreadId(03) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-09-01T14:06:01.854952Z  WARN tokio-runtime-worker ThreadId(03) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-09-01T14:06:02.057392Z  WARN tokio-runtime-worker ThreadId(03) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-09-01T14:06:02.259814Z  WARN tokio-runtime-worker ThreadId(03) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-09-01T14:06:02.260310Z  WARN tokio-runtime-worker ThreadId(03) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-09-01T14:06:02.462659Z  WARN tokio-runtime-worker ThreadId(03) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-09-01T14:06:02.665083Z  WARN tokio-runtime-worker ThreadId(03) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-09-01T14:06:02.665449Z  WARN tokio-runtime-worker ThreadId(03) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-09-01T14:06:02.867810Z  WARN tokio-runtime-worker ThreadId(03) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-09-01T14:06:03.069281Z  WARN tokio-runtime-worker ThreadId(03) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-09-01T14:06:03.069508Z  WARN tokio-runtime-worker ThreadId(03) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-09-01T14:06:03.271845Z  WARN tokio-runtime-worker ThreadId(03) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-09-01T14:06:03.473197Z  WARN tokio-runtime-worker ThreadId(03) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-09-01T14:06:03.474292Z  WARN tokio-runtime-worker ThreadId(03) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-09-01T14:06:03.675936Z  WARN tokio-runtime-worker ThreadId(03) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-09-01T14:06:03.877254Z  WARN tokio-runtime-worker ThreadId(15) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-09-01T14:06:03.877511Z  WARN tokio-runtime-worker ThreadId(15) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-09-01T14:06:04.078976Z  WARN tokio-runtime-worker ThreadId(15) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-09-01T14:06:04.281494Z  WARN tokio-runtime-worker ThreadId(15) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-09-01T14:06:31.851283Z  WARN tokio-runtime-worker ThreadId(15) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-09-01T14:06:31.851690Z  WARN tokio-runtime-worker ThreadId(15) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found
+2026-09-01T14:06:31.852037Z  WARN tokio-runtime-worker ThreadId(15) fenrir::services::db_connector: db connector request failed error=token validation failed: service token not found

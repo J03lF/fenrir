@@ -306,8 +306,37 @@ impl PostgresAdapter {
                 Self::coerce_text_array(value)
             }
             Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME => Self::coerce_text(value),
+            Type::UUID => Self::coerce_uuid(value),
             _ => Ok(Self::prepare_param(value)),
         }
+    }
+
+    /// Coerce a value into a Postgres `uuid` binding.
+    ///
+    /// Modules ship UUIDs through the JSON-DB-Bridge as plain strings
+    /// (`JsonValue::String(uuid_str)` → `DbValue::Text`). Without explicit
+    /// coercion the driver would bind that as `text`, which the server
+    /// rejects with *"cannot convert between String and uuid"* — even when
+    /// the SQL contains an explicit `$N::uuid` cast, because tokio-postgres
+    /// resolves the parameter type at PREPARE time before the cast runs.
+    fn coerce_uuid(value: &DbValue) -> DbResult<PreparedParamBinding> {
+        match value {
+            DbValue::Uuid(uuid) => Ok(PreparedParamBinding::Uuid(*uuid)),
+            DbValue::Text(text) => uuid::Uuid::parse_str(text.trim())
+                .map(PreparedParamBinding::Uuid)
+                .map_err(|err| {
+                    DbError::invalid_input(format!(
+                        "cannot parse '{}' as UUID parameter: {err}",
+                        text
+                    ))
+                }),
+            _ => Ok(Self::prepare_param(value)),
+        }
+    }
+
+    #[cfg(test)]
+    fn coerce_uuid_for_test(value: &DbValue) -> DbResult<PreparedParamBinding> {
+        Self::coerce_uuid(value)
     }
 
     fn coerce_int4(value: &DbValue) -> DbResult<PreparedParamBinding> {
@@ -758,5 +787,78 @@ impl DbAdminPort for PostgresAdapter {
         )
         .await?;
         Ok(affected)
+    }
+}
+
+impl std::fmt::Debug for PreparedParamBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PreparedParamBinding::Uuid(uuid) => write!(f, "Uuid({uuid})"),
+            PreparedParamBinding::Text(text) => write!(f, "Text({text})"),
+            other => write!(
+                f,
+                "{}",
+                match other {
+                    PreparedParamBinding::NullText(_) => "NullText",
+                    PreparedParamBinding::NullSmallInt(_) => "NullSmallInt",
+                    PreparedParamBinding::NullInt(_) => "NullInt",
+                    PreparedParamBinding::NullBigInt(_) => "NullBigInt",
+                    PreparedParamBinding::NullTimestamp(_) => "NullTimestamp",
+                    PreparedParamBinding::NullBool(_) => "NullBool",
+                    PreparedParamBinding::NullJson(_) => "NullJson",
+                    PreparedParamBinding::NullTextArray(_) => "NullTextArray",
+                    PreparedParamBinding::NullUuid(_) => "NullUuid",
+                    PreparedParamBinding::NullInet(_) => "NullInet",
+                    PreparedParamBinding::TextArray(_) => "TextArray",
+                    PreparedParamBinding::Integer32(_) => "Integer32",
+                    PreparedParamBinding::Integer(_) => "Integer",
+                    PreparedParamBinding::Float(_) => "Float",
+                    PreparedParamBinding::Bool(_) => "Bool",
+                    PreparedParamBinding::Json(_) => "Json",
+                    PreparedParamBinding::JsonParam(_) => "JsonParam",
+                    PreparedParamBinding::Inet(_) => "Inet",
+                    PreparedParamBinding::Timestamp(_) => "Timestamp",
+                    PreparedParamBinding::TimestampStr(_) => "TimestampStr",
+                    PreparedParamBinding::Uuid(_) | PreparedParamBinding::Text(_) => unreachable!(),
+                }
+            ),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coerce_uuid_accepts_text_payload() {
+        // JSON-DB-Bridge sends UUIDs as JSON strings. Without this coercion
+        // tokio-postgres binds them as TEXT and the server rejects the bind.
+        let raw = "0a8da3c6-2c61-4e34-9d7c-1f2d99e88d2f";
+        let binding = PostgresAdapter::coerce_uuid_for_test(&DbValue::Text(raw.to_string()))
+            .expect("text uuid must coerce");
+        match binding {
+            PreparedParamBinding::Uuid(uuid) => assert_eq!(uuid.to_string(), raw),
+            other => panic!("expected PreparedParamBinding::Uuid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn coerce_uuid_accepts_typed_uuid_payload() {
+        let uuid = uuid::Uuid::new_v4();
+        let binding = PostgresAdapter::coerce_uuid_for_test(&DbValue::Uuid(uuid))
+            .expect("typed uuid must coerce");
+        match binding {
+            PreparedParamBinding::Uuid(out) => assert_eq!(out, uuid),
+            other => panic!("expected PreparedParamBinding::Uuid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn coerce_uuid_rejects_unparseable_text() {
+        let err = PostgresAdapter::coerce_uuid_for_test(&DbValue::Text("not-a-uuid".into()))
+            .expect_err("must reject garbage text");
+        let msg = format!("{err:?}");
+        assert!(msg.contains("UUID parameter"), "unexpected error: {msg}");
     }
 }

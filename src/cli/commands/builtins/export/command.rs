@@ -191,10 +191,11 @@ async fn execute_export(
                         write!(out, "    \x1b[38;5;250m◦\x1b[0m    Writing StarUML file...")?;
                         last_step = 4;
                     }
-                    ExportProgress::Complete => {
-                        if last_step >= 4 {
-                            write!(out, "\r    \x1b[38;5;114m✓\x1b[0m    Writing StarUML file       \n")?;
-                        }
+                    ExportProgress::Complete if last_step >= 4 => {
+                        write!(
+                            out,
+                            "\r    \x1b[38;5;114m✓\x1b[0m    Writing StarUML file       \n"
+                        )?;
                     }
                     _ => {}
                 }

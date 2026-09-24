@@ -7,7 +7,9 @@ use std::time::{Duration, Instant, SystemTime};
 use axum::body::Body;
 use axum::extract::{ConnectInfo, OriginalUri, Path as AxumPath, Query, State};
 use axum::http::{
-    header::{HeaderName as AxumHeaderName, ACCEPT, AUTHORIZATION, HOST},
+    header::{
+        HeaderName as AxumHeaderName, ACCEPT, ACCESS_CONTROL_ALLOW_ORIGIN, AUTHORIZATION, HOST,
+    },
     HeaderMap, HeaderValue, Method, Request, StatusCode, Uri,
 };
 use axum::middleware::{self, Next};
@@ -52,14 +54,15 @@ use crate::security::service_tokens::{
 use crate::services::module::token_audit::{record_module_token_exchange, ModuleTokenAuditContext};
 use crate::services::scheduler::ScheduledJobSnapshot;
 use crate::services::{
+    map_service_to_public_component,
     module::{
         ModuleIngressError, ModuleIngressTarget, ModuleServicesPublishRequest, ModuleStartupReport,
         ReportedServiceEntry, ReportedServicesPayload,
     },
-    AppServices, ServiceActionKind, ServiceControlError, ServiceIngressAccess,
-    ServiceIngressMetadata, ServiceIngressProtocol, ServiceMetricSnapshot, ServiceRateLimit,
-    ServiceRegistry, ServiceRuntimeMetricsSnapshot, ServiceSecurityMetadata, ServiceSnapshot,
-    ServiceStatus, TokenExchangeError,
+    AppServices, PublicComponentKey, PublicComponentStatus, ServiceActionKind, ServiceControlError,
+    ServiceIngressAccess, ServiceIngressMetadata, ServiceIngressProtocol, ServiceMetricSnapshot,
+    ServiceRateLimit, ServiceRegistry, ServiceRuntimeMetricsSnapshot, ServiceSecurityMetadata,
+    ServiceSnapshot, ServiceStatus, TokenExchangeError,
 };
 use crate::utils::messages::infra::http::{self as http_messages, ProblemText};
 use crate::utils::{
@@ -103,6 +106,37 @@ struct HealthResponse {
 #[derive(Serialize)]
 struct ServicesResponse {
     services: Vec<ServiceSummary>,
+}
+
+#[derive(Serialize)]
+struct PublicStatusResponse {
+    overall: &'static str,
+    updated_at: String,
+    live: bool,
+    ready: bool,
+    components: Vec<PublicStatusComponent>,
+    incidents: Vec<PublicStatusIncident>,
+}
+
+#[derive(Serialize)]
+struct PublicStatusComponent {
+    key: &'static str,
+    name: String,
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    updated_at: Option<String>,
+}
+
+#[derive(Serialize)]
+struct PublicStatusIncident {
+    id: String,
+    component: &'static str,
+    title: String,
+    status: &'static str,
+    severity: &'static str,
+    started_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolved_at: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -668,8 +702,156 @@ fn snapshot_to_summary(
     }
 }
 
+fn overall_public_status(
+    live: bool,
+    ready: bool,
+    components: &[PublicStatusComponent],
+) -> &'static str {
+    if !live {
+        return "major_outage";
+    }
+    if !ready {
+        return "major_outage";
+    }
+    let any_failed = components
+        .iter()
+        .any(|component| matches!(component.status, "down"));
+    if any_failed {
+        return "major_outage";
+    }
+    let any_degraded = components
+        .iter()
+        .any(|component| matches!(component.status, "degraded"));
+    let all_unknown = components
+        .iter()
+        .all(|component| matches!(component.status, "unknown"));
+    if any_degraded || all_unknown {
+        "degraded"
+    } else {
+        "operational"
+    }
+}
+
+fn public_status_level(
+    status: ServiceStatus,
+    metrics: Option<ServiceMetricSnapshot>,
+) -> PublicComponentStatus {
+    let health = health_state_label(status, metrics);
+    match status {
+        ServiceStatus::Failed | ServiceStatus::Stopped => PublicComponentStatus::Down,
+        ServiceStatus::Degraded | ServiceStatus::Starting => PublicComponentStatus::Degraded,
+        ServiceStatus::Standby => PublicComponentStatus::Unknown,
+        ServiceStatus::Active => match health {
+            "stale" => PublicComponentStatus::Down,
+            "degraded" => PublicComponentStatus::Degraded,
+            "healthy" | "unknown" => PublicComponentStatus::Up,
+            _ => PublicComponentStatus::Unknown,
+        },
+    }
+}
+
+fn component_order(key: PublicComponentKey) -> usize {
+    match key {
+        PublicComponentKey::Website => 0,
+        PublicComponentKey::Account => 1,
+        PublicComponentKey::Api => 2,
+        PublicComponentKey::Notifications => 3,
+    }
+}
+
+fn build_public_components(
+    services: &[ServiceSnapshot],
+    diagnostics: &HashMap<String, ServiceMetricSnapshot>,
+) -> Vec<PublicStatusComponent> {
+    let mut levels: HashMap<PublicComponentKey, PublicComponentStatus> = HashMap::new();
+    let mut seen_notifications = false;
+
+    for snapshot in services {
+        let Some(component) = map_service_to_public_component(&snapshot.descriptor.id) else {
+            continue;
+        };
+        if !is_public_status_visible(snapshot) {
+            continue;
+        }
+        if component == PublicComponentKey::Notifications {
+            seen_notifications = true;
+        }
+        let metrics = diagnostics.get(&snapshot.descriptor.id).copied();
+        let level = public_status_level(snapshot.status, metrics);
+        levels
+            .entry(component)
+            .and_modify(|value| *value = (*value).max(level))
+            .or_insert(level);
+    }
+
+    for required in PublicComponentKey::REQUIRED {
+        levels
+            .entry(required)
+            .or_insert(PublicComponentStatus::Unknown);
+    }
+    if !seen_notifications {
+        levels.remove(&PublicComponentKey::Notifications);
+    } else {
+        levels
+            .entry(PublicComponentKey::Notifications)
+            .or_insert(PublicComponentStatus::Unknown);
+    }
+
+    let mut components: Vec<PublicStatusComponent> = levels
+        .into_iter()
+        .map(|(key, status)| PublicStatusComponent {
+            key: key.as_key(),
+            name: key.display_name().to_string(),
+            status: status.as_str(),
+            updated_at: None,
+        })
+        .collect();
+    components.sort_by_key(|component| {
+        let key = match component.key {
+            "website" => PublicComponentKey::Website,
+            "account" => PublicComponentKey::Account,
+            "api" => PublicComponentKey::Api,
+            "notifications" => PublicComponentKey::Notifications,
+            _ => PublicComponentKey::Notifications,
+        };
+        component_order(key)
+    });
+    components
+}
+
 fn is_module_placeholder(id: &str) -> bool {
     id.starts_with("module:") && !id.contains("::")
+}
+
+fn is_public_status_visible(snapshot: &ServiceSnapshot) -> bool {
+    if snapshot.descriptor.id == HTTP_SERVICE_ID {
+        return true;
+    }
+    snapshot
+        .descriptor
+        .ingress
+        .as_ref()
+        .map(|ingress| ingress.access == ServiceIngressAccess::Public)
+        .unwrap_or(false)
+}
+
+fn build_public_incidents(state: &HttpState, limit: usize) -> Vec<PublicStatusIncident> {
+    state
+        .services
+        .public_status_tracker()
+        .recent_incidents(limit)
+        .into_iter()
+        .map(|incident| PublicStatusIncident {
+            id: incident.id,
+            component: incident.component.as_key(),
+            title: incident.title,
+            status: incident.status.as_str(),
+            severity: incident.severity.as_str(),
+            started_at: system_time_to_rfc3339(incident.started_at)
+                .unwrap_or_else(|| format_offset_datetime(OffsetDateTime::now_utc())),
+            resolved_at: incident.resolved_at.and_then(system_time_to_rfc3339),
+        })
+        .collect()
 }
 
 fn service_health_view(
@@ -1586,10 +1768,11 @@ async fn issue_module_service_token(
         Ok(token) => token,
         Err(problem) => return problem.into_response(),
     };
-    let claims = match security.validate_service_token(token) {
+    let claims = match security.validate_service_token_for_refresh(token) {
         Ok(claims) => claims,
         Err(err) => return map_service_token_error(err).into_response(),
     };
+    let grace_refresh = claims.expires_at <= time::OffsetDateTime::now_utc();
     let module_id = match module_id_from_claims(&claims) {
         Ok(id) => id,
         Err(problem) => return problem.into_response(),
@@ -1598,6 +1781,17 @@ async fn issue_module_service_token(
         scopes: requested_scopes,
         reason: request_reason,
     } = payload;
+    let effective_reason: Option<String> = if grace_refresh {
+        Some(format!(
+            "grace_period_refresh{}",
+            request_reason
+                .as_ref()
+                .map(|r| format!(" (original: {r})"))
+                .unwrap_or_default()
+        ))
+    } else {
+        request_reason.clone()
+    };
 
     let scopes = match parse_requested_scopes(&requested_scopes) {
         Ok(scopes) => scopes,
@@ -1615,7 +1809,7 @@ async fn issue_module_service_token(
                         endpoint: Some(MODULE_TOKEN_ENDPOINT),
                         requested_scopes: &requested_scopes,
                         granted_scopes: None,
-                        reason: request_reason.as_deref(),
+                        reason: effective_reason.as_deref(),
                         expires_in_seconds: 0,
                         outcome: AuditOutcome::Failure,
                         error: Some("rate_limited"),
@@ -1637,7 +1831,7 @@ async fn issue_module_service_token(
                         endpoint: Some(MODULE_TOKEN_ENDPOINT),
                         requested_scopes: &requested_scopes,
                         granted_scopes: None,
-                        reason: request_reason.as_deref(),
+                        reason: effective_reason.as_deref(),
                         expires_in_seconds: 0,
                         outcome: AuditOutcome::Failure,
                         error: Some(err_text.as_str()),
@@ -1662,7 +1856,7 @@ async fn issue_module_service_token(
                         endpoint: Some(MODULE_TOKEN_ENDPOINT),
                         requested_scopes: &requested_scopes,
                         granted_scopes: None,
-                        reason: request_reason.as_deref(),
+                        reason: effective_reason.as_deref(),
                         expires_in_seconds: 0,
                         outcome: AuditOutcome::Failure,
                         error: Some("rate_limited"),
@@ -1684,7 +1878,7 @@ async fn issue_module_service_token(
                         endpoint: Some(MODULE_TOKEN_ENDPOINT),
                         requested_scopes: &requested_scopes,
                         granted_scopes: None,
-                        reason: request_reason.as_deref(),
+                        reason: effective_reason.as_deref(),
                         expires_in_seconds: 0,
                         outcome: AuditOutcome::Failure,
                         error: Some(err_text.as_str()),
@@ -1717,7 +1911,7 @@ async fn issue_module_service_token(
             endpoint: Some(MODULE_TOKEN_ENDPOINT),
             requested_scopes: &requested_scopes,
             granted_scopes: Some(&claims.scopes),
-            reason: request_reason.as_deref(),
+            reason: effective_reason.as_deref(),
             expires_in_seconds,
             outcome: AuditOutcome::Success,
             error: None,
@@ -2614,6 +2808,7 @@ pub(super) fn build_router(state: HttpState) -> Router {
         .route("/info", get(info))
         .route("/health/live", get(health_live))
         .route("/health/ready", get(health_ready))
+        .route("/public/status", get(public_status))
         .route("/services", get(list_services))
         .route(
             "/services/:id/runtime-metrics",
@@ -2809,6 +3004,37 @@ async fn health_ready() -> impl IntoResponse {
         ready,
     };
     (status, Json(body))
+}
+
+async fn public_status(State(state): State<HttpState>) -> impl IntoResponse {
+    let diagnostics = state.services.service_diagnostics_snapshot();
+    let services = state.registry.snapshot();
+    let components = build_public_components(&services, &diagnostics);
+    let incidents = build_public_incidents(&state, 12);
+
+    let live = telemetry::is_live();
+    let ready = telemetry::is_ready();
+    let overall = overall_public_status(live, ready, &components);
+    let updated_at = OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| format_offset_datetime(OffsetDateTime::now_utc()));
+
+    let mut response = (
+        StatusCode::OK,
+        Json(PublicStatusResponse {
+            overall,
+            updated_at,
+            live,
+            ready,
+            components,
+            incidents,
+        }),
+    )
+        .into_response();
+    response
+        .headers_mut()
+        .insert(ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
+    response
 }
 
 async fn list_services(State(state): State<HttpState>, headers: HeaderMap) -> Response {

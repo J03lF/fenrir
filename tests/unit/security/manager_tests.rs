@@ -50,6 +50,7 @@ fn security_config() -> SecuritySection {
             lifetime_seconds: 2,
             idle_timeout_seconds: 1,
             cleanup_interval_seconds: 1,
+            refresh_grace_seconds: 5,
         },
         identity: IdentitySection::default(),
         password_policy: Default::default(),

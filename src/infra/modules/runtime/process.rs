@@ -892,6 +892,11 @@ impl ProcessModuleRuntime {
             .with_state(state)
     }
 
+    // Static-site spawn carries the full lifecycle context (module identity,
+    // version, port, env, log file, ingress profile). Bundling these into a
+    // params struct would just shift names around without improving clarity
+    // for the single caller — clippy's heuristic is overzealous here.
+    #[allow(clippy::too_many_arguments)]
     async fn try_start_static_site(
         &self,
         module_id: &ModuleId,
@@ -1035,6 +1040,31 @@ impl ProcessModuleRuntime {
             .as_ref()
             .map(|manifest| manifest.runtime.mode)
             .unwrap_or(RuntimeMode::Auto);
+
+        if let Some(mig) = runtime_manifest
+            .as_ref()
+            .and_then(|m| m.migrations.as_ref())
+        {
+            let resolved = module_path.join(&mig.dir);
+            if resolved.is_dir() {
+                info!(
+                    module_id = %module_id,
+                    migrations_dir = %resolved.display(),
+                    "module declares database migrations"
+                );
+                full_env.push((
+                    "FENRIR_MODULE_MIGRATIONS_DIR".to_string(),
+                    resolved.to_string_lossy().into_owned(),
+                ));
+            } else {
+                warn!(
+                    module_id = %module_id,
+                    migrations_dir = %resolved.display(),
+                    "module declares migrations but directory does not exist"
+                );
+            }
+        }
+
         let manifest_static_profile =
             if matches!(runtime_mode, RuntimeMode::Auto | RuntimeMode::StaticSite) {
                 if let Some(manifest) = runtime_manifest.as_ref() {

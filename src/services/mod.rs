@@ -5,6 +5,7 @@ pub mod db_shell;
 pub mod diagnostics;
 pub mod jobs;
 pub mod module;
+pub mod public_status;
 pub mod scheduler;
 pub mod security;
 pub mod token_exchange;
@@ -24,6 +25,10 @@ pub use managed::{block_on_managed, ManagedService, ServiceControlError, Service
 pub use module::{
     ModuleClientSettings, ModuleHealthHttpClient, ModulePortAllocator, ModuleService,
     ModuleServiceInit, ModuleServiceOverrides, ModuleTokenLease,
+};
+pub use public_status::{
+    map_service_to_public_component, PublicComponentKey, PublicComponentStatus,
+    PublicIncidentSeverity, PublicIncidentSnapshot, PublicIncidentStatus, PublicStatusTracker,
 };
 pub use registry::ServiceRegistry;
 pub use scheduler::SchedulerService;

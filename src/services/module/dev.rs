@@ -888,13 +888,11 @@ fn parse_json_services(
             }
         }
 
-        // Determine internal_only from either field
-        let internal_only = entry.internal_only.unwrap_or_else(|| {
-            match entry.ingress_access.as_deref() {
-                Some("public") => false,
-                _ => true, // default to internal
-            }
-        });
+        // Determine internal_only from either field. Default to "internal"
+        // unless the dev manifest explicitly opts the module into public ingress.
+        let internal_only = entry
+            .internal_only
+            .unwrap_or(!matches!(entry.ingress_access.as_deref(), Some("public")));
 
         let security = ServiceSecurityMetadata {
             internal_only,
@@ -1341,7 +1339,7 @@ enum DevRunCommandValue {
     List(Vec<String>),
 }
 
-#[derive(Debug, Deserialize, Clone, Copy)]
+#[derive(Debug, Default, Deserialize, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 enum DevOverrideServiceKind {
     Infrastructure,
@@ -1350,13 +1348,8 @@ enum DevOverrideServiceKind {
     Cli,
     Security,
     Storage,
+    #[default]
     Other,
-}
-
-impl Default for DevOverrideServiceKind {
-    fn default() -> Self {
-        Self::Other
-    }
 }
 
 impl From<DevOverrideServiceKind> for ServiceKind {

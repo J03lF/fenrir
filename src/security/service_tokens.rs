@@ -99,6 +99,7 @@ struct ServiceTokenEntry {
 pub struct ServiceTokenStore {
     lifetime: TimeDuration,
     idle_timeout: TimeDuration,
+    refresh_grace: TimeDuration,
     cleanup_interval: Duration,
     tokens: RwLock<HashMap<String, ServiceTokenEntry>>,
     next_cleanup: Mutex<Instant>,
@@ -108,10 +109,12 @@ impl ServiceTokenStore {
     pub fn new(cfg: &ServiceTokenSection) -> Self {
         let lifetime = TimeDuration::seconds(cfg.lifetime_seconds as i64);
         let idle_timeout = TimeDuration::seconds(cfg.idle_timeout_seconds as i64);
+        let refresh_grace = TimeDuration::seconds(cfg.refresh_grace_seconds as i64);
         let cleanup_interval = Duration::from_secs(cfg.cleanup_interval_seconds);
         Self {
             lifetime,
             idle_timeout,
+            refresh_grace,
             cleanup_interval,
             tokens: RwLock::new(HashMap::new()),
             next_cleanup: Mutex::new(Instant::now() + cleanup_interval),
@@ -171,6 +174,40 @@ impl ServiceTokenStore {
         }
     }
 
+    /// Like [`validate`] but tolerates tokens that expired within the
+    /// configured `refresh_grace` window.  Only intended for the
+    /// token-exchange endpoint (`/modules/runtime/tokens`) so that modules
+    /// can recover after system sleep without a full restart.
+    pub fn validate_for_refresh(
+        &self,
+        token: &str,
+    ) -> Result<DelegatedTokenClaims, ServiceTokenError> {
+        let now = OffsetDateTime::now_utc();
+        let instant_now = Instant::now();
+        self.cleanup_if_needed(instant_now, now)?;
+        let mut guard = self
+            .tokens
+            .write()
+            .map_err(|_| ServiceTokenError::Store("service token store lock poisoned".into()))?;
+        match guard.get_mut(token) {
+            Some(entry) => {
+                let grace_deadline = entry.claims.expires_at + self.refresh_grace;
+                if grace_deadline <= now {
+                    guard.remove(token);
+                    return Err(ServiceTokenError::Expired);
+                }
+                let idle_elapsed = now - entry.last_activity;
+                if idle_elapsed > self.idle_timeout + self.refresh_grace {
+                    guard.remove(token);
+                    return Err(ServiceTokenError::IdleTimeout);
+                }
+                entry.last_activity = now;
+                Ok(entry.claims.clone())
+            }
+            None => Err(ServiceTokenError::NotFound),
+        }
+    }
+
     pub fn revoke(&self, token: &str) -> Result<(), ServiceTokenError> {
         let mut guard = self
             .tokens
@@ -195,16 +232,18 @@ impl ServiceTokenStore {
         *schedule = instant_now + self.cleanup_interval;
         drop(schedule);
 
+        let grace = self.refresh_grace;
+        let idle_limit = self.idle_timeout;
         let mut guard = self
             .tokens
             .write()
             .map_err(|_| ServiceTokenError::Store("service token store lock poisoned".into()))?;
         guard.retain(|_, entry| {
-            if entry.claims.expires_at <= now {
+            if entry.claims.expires_at + grace <= now {
                 return false;
             }
             let idle_elapsed = now - entry.last_activity;
-            idle_elapsed <= self.idle_timeout
+            idle_elapsed <= idle_limit + grace
         });
         Ok(())
     }

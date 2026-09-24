@@ -584,22 +584,18 @@ pub struct DbPoolSettings {
     pub timeout_ms: Option<u64>,
 }
 
-#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DbRuntimeMode {
+    #[default]
     External,
     Embedded,
 }
 
-impl Default for DbRuntimeMode {
-    fn default() -> Self {
-        Self::External
-    }
-}
-
-#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EmbeddedEngineKind {
+    #[default]
     Sqlite,
     Postgres,
 }
@@ -610,12 +606,6 @@ impl EmbeddedEngineKind {
             EmbeddedEngineKind::Sqlite => "sqlite",
             EmbeddedEngineKind::Postgres => "postgres",
         }
-    }
-}
-
-impl Default for EmbeddedEngineKind {
-    fn default() -> Self {
-        Self::Sqlite
     }
 }
 
@@ -1288,6 +1278,12 @@ pub struct ServiceTokenSection {
     pub idle_timeout_seconds: u64,
     #[serde(default = "default_service_token_cleanup_interval_seconds")]
     pub cleanup_interval_seconds: u64,
+    /// Grace period (in seconds) during which an expired token may still be
+    /// used to obtain a fresh token via the token-exchange endpoint.
+    /// Regular gateway/connector calls remain strict — only the refresh path
+    /// benefits from this window.  Covers system-sleep / suspend scenarios.
+    #[serde(default = "default_service_token_refresh_grace_seconds")]
+    pub refresh_grace_seconds: u64,
 }
 
 fn default_require_signature() -> bool {
@@ -1395,6 +1391,10 @@ fn default_service_token_idle_timeout_seconds() -> u64 {
 
 fn default_service_token_cleanup_interval_seconds() -> u64 {
     60
+}
+
+fn default_service_token_refresh_grace_seconds() -> u64 {
+    3600
 }
 
 fn default_identity_provider() -> IdentityProviderKind {

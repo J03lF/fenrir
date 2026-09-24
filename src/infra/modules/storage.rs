@@ -48,7 +48,7 @@ impl FilesystemModuleStorage {
         };
         Ok(Self {
             install_dir,
-            cache_dir: cache_dir,
+            cache_dir,
         })
     }
 

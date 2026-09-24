@@ -101,7 +101,7 @@ A verb-first command system with tab completion, contextual subcommands, and ali
 A dedicated `db:` subshell with SQL auto-completion (tables, columns, keywords), multi-engine switching (`\c postgres`, `\c sqlite`), schema introspection (`\d`, `\d users`), and destructive command guards — `DROP`, `DELETE`, `ALTER`, and `TRUNCATE` require an explicit `--force` suffix.
 
 ### Module & Plugin System
-Modules are installed from a composite registry (offline-first, then HTTP), verified with Ed25519 signatures, and spawned as isolated processes or embedded static-site servers. Each module receives scoped service tokens, a DB connector endpoint, and a per-module gateway — never raw credentials. Failed modules are automatically quarantined after 3 crashes within 120 seconds.
+Modules are installed from a composite registry (offline-first, then HTTP), verified with Ed25519 signatures, and spawned as isolated processes or embedded static-site servers. Each module receives scoped service tokens, a DB connector endpoint, and a per-module gateway — never raw credentials. Modules scale horizontally with configurable replicas, rolling restarts with surge replacement for zero-downtime updates, and canary deployments with automatic traffic shifting and health-based rollback. Failed modules are automatically quarantined after 3 crashes within 120 seconds.
 
 ### Security Architecture
 All cryptographic operations go through a single `SecurityManager` facade — Argon2id password hashing, AES-256-GCM / XChaCha20-Poly1305 encryption, HMAC-SHA256 manifest signing, RBAC sessions, and delegated service tokens with grace-period refresh. The identity system supports both an embedded Ed25519 JWT authority and external identity brokers with JWKS verification.
@@ -267,6 +267,9 @@ When you connect via SSH or start with `--cli`, Fenrir presents an interactive s
 | `install distribution` | Plan and install module updates from the registry |
 | `synchronize module <id>` | Sync a module from local dev sources |
 | `release module <id>` | Revert a dev override to the distribution artifact |
+| `modules instances <id>` | List running instances with PID, port, and health |
+| `modules rolling-restart <id>` | Zero-downtime restart with surge replacement |
+| `modules canary start\|set\|clear <id>` | Canary traffic routing (gradual rollout) |
 | `scaffold module <id>` | Generate a module skeleton (`--runtime rust\|node\|angular`) |
 | `log module <id>` | Stream module runtime logs |
 | `log job <id> --tail 50` | Filter app log for a scheduler job |
@@ -716,13 +719,107 @@ Fenrir is designed to run as a long-lived process managing other processes. Thes
 
 **Module quarantine** — If a module crashes 3 times within 120 seconds, it is automatically quarantined for 5 minutes. The service registry is annotated with "quarantined until ..." and start/ensure calls are blocked. This prevents crash loops from consuming resources.
 
-**Rolling restarts** — `POST /modules/runtime/:id/rolling-restart` or CLI `modules rolling-restart <id>` performs health-gated instance restarts. New instances must pass health probes before old ones are drained.
-
-**Canary deployments** — Traffic shifting between module instances via `modules canary start|set <percent>|clear`. Allows gradual rollout with real traffic before full cutover.
+**Rolling restarts** — `POST /modules/runtime/:id/rolling-restart` or CLI `modules rolling-restart <id>` performs health-gated instance restarts with surge replacement. New instances must pass health probes before old ones are drained. See [Scaling & Traffic Management](#scaling--traffic-management) for details on replicas, canary deployments, and rollout strategies.
 
 **"Did you mean?" corrections** — Typos in the CLI trigger Levenshtein-distance suggestions: `strt module athene` → "Did you mean: start?" Up to 3 suggestions, computed across all registered commands and aliases.
 
 **Graceful shutdown** — `fenrirctl shutdown` executes a clean sequence: release dev overrides → stop all modules → stop non-core services. Also available via SSH: `stop module --all` followed by `exit`.
+
+---
+
+## Scaling & Traffic Management
+
+Fenrir can run multiple instances of any module, shift traffic between them, and roll out new versions without dropping a single request.
+
+```mermaid
+flowchart LR
+  GW["Gateway"]
+  subgraph instances [Module Instances]
+    S1["stable:1"]
+    S2["stable:2"]
+    C1["canary:1"]
+  end
+  Health["Health Monitor"]
+
+  GW -->|90%| S1
+  GW -->|90%| S2
+  GW -->|10%| C1
+  Health --> S1
+  Health --> S2
+  Health --> C1
+```
+
+### Replicas
+
+Each module can declare a desired replica count in config or via service profiles. Fenrir reconciles instances automatically — spawning additional processes on separate ports and registering them with the service registry. The gateway load-balances across all healthy instances.
+
+```toml
+# config/local.toml
+[modules.services."module:athene::core"]
+replicas = 3
+```
+
+When the replica count changes (via `reload-overrides` or config hot-reload), Fenrir reconciles live — spinning up or draining instances without a full restart.
+
+### Rolling Restarts with Surge Replacement
+
+`modules rolling-restart <id>` (or `POST /modules/runtime/:id/rolling-restart`) restarts instances one at a time while maintaining capacity:
+
+1. **Surge** — a new instance is spawned (desired + 1), bringing temporary overcapacity
+2. **Health gate** — the new instance must pass readiness probes before continuing
+3. **Drain** — the old instance is marked unhealthy, drained, and restarted
+4. **Verify** — the restarted instance passes health checks before moving to the next
+5. **Settle** — once all instances are replaced, the surge instance is removed
+
+With `replicas >= 2`, this achieves **zero-downtime restarts**. Single-instance modules fall back to a simple restart with a brief interruption.
+
+### Canary Deployments
+
+Canary routing gradually shifts traffic from stable instances to candidate instances, with automatic promotion or rollback based on real-time health metrics:
+
+```
+[Admin::local] admin@hostname fenrir » modules canary start athene
+  ▸ Canary routing started: 10% traffic → canary instances
+
+[Admin::local] admin@hostname fenrir » modules canary set athene 50
+  ▸ Canary traffic updated: 50%
+
+[Admin::local] admin@hostname fenrir » modules canary clear athene
+  ▸ Canary routing cleared, all traffic restored to stable instances
+```
+
+**Automatic promotion** — when configured with `canary_replace` strategy, Fenrir evaluates success criteria on every health cycle and promotes traffic in steps (default: 10% → 25% → 50% → 100%):
+
+| Criterion | Config Key | Effect |
+|-----------|-----------|--------|
+| Error rate | `max_error_rate_percent` | Rolls back if error rate exceeds threshold |
+| P95 latency | `max_p95_latency_ms` | Rolls back if latency degrades |
+| Retry rate | `max_retry_rate_percent` | Rolls back if upstream retries spike |
+| Queue backlog | `max_queue_backlog` | Rolls back if work queue grows |
+
+```toml
+# config/local.toml
+[modules.services."module:athene::core".rollout]
+strategy = "canary_replace"
+traffic_steps = [10, 25, 50, 100]
+promotion_interval_ms = 30000
+rollback_on_regression = true
+
+[modules.services."module:athene::core".rollout.success_criteria]
+max_error_rate_percent = 5
+max_p95_latency_ms = 200
+```
+
+If any criterion regresses during a canary window, Fenrir automatically rolls traffic back to stable instances and marks the service as `Degraded` — no manual intervention required.
+
+### Rollout Strategies
+
+| Strategy | Behavior |
+|----------|----------|
+| `restart` | Simple stop → start (default) |
+| `rolling_replace` | Surge-replace instances one at a time, health-gated |
+| `canary_replace` | Gradual traffic shift with automatic promotion/rollback |
+| `worker_handover` | Graceful handover for long-running worker processes |
 
 ---
 

@@ -23,95 +23,65 @@ Operators connect via SSH and manage the system through a custom CLI. Modules (m
 
 The project serves as the backend platform for [Athene](#module-ecosystem--athene), a ticket and project management system built as a suite of independently deployable modules.
 
+> **Solo project** — designed, architected, and implemented independently as a learning exercise in systems programming. The full ecosystem spans **~68,000 lines of Rust** in Fenrir alone, **1,500+ source files** across 10+ repositories (Rust, TypeScript, Angular), and covers everything from cryptographic primitives to Angular component libraries.
+
 ---
 
 ## Architecture
 
 ```mermaid
 flowchart TB
-  subgraph boot_layer [Boot]
-    Config[Config Loader<br>TOML + ENV + Profiles]
-    Boot[Fail-Fast Init<br>Structured Error Codes]
+  subgraph boot [Boot]
+    Config["Config · Validation"]
   end
 
-  subgraph security_layer [Security]
-    SM[SecurityManager]
-    KDF[Argon2id KDF]
-    AEAD[AES-256-GCM<br>XChaCha20-Poly1305]
-    Sessions[Session Store]
-    Tokens[Service Token Store]
-    Identity[Identity Provider<br>Embedded Ed25519 JWT<br>or External Broker]
-    RBAC[RBAC<br>Admin / Operator / Viewer]
+  subgraph security [Security]
+    SM["SecurityManager"]
+    Identity["Identity · JWT"]
   end
 
-  subgraph services_layer [Services]
-    Scheduler[Scheduler<br>7 Background Jobs]
-    Registry[Service Registry]
-    Diagnostics[Diagnostics<br>P50 / P95 / Error Rate]
-    ModSvc[Module Service]
-    DbShell[DB Shell Service]
-    Audit[Audit Pipeline]
-    PublicStatus[Public Status API]
+  subgraph services [Services]
+    ModSvc["Modules"]
+    Scheduler["Scheduler"]
+    Registry["Service Registry"]
+    Diagnostics["Diagnostics"]
+    Audit["Audit"]
   end
 
-  subgraph transport_layer [Transports]
-    SSH[SSH Server<br>Custom Terminal]
-    HTTP[HTTP Control Plane<br>40+ Endpoints]
-    Gateway[Service Gateway<br>HTTP + gRPC Proxy]
-    SSE[SSE Event Stream]
+  subgraph transports [Transports]
+    SSH["SSH Shell"]
+    HTTP["HTTP API"]
+    Gateway["Gateway"]
   end
 
-  subgraph module_layer [Module Runtime]
-    ModRegistry[Composite Registry<br>Offline-First + HTTP]
-    ModRuntime[Process / Static Site Runtime]
-    ModVerify[Ed25519 Signature Verifier]
-    ModGateway[Per-Module Gateway]
-    HealthMon[Health Monitor<br>Quarantine on Failure]
+  subgraph modules [Module Runtime]
+    ModRegistry["Registry"]
+    Runtime["Process / Static"]
+    Verifier["Ed25519 Verify"]
+    HealthMon["Health Monitor"]
   end
 
-  subgraph data_layer [Data]
-    Postgres[(PostgreSQL)]
-    SQLite[(SQLite)]
-    Connector[DB Connector<br>Token-Gated JSON Protocol]
+  subgraph data [Data]
+    Postgres[("Postgres")]
+    SQLite[("SQLite")]
+    Connector["DB Connector"]
   end
 
-  Config --> Boot
-  Boot --> SM
-  SM --> KDF
-  SM --> AEAD
-  SM --> Sessions
-  SM --> Tokens
-  Boot --> Identity
-  Identity --> RBAC
-
-  Boot --> Scheduler
-  Boot --> Registry
-  Boot --> Diagnostics
-  Boot --> ModSvc
-  Boot --> DbShell
-  Boot --> Audit
-
+  Config --> SM
+  Config --> Identity
   SM --> ModSvc
   SM --> Connector
 
   ModSvc --> ModRegistry
-  ModSvc --> ModRuntime
-  ModSvc --> ModVerify
-  ModSvc --> ModGateway
+  ModSvc --> Runtime
+  ModSvc --> Verifier
   ModSvc --> HealthMon
 
-  Registry --> Diagnostics
-  Registry --> PublicStatus
-
   SSH --> Registry
-  HTTP --> Registry
   HTTP --> Gateway
-  HTTP --> SSE
-  Gateway --> ModRuntime
-
-  DbShell --> Postgres
-  DbShell --> SQLite
-  Connector --> DbShell
+  Gateway --> Runtime
+  Connector --> Postgres
+  Connector --> SQLite
 ```
 
 ---
@@ -144,6 +114,30 @@ Per-service diagnostics with P50/P95 latency and error rates, process-level CPU/
 
 ---
 
+## Design Decisions
+
+These are deliberate architectural choices, not defaults. Each one solves a specific problem.
+
+**Why a custom terminal emulator instead of OS PTY?**
+A traditional PTY delegates rendering and input to the host OS, which means shell escapes, uncontrolled subprocesses, and platform-dependent behavior. Fenrir's SSH channel implements its own line editor, history, completion, and ANSI rendering — so the server controls exactly what operators can do. No shell injection, no `os.system()`, no surprises.
+
+**Why service tokens instead of shared DB credentials?**
+Modules never see a database URI. Instead, each module gets a short-lived, scoped service token (default scope: `db:read`) that grants access through a JSON connector. Write operations require explicit `db:write` scope. Tokens auto-rotate, expire after 15 minutes, and every query is auditable back to the issuing module. Compromising one module doesn't compromise the database.
+
+**Why a SecurityManager facade instead of direct crypto calls?**
+Every cryptographic operation — password hashing, encryption, session management, token issuance, RBAC checks — goes through a single `SecurityManager`. This makes it impossible to accidentally use raw primitives without audit logging, and ensures algorithm choices (Argon2id params, allowed ciphers) are enforced from one place. New features can't bypass the security layer.
+
+**Why composite registry with offline-first resolution?**
+During development, modules are resolved from local directories before falling back to the HTTP registry. This means you can work without network access, iterate on module code without publishing, and the registry is a deployment concern — not a development bottleneck.
+
+**Why `unwrap`, `expect`, and `panic` are denied by clippy?**
+Fenrir runs as a long-lived server managing other processes. A panic in production kills the host and every module with it. By denying these at the lint level (`clippy::unwrap_used`, `clippy::expect_used`, `clippy::panic`), every error path must be explicitly handled. The codebase uses `Result` and `Option` propagation throughout — no shortcuts.
+
+**Why ports and adapters instead of direct DB access?**
+Services depend on `DbAdminPort` (a trait), not on `tokio-postgres` or `rusqlite`. Swapping the database engine is a config change, not a refactor. The same pattern applies to module registries, storage backends, and identity providers. Tests use in-memory implementations without touching real infrastructure.
+
+---
+
 ## Tech Stack
 
 | Category | Crates / Tools |
@@ -160,7 +154,7 @@ Per-service diagnostics with P50/P95 latency and error rates, process-level CPU/
 | **Packaging** | `semver`, `tar`, `flate2` |
 | **Quality** | clippy `pedantic` + `nursery`, deny `unwrap_used` / `expect_used` / `panic` / `todo` |
 
-**332 source files** &middot; **50+ dependencies** &middot; **Rust 2021 edition** &middot; Release builds with `lto = true`, `codegen-units = 1`
+**332 Rust source files** &middot; **~68,000 lines** &middot; **50+ dependencies** &middot; **Rust 2021 edition** &middot; Release: `lto = true`, `codegen-units = 1`
 
 ---
 
@@ -214,6 +208,21 @@ cargo run -- --migrate
 ```sh
 ssh admin@localhost -p 2222
 ```
+
+### fenrirctl — Headless Control
+
+`fenrirctl` is a separate binary for scripted control plane access — no SSH session required:
+
+```sh
+fenrirctl status                    # Show installed modules
+fenrirctl shutdown                  # Release overrides → stop modules → stop services
+fenrirctl release-dev-overrides     # Revert all dev syncs to distribution artifacts
+fenrirctl stop-modules              # Stop all running module processes
+fenrirctl db-runtime-status         # Embedded database runtime health
+fenrirctl db-runtime-logs --tail 50 # Recent database runtime output
+```
+
+Tokens are resolved from `FENRIR_CONTROL_TOKEN` or `FENRIR_HTTP_TOKEN_ADMIN` automatically. Useful for CI pipelines, service managers, and shutdown scripts.
 
 ---
 
@@ -327,34 +336,35 @@ Fenrir manages modules through a full lifecycle: discovery, installation, signat
 
 ```mermaid
 flowchart LR
-  subgraph registry [Registry]
-    Offline[Offline Dirs]
-    Remote[HTTP Registry]
-    Composite[Composite<br>Offline-First]
+  subgraph discover [Discover]
+    Local["Local Sources"]
+    Remote["HTTP Registry"]
   end
 
-  subgraph lifecycle [Lifecycle]
-    Install[Install + Verify<br>Ed25519]
-    Start[Start Process<br>or Static Site]
-    Health[Health Monitor<br>Quarantine on 3x Fail]
+  subgraph install [Install]
+    Verify["Verify Signature"]
+    Activate["Stage + Activate"]
   end
 
-  subgraph runtime_env [Runtime Environment]
-    Token[Service Token<br>Auto-Refresh]
-    DbConn[DB Connector<br>Scoped Access]
-    GW[Module Gateway<br>service:// routing]
-    OTEL[OTEL Context<br>Propagation]
+  subgraph run [Run]
+    Start["Start Process"]
+    Health["Health Monitor"]
   end
 
-  Offline --> Composite
-  Remote --> Composite
-  Composite --> Install
-  Install --> Start
+  subgraph env [Environment]
+    Token["Service Token"]
+    DB["DB Connector"]
+    GW["Gateway"]
+  end
+
+  Local --> Verify
+  Remote --> Verify
+  Verify --> Activate
+  Activate --> Start
   Start --> Health
   Start --> Token
-  Start --> DbConn
+  Start --> DB
   Start --> GW
-  Start --> OTEL
 ```
 
 ### Athene — Ticket & Project Management
@@ -389,22 +399,22 @@ Modules never hold database credentials or call each other directly. All communi
 
 ```mermaid
 sequenceDiagram
-  participant Browser
-  participant FenrirGW as Fenrir Gateway
+  participant B as Browser
+  participant GW as Gateway
   participant API as athene-api
   participant Core as athene
   participant Auth as auth-service
   participant DB as DB Connector
 
-  Browser->>FenrirGW: GET /gateway/services/module:athene-api::api-gateway/api/v1/tickets
-  FenrirGW->>API: Proxy + inject service token
-  API->>FenrirGW: POST /call {target: "service://module:athene::core"}
-  FenrirGW->>Core: Proxy + token
-  Core->>Auth: Validate session (via gateway)
-  Core->>DB: JSON query (scoped token, db:read)
-  DB-->>Core: Result set
-  Core-->>FenrirGW: Response
-  FenrirGW-->>Browser: JSON
+  B->>GW: GET /api/v1/tickets
+  GW->>API: + service token
+  API->>GW: call athene core
+  GW->>Core: + token
+  Core->>Auth: validate session
+  Core->>DB: query (db:read)
+  DB-->>Core: results
+  Core-->>GW: response
+  GW-->>B: JSON
 ```
 
 ### Environment Injection
@@ -422,40 +432,68 @@ Every module process receives a curated set of `FENRIR_*` variables — never ra
 | `FENRIR_SERVICE_PORT` | Assigned port (dynamic allocation from configured range) |
 | `FENRIR_SERVICE_SNAPSHOT_PATH` | Path to consolidated service registry snapshot |
 
+### Dev Workflow
+
+Fenrir supports a seamless local development loop. Instead of publishing module artifacts to a registry during development, you work directly from your local source tree:
+
+```
+[Admin::local] admin@hostname fenrir » synchronize module athene
+  ▸ Backing up current distribution artifact...
+  ▸ Packaging dev build from /opt/fenrir/development/modules/athene
+  ▸ Registering dev services: module:athene::core
+  ▸ Injecting service tokens + gateway endpoint
+  ▸ Module synchronized (dev override active)
+
+[Admin::local] admin@hostname fenrir » release module athene
+  ▸ Restoring distribution artifact from backup
+  ▸ Dev override released
+```
+
+**What happens during `sync module`:**
+1. The current distribution artifact is backed up (tarball under `.fenrir-backups/`)
+2. The local dev build is packaged and activated
+3. Dev service endpoints from `.fenrir-dev.toml` or `.fenrir/config.toml` are registered
+4. Fenrir injects `FENRIR_*` environment, service tokens, and gateway endpoint
+5. Optional: a dev agent starts the module's dev command (e.g., `cargo run`) with full infrastructure access
+
+**What `release module` does:**
+1. Stops any dev agent / dev process
+2. Restores the backed-up distribution artifact
+3. Cleans up dev environment files (`.fenrir/dev.env`, export scripts)
+4. Falls back to registry install if backup is corrupted
+
+The developer gets full access to Fenrir's infrastructure (DB connector, auth, gateway, other modules) while working from their IDE. No manual token management, no port configuration, no mock services.
+
 ---
 
 ## Security
 
 ```mermaid
-flowchart TB
-  subgraph facade [SecurityManager]
-    Hash[Password Hashing<br>Argon2id v0x13]
-    Encrypt[Encryption<br>AES-256-GCM / XChaCha20]
-    Sign[HMAC-SHA256<br>Manifest Signing]
-    SessStore[Session Store<br>1h lifetime / 15min idle]
-    TokenStore[Service Token Store<br>15min lifetime / grace refresh]
+flowchart LR
+  subgraph manager [SecurityManager]
+    Passwords["Passwords · Argon2id"]
+    Encryption["Encryption · AEAD"]
+    Sessions["Sessions"]
+    ServiceTokens["Service Tokens"]
+    Signing["HMAC Signing"]
   end
 
   subgraph identity [Identity]
-    Embedded[Embedded Authority<br>Ed25519 JWT]
-    External[External Broker<br>JWKS Verification]
+    Embedded["Embedded · Ed25519 JWT"]
+    External["External · JWKS"]
   end
 
-  subgraph rbac [RBAC]
-    Admin[Admin<br>Full access + SSH]
-    Operator[Operator<br>Module + service lifecycle]
-    Viewer[Viewer<br>Read-only monitoring]
+  subgraph access [Access Control]
+    Admin["Admin"]
+    Operator["Operator"]
+    Viewer["Viewer"]
   end
 
-  subgraph audit_sys [Audit]
-    AuditLog[In-Memory Ring Buffer<br>JSON Persistence]
-    AuditDrain[Periodic Drain<br>to runtime/audit/]
-    AuditSSE[SSE Broadcast]
-  end
+  Audit["Audit Trail"]
 
-  facade --> identity
-  facade --> rbac
-  facade --> audit_sys
+  manager --> identity
+  manager --> access
+  manager --> Audit
 ```
 
 | Layer | Implementation |
@@ -550,14 +588,13 @@ src/
 
 ```mermaid
 flowchart LR
-  A["secrets/.env"] --> B["config/default.toml"]
-  B --> C["config/{profile}.toml"]
-  C --> D["config/local.toml"]
-  D --> E["FENRIR_CONFIG_FILE"]
-  E --> F["FENRIR__* env vars"]
-  F --> G["validate()"]
-  G -->|OK| H["CFG-OK"]
-  G -->|Fail| I["Exit 1 + CFG-* code"]
+  Secrets[".env"] --> Default["default.toml"]
+  Default --> Profile["profile.toml"]
+  Profile --> Local["local.toml"]
+  Local --> Env["ENV overrides"]
+  Env --> Validate{"validate"}
+  Validate -->|pass| OK["CFG-OK"]
+  Validate -->|fail| Err["exit 1"]
 ```
 
 ### Key Sections
@@ -669,6 +706,39 @@ Each job records latency probes in `ServiceDiagnostics` and is controllable via 
 
 ---
 
+## Runtime Operations
+
+Fenrir is designed to run as a long-lived process managing other processes. These features reflect that:
+
+**Config hot-reload** — On Unix, `SIGHUP` triggers a config reload. On all platforms, Fenrir watches `config/`, `secrets/`, and profile files for changes (debounced). Reloads update log levels, TLS certificates, and module service overrides without restarting.
+
+**TLS certificate rotation** — When TLS is enabled, Fenrir detects certificate file changes and reloads them live. No downtime, no restart, no dropped connections.
+
+**Module quarantine** — If a module crashes 3 times within 120 seconds, it is automatically quarantined for 5 minutes. The service registry is annotated with "quarantined until ..." and start/ensure calls are blocked. This prevents crash loops from consuming resources.
+
+**Rolling restarts** — `POST /modules/runtime/:id/rolling-restart` or CLI `modules rolling-restart <id>` performs health-gated instance restarts. New instances must pass health probes before old ones are drained.
+
+**Canary deployments** — Traffic shifting between module instances via `modules canary start|set <percent>|clear`. Allows gradual rollout with real traffic before full cutover.
+
+**"Did you mean?" corrections** — Typos in the CLI trigger Levenshtein-distance suggestions: `strt module athene` → "Did you mean: start?" Up to 3 suggestions, computed across all registered commands and aliases.
+
+**Graceful shutdown** — `fenrirctl shutdown` executes a clean sequence: release dev overrides → stop all modules → stop non-core services. Also available via SSH: `stop module --all` followed by `exit`.
+
+---
+
+## Wire Protocol
+
+Fenrir defines a versioned JSON wire protocol (`src/protocol/`) for programmatic clients beyond interactive SSH:
+
+| Direction | Messages |
+|-----------|----------|
+| **Client → Server** | `Hello` (client_id, hostname), `Command` (command, args), `Complete` (line, cursor), `Exit` |
+| **Server → Client** | `Welcome` (banner, motd), `Prompt` (prompt string), `Output` (status, lines), `Error` (code, message), `Goodbye` (reason) |
+
+Every frame is version-tagged (currently v1). The codec rejects version mismatches on decode — forward-compatible by design. This protocol enables future IDE integrations, CI tooling, and remote management clients without relying on SSH terminal scraping.
+
+---
+
 ## Testing
 
 ```
@@ -696,23 +766,57 @@ jobs:
 
 ---
 
-## Related Projects
+## Ecosystem
 
-| Project | Description |
-|---------|-------------|
-| [fenrir-module-kit](../module-kit) | Rust library for building Fenrir modules — env parsing, DB connector client, token provider, gateway client |
-| [fenrir-registry](../fenrir-registry) | Lightweight module registry with GitLab webhook support |
-| [fenrir-registry-service](../fenrir-registry-service) | Production registry — GitHub App sync, SQLite cache, SSE updates, RBAC |
-| [athene](../modules/athene) | Core domain service — tickets, projects, workspaces, sprints, custom fields |
-| [athene-api](../modules/athene-api) | Public API gateway — typed proxy, rate limiting, circuit breaker, Swagger |
-| [athene-web](../modules/athene-web) | Angular 18 SPA — standalone components, signals, dashboards, i18n |
-| [athene-webcomponents](../modules/athene-webcomponents) | Design system — 40+ components, Storybook, npm-published |
-| [athene-contracts](../athene-contracts) | Shared API contracts — dual Rust + TypeScript DTOs with validation |
-| [auth-service](../modules/auth-service) | Authentication — challenge/PIN login, OIDC, Argon2, session management |
-| [notification-service](../modules/notification-service) | Email delivery — Tera templates, SMTP, queue management |
+```mermaid
+flowchart TB
+  subgraph platform [Platform]
+    Fenrir["fenrir"]
+    Kit["module-kit"]
+    Reg["registry"]
+  end
+
+  subgraph athene [Athene]
+    Core["athene"]
+    API["athene-api"]
+    Web["athene-web"]
+    Auth["auth-service"]
+    Notif["notification-service"]
+  end
+
+  subgraph shared [Shared]
+    Contracts["contracts"]
+    Components["webcomponents"]
+  end
+
+  Fenrir -->|hosts| Core
+  Fenrir -->|hosts| API
+  Fenrir -->|hosts| Web
+  Fenrir -->|hosts| Auth
+  Fenrir -->|hosts| Notif
+  Kit --> Core
+  Kit --> API
+  Kit --> Auth
+  Contracts --> Web
+  Components --> Web
+```
+
+| Repository | Stack | Role |
+|------------|-------|------|
+| [fenrir](.) | Rust | Application server — SSH, HTTP, modules, security, DB |
+| [fenrir-module-kit](../module-kit) | Rust | Module SDK — env parsing, DB connector, token provider, gateway client |
+| [fenrir-registry](../fenrir-registry) | Rust | Lightweight module registry with webhook support |
+| [fenrir-registry-service](../fenrir-registry-service) | Rust | Production registry — GitHub App, SQLite cache, SSE, RBAC |
+| [athene](../modules/athene) | Rust / Axum | Core domain — tickets, projects, workspaces, sprints, custom fields |
+| [athene-api](../modules/athene-api) | Rust / Axum | Public API gateway — typed proxy, circuit breaker, OpenAPI |
+| [athene-web](../modules/athene-web) | Angular 18 | SPA frontend — signals, i18n, dashboards, command palette |
+| [athene-webcomponents](../modules/athene-webcomponents) | Angular 18 | Design system — 40+ components, Storybook |
+| [athene-contracts](../athene-contracts) | Rust + TypeScript | Shared API contracts — dual-stack DTOs with validation |
+| [auth-service](../modules/auth-service) | Rust / Axum | Authentication — PIN login, OIDC, Argon2, sessions |
+| [notification-service](../modules/notification-service) | Rust / Axum | Email delivery — Tera templates, SMTP, queues |
 
 ---
 
 <p align="center">
-  <sub>Active development &middot; v0.1.4 &middot; Built with Rust</sub>
+  <sub>Solo project &middot; Active development &middot; v0.1.4 &middot; Built with Rust</sub>
 </p>

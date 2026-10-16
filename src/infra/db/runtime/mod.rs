@@ -5,7 +5,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context};
 use once_cell::sync::OnceCell;
@@ -30,6 +30,17 @@ use state::{
     collect_snapshot_with_health, load_snapshot, persist_snapshot, AdapterHealthState,
     AdapterHealthStatus,
 };
+
+/// How long to wait for postgres to expose its socket / port.
+const PG_SOCKET_WAIT: Duration = Duration::from_secs(10);
+
+/// How long to wait for postgres to complete a handshake once it listens.
+/// Generous on purpose: a cold start that replays WAL can sit in
+/// "starting up" for several seconds on a slow disk.
+const PG_HANDSHAKE_WAIT: Duration = Duration::from_secs(30);
+
+/// Gap between readiness attempts.
+const PG_PROBE_INTERVAL: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Clone)]
 pub struct DbBackupArtifact {
@@ -837,52 +848,25 @@ impl DbRuntimeSupervisor {
             *guard = Some(PostgresProcess { child, _port: port });
         }
 
-        // Health probe - wait for postgres to be ready
-        if self.db_security.prefer_unix_socket {
-            // Check Unix socket with actual connection test
-            let socket_path = socket_dir.join(".s.PGSQL.5432");
-            let mut attempts = 0;
-            while attempts < 50 {
-                // First check if socket file exists
-                if socket_path.exists() {
-                    // Then try to actually connect to verify postgres is ready
-                    match tokio::net::UnixStream::connect(&socket_path).await {
-                        Ok(_stream) => {
-                            info!(socket = %socket_path.display(), "postgres unix socket ready");
-                            break;
-                        }
-                        Err(_) => {
-                            // Socket exists but not accepting connections yet
-                        }
-                    }
-                }
-                attempts += 1;
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
-            if attempts >= 50 {
-                return Err(anyhow!(
-                    "postgres socket not ready at {} after 10s",
-                    socket_path.display()
-                ));
-            }
-        } else {
-            // Check TCP
-            let addr = format!("127.0.0.1:{port}");
-            let mut attempts = 0;
-            while attempts < 20 {
-                if TcpStream::connect(&addr).is_ok() {
-                    break;
-                }
-                attempts += 1;
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
-            if attempts >= 20 {
-                return Err(anyhow!("postgres failed to become ready on {addr}"));
-            }
-        }
-
-        // Build connection URI
+        // Build the connection URI before probing, so the probe exercises the
+        // exact path the migration runner and the connector will use.
         let uri = self.build_connection_uri(port, &socket_dir, credentials.as_ref());
+
+        // Health probe - wait until postgres actually serves queries.
+        //
+        // A socket- or TCP-level connect is NOT a readiness signal: postgres
+        // begins listening before startup/recovery completes and answers
+        // `FATAL: the database system is starting up` to whoever connects in
+        // that window. Probing at transport level therefore reported "ready"
+        // while the very next step - applying migrations - still failed.
+        if self.db_security.prefer_unix_socket {
+            let socket_path = socket_dir.join(".s.PGSQL.5432");
+            Self::await_socket_file(&socket_path).await?;
+        } else {
+            Self::await_tcp_listener(port).await?;
+        }
+        Self::await_postgres_handshake(&uri).await?;
+
         self.set_connector_uri(uri.clone());
 
         let connection_mode = if self.db_security.prefer_unix_socket {
@@ -967,6 +951,86 @@ impl DbRuntimeSupervisor {
     }
 
     /// Build the connection URI based on security settings
+    /// Waits for postgres to create its Unix socket file.
+    ///
+    /// Only the file's existence - the handshake probe that follows is what
+    /// establishes readiness. Split out so the failure message names the
+    /// actual stage that timed out.
+    async fn await_socket_file(socket_path: &Path) -> anyhow::Result<()> {
+        let started = Instant::now();
+        while started.elapsed() < PG_SOCKET_WAIT {
+            if socket_path.exists() {
+                return Ok(());
+            }
+            tokio::time::sleep(PG_PROBE_INTERVAL).await;
+        }
+        Err(anyhow!(
+            "postgres did not create its socket at {} within {:?}",
+            socket_path.display(),
+            PG_SOCKET_WAIT
+        ))
+    }
+
+    /// Waits for postgres to start listening on the loopback port.
+    async fn await_tcp_listener(port: u16) -> anyhow::Result<()> {
+        let addr = format!("127.0.0.1:{port}");
+        let started = Instant::now();
+        while started.elapsed() < PG_SOCKET_WAIT {
+            if TcpStream::connect(&addr).is_ok() {
+                return Ok(());
+            }
+            tokio::time::sleep(PG_PROBE_INTERVAL).await;
+        }
+        Err(anyhow!(
+            "postgres did not listen on {addr} within {:?}",
+            PG_SOCKET_WAIT
+        ))
+    }
+
+    /// Polls until postgres completes a real handshake and answers a query.
+    ///
+    /// This is the readiness definition that matters: it is exactly what the
+    /// migration runner does next. Errors while starting up are expected and
+    /// retried; the last one is reported if the budget runs out.
+    async fn await_postgres_handshake(uri: &str) -> anyhow::Result<()> {
+        let started = Instant::now();
+        let mut last_error: Option<String> = None;
+
+        while started.elapsed() < PG_HANDSHAKE_WAIT {
+            match tokio_postgres::connect(uri, tokio_postgres::NoTls).await {
+                Ok((client, connection)) => {
+                    // The connection future drives the socket; it has to run
+                    // for the query to resolve, and is dropped right after.
+                    let driver = tokio::spawn(async move {
+                        let _ = connection.await;
+                    });
+                    let probed = client.simple_query("SELECT 1").await;
+                    drop(client);
+                    driver.abort();
+
+                    match probed {
+                        Ok(_) => {
+                            info!(
+                                waited_ms = started.elapsed().as_millis() as u64,
+                                "postgres accepting connections"
+                            );
+                            return Ok(());
+                        }
+                        Err(err) => last_error = Some(err.to_string()),
+                    }
+                }
+                Err(err) => last_error = Some(err.to_string()),
+            }
+            tokio::time::sleep(PG_PROBE_INTERVAL).await;
+        }
+
+        Err(anyhow!(
+            "postgres did not accept connections within {:?}: {}",
+            PG_HANDSHAKE_WAIT,
+            last_error.unwrap_or_else(|| "no error reported".to_string())
+        ))
+    }
+
     fn build_connection_uri(
         &self,
         port: u16,

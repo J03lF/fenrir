@@ -31,3 +31,9 @@ enabled = true
 [audit]
 enabled = true
 buffer_capacity = 2048
+# Phase 0 (2026-10-24): pass NOTIFY_* from bin/.fenrir-profile to modules
+# (notification-service reads NOTIFY_*; the host only derives NOTIFICATION_*).
+# Per-module [modules.services.*.env] keys do not work for upper-case names:
+# the config crate lowercases keys.
+[modules.runtime]
+env_passthrough_prefixes = ["NOTIFY_"]

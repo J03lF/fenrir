@@ -26,3 +26,15 @@ export FENRIR_MODULE_INSTALL_DIR=/Users/jfurocket/Documents/personal/modules
 # export FENRIR__SERVER__SSH__PORT=2222
 # export FENRIR__SERVER__HTTP__PORT=8080
 # export FENRIR_LOG_LEVEL=debug
+
+# auth-service: dev mode only via AUTH_* (the host drops FENRIR_* vars for modules).
+# Login PINs go to this 0600 sink instead of the log; never set these in prod.
+export AUTH_ENV=dev
+export AUTH_DEV_PIN_SINK=/Users/jfurocket/Documents/personal/modules/runtime/auth-dev-pins.log
+
+# Phase 0 (2026-10-24), dev only. File paths only, never secret values.
+# Shared service token auth-service -> notification-service (0600 file outside git).
+export NOTIFY_INTERNAL_SERVICE_AUTH_TOKEN_FILE=/Users/jfurocket/Documents/personal/modules/runtime/secrets/notify-service.token
+export AUTH_NOTIFICATION_SERVICE_TOKEN_FILE=/Users/jfurocket/Documents/personal/modules/runtime/secrets/notify-service.token
+# athene-api: Swagger, OpenAPI and /metrics/internal for the host scrape (ignored in production).
+export ATHENE_API_DEV_ENDPOINTS=true

@@ -40,13 +40,13 @@ ssh-keyscan -p 2222 127.0.0.1 >> ~/.ssh/known_hosts
 - Permission denied: ensure `FENRIR_SSH_PASSWORD` matches the password you type (development) or verify the Identity-Broker credentials and control token in production.
 
 postgresql://<USER>:<PASSWORD>@<HOST>:<PORT>/<DBNAME>
-export FENRIR_DB_POSTGRES_URI=postgresql://root:1234@localhost:5432/postgres
-export FENRIR_SSH_PASSWORD=test
-export FENRIR_HTTP_TOKEN_ADMIN=testa
-export FENRIR_HTTP_TOKEN_OPERATOR=testo
-export FENRIR_HTTP_TOKEN_VIEWER=testv
-export FENRIR_REGISTRY_TOKEN="test12345678910111213141516"
-export FENRIR_IDENTITY_TOKEN=test1234567891202
+export FENRIR_DB_POSTGRES_URI=postgresql://<USER>:<PASSWORD>@localhost:5432/<DBNAME>
+export FENRIR_SSH_PASSWORD=<ssh-password>
+export FENRIR_HTTP_TOKEN_ADMIN=<admin-token>
+export FENRIR_HTTP_TOKEN_OPERATOR=<operator-token>
+export FENRIR_HTTP_TOKEN_VIEWER=<viewer-token>
+export FENRIR_REGISTRY_TOKEN=<registry-api-key>
+export FENRIR_IDENTITY_TOKEN=<identity-client-token>
 
 # Statt alles per Hand zu exportieren kannst du dieselben Variablen auch in `secrets/.env` legen.
 # Fenrir lädt diese Datei automatisch (bzw. eine alternative via `FENRIR_ENV_FILE=/path/to/.env`),

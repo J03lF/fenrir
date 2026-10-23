@@ -16,3 +16,7 @@ target/
 /dataSources/
 /dataSources.local.xml
 static/control-plane/
+# Local credentials (never commit; see db-test/.env.example)
+db-test/.env
+# SSH host key, generated on first start (server.ssh.host_key_path)
+keys/

@@ -73,6 +73,7 @@ use crate::utils::{
 use fenrir_module_kit::{ModuleTokenExchangeRequest, ModuleTokenExchangeResponse};
 
 use super::gateway::{HTTP_GATEWAY_CLIENT, HTTP_GATEWAY_STREAMING_CLIENT, SERVICE_RATE_LIMITER};
+use super::proxy_headers::HopByHop;
 use super::server::HTTP_SERVICE_ID;
 use super::state::{HttpInfo, HttpState};
 
@@ -1546,15 +1547,25 @@ async fn convert_upstream_response(
         .map(|ct| ct.starts_with("text/event-stream"))
         .unwrap_or(false);
 
+    let hop = HopByHop::new(
+        headers
+            .get_all(reqwest::header::CONNECTION)
+            .iter()
+            .map(|value| value.as_bytes()),
+    );
     let mut builder = Response::builder().status(status);
     {
         let headers_mut = builder.headers_mut().expect("response headers available");
         for (name, value) in headers.iter() {
+            if hop.contains(name.as_str()) {
+                continue;
+            }
             if let (Ok(header_name), Ok(header_value)) = (
                 AxumHeaderName::from_bytes(name.as_str().as_bytes()),
                 HeaderValue::from_bytes(value.as_bytes()),
             ) {
-                headers_mut.insert(header_name, header_value);
+                // `append`, not `insert`: every `Set-Cookie` must survive.
+                headers_mut.append(header_name, header_value);
             }
         }
     }
@@ -4528,5 +4539,91 @@ mod db_runtime_status_tests {
             lines[1],
             "probe failed for postgres://fenrir_embedded:***@/postgres"
         );
+    }
+}
+
+#[cfg(test)]
+mod upstream_response_tests {
+    use super::convert_upstream_response;
+    use axum::body::to_bytes;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// One raw HTTP/1.1 response from a throwaway upstream, through reqwest.
+    async fn upstream_response(raw: &'static str) -> reqwest::Response {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut head = Vec::new();
+            let mut byte = [0_u8; 1];
+            while !head.ends_with(b"\r\n\r\n") && socket.read(&mut byte).await.unwrap_or(0) == 1 {
+                head.push(byte[0]);
+            }
+            socket.write_all(raw.as_bytes()).await.unwrap();
+        });
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn keeps_every_set_cookie_and_drops_hop_by_hop_headers() {
+        for (label, raw) in [
+            (
+                "buffered",
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                 set-cookie: athene_refresh=r1; Path=/; HttpOnly\r\n\
+                 set-cookie: athene_csrf=c1; Path=/\r\n\
+                 connection: close, x-hop\r\nkeep-alive: timeout=5\r\nx-hop: 1\r\n\
+                 proxy-authenticate: Basic\r\nx-request-id: abc\r\n\
+                 content-length: 2\r\n\r\n{}",
+            ),
+            (
+                "event stream",
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\n\
+                 set-cookie: athene_refresh=r1; Path=/; HttpOnly\r\n\
+                 set-cookie: athene_csrf=c1; Path=/\r\n\
+                 connection: close, x-hop\r\nkeep-alive: timeout=5\r\nx-hop: 1\r\n\
+                 proxy-authenticate: Basic\r\nx-request-id: abc\r\n\
+                 transfer-encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n",
+            ),
+        ] {
+            let response = convert_upstream_response(upstream_response(raw).await)
+                .await
+                .map_err(|_| label)
+                .unwrap();
+            let cookies: Vec<&str> = response
+                .headers()
+                .get_all("set-cookie")
+                .iter()
+                .map(|v| v.to_str().unwrap())
+                .collect();
+            assert_eq!(
+                cookies,
+                vec![
+                    "athene_refresh=r1; Path=/; HttpOnly",
+                    "athene_csrf=c1; Path=/"
+                ],
+                "{label}"
+            );
+            assert_eq!(response.headers().get("x-request-id").unwrap(), "abc");
+            for hop in [
+                "connection",
+                "keep-alive",
+                "x-hop",
+                "proxy-authenticate",
+                "transfer-encoding",
+            ] {
+                assert!(response.headers().get(hop).is_none(), "{label}: {hop}");
+            }
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            assert_eq!(&body[..], b"{}", "{label}");
+        }
     }
 }

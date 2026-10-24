@@ -1,4 +1,5 @@
 mod gateway;
+pub(crate) mod proxy_headers;
 mod routes;
 mod server;
 mod state;

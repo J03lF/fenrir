@@ -1,22 +1,25 @@
 use async_trait::async_trait;
 use axum::{
-    body::Body,
+    body::{Body, Bytes, HttpBody as _},
     extract::State,
     http::{header, HeaderMap, HeaderName, HeaderValue, Request, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::{any, get},
     Json, Router,
 };
-use http_body_util::BodyExt;
+use futures::Stream;
 use reqwest::{Client as HttpClient, Method as ReqwestMethod};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::env;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
@@ -30,6 +33,7 @@ use crate::domain::module::{
     ModuleId, ModuleRuntimeError, ModuleRuntimeInfo, ModuleRuntimeInstanceInfo, ModuleRuntimeKind,
     ModuleRuntimePort, ModuleRuntimeStatus, ModuleStartConfig, ModuleStoragePort, ModuleVersion,
 };
+use crate::infra::http::proxy_headers::HopByHop;
 use crate::services::ServiceDiagnostics;
 use crate::utils::messages;
 use time::format_description::well_known::Rfc3339;
@@ -143,6 +147,19 @@ const STATIC_HOST_OWNED_HEADERS: &[&str] = &[
 
 const STATIC_CACHE_IMMUTABLE: &str = "public, max-age=31536000, immutable";
 const STATIC_CACHE_REVALIDATE: &str = "no-cache";
+
+// The static site's `/gateway` proxy to the control plane. A proxied
+// response may be an event stream that stays open for hours, so there is no
+// total timeout; connect, response head and body silence are bounded instead.
+const STATIC_PROXY_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Until the response head arrives. Above the control plane's own 30 s
+/// upstream timeout, so its 502/504 reaches the browser first.
+const STATIC_PROXY_FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(40);
+/// Longest silence inside a response body. athene-api's event streams send a
+/// keep-alive comment every 15 s, so this is three missed heartbeats.
+const STATIC_PROXY_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
+const STATIC_PROXY_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const STATIC_PROXY_POOL_MAX_IDLE: usize = 16;
 
 #[derive(Debug, Clone)]
 struct StaticSiteProfile {
@@ -951,25 +968,13 @@ impl ProcessModuleRuntime {
         diagnostics: Arc<ServiceDiagnostics>,
         log_file: PathBuf,
     ) -> Router {
-        let state = StaticRouterState::new(
+        static_router(StaticRouterState::new(
             module_id,
             profile,
             diagnostics,
             self.control_plane_base.clone(),
             log_file,
-        );
-        Router::new()
-            .route("/live", get(static_health_handler))
-            .route("/ready", get(static_health_handler))
-            .route("/healthz", get(static_health_handler))
-            .route("/.fenrir/services", get(static_services_handler))
-            .route("/gateway/*rest", any(static_gateway_proxy_handler))
-            .fallback(get(static_asset_handler))
-            .layer(axum::middleware::from_fn_with_state(
-                state.clone(),
-                static_request_logger,
-            ))
-            .with_state(state)
+        ))
     }
 
     // Static-site spawn carries the full lifecycle context (module identity,
@@ -1886,6 +1891,55 @@ fn default_true() -> bool {
     true
 }
 
+fn static_router(state: StaticRouterState) -> Router {
+    Router::new()
+        .route("/live", get(static_health_handler))
+        .route("/ready", get(static_health_handler))
+        .route("/healthz", get(static_health_handler))
+        .route("/.fenrir/services", get(static_services_handler))
+        .route("/gateway/*rest", any(static_gateway_proxy_handler))
+        .fallback(get(static_asset_handler))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            static_request_logger,
+        ))
+        .with_state(state)
+}
+
+/// Client and limits of the static site's `/gateway` proxy.
+#[derive(Clone)]
+struct StaticGatewayProxy {
+    client: HttpClient,
+    first_byte_timeout: Duration,
+    idle_timeout: Duration,
+}
+
+impl StaticGatewayProxy {
+    fn new() -> Self {
+        // No `.timeout()`: it would cut event streams. The pool is not capped
+        // (reqwest never queues requests per host); only idle connections
+        // are limited. Redirects are the browser's business, not the proxy's,
+        // and the control plane is local, so no environment proxy applies.
+        let client = HttpClient::builder()
+            .no_proxy()
+            .connect_timeout(STATIC_PROXY_CONNECT_TIMEOUT)
+            .pool_idle_timeout(STATIC_PROXY_POOL_IDLE_TIMEOUT)
+            .pool_max_idle_per_host(STATIC_PROXY_POOL_MAX_IDLE)
+            .redirect(reqwest::redirect::Policy::none())
+            .tcp_nodelay(true)
+            .build()
+            .unwrap_or_else(|err| {
+                warn!(error = %err, "static gateway proxy client setup failed, using defaults");
+                HttpClient::new()
+            });
+        Self {
+            client,
+            first_byte_timeout: STATIC_PROXY_FIRST_BYTE_TIMEOUT,
+            idle_timeout: STATIC_PROXY_IDLE_TIMEOUT,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct StaticRouterState {
     module: Arc<String>,
@@ -1896,7 +1950,7 @@ struct StaticRouterState {
     diagnostics: Arc<ServiceDiagnostics>,
     metric_id: Arc<String>,
     control_plane_base: Arc<String>,
-    http_client: HttpClient,
+    proxy: StaticGatewayProxy,
     log_file: Arc<PathBuf>,
 }
 
@@ -1919,7 +1973,7 @@ impl StaticRouterState {
             diagnostics,
             metric_id,
             control_plane_base: Arc::new(control_plane_base),
-            http_client: HttpClient::new(),
+            proxy: StaticGatewayProxy::new(),
             log_file: Arc::new(log_file),
         }
     }
@@ -1995,10 +2049,6 @@ impl StaticRouterState {
 
     fn control_plane_base(&self) -> &str {
         self.control_plane_base.as_ref()
-    }
-
-    fn http_client(&self) -> &HttpClient {
-        &self.http_client
     }
 
     fn resolve_asset(&self, request_path: &str) -> Option<PathBuf> {
@@ -2132,100 +2182,200 @@ async fn static_services_handler(State(state): State<StaticRouterState>) -> impl
     Json(default_static_services_payload(state.module()))
 }
 
+/// Proxies `/gateway/*` to the control plane without buffering either body.
+///
+/// - The request body streams upstream; an empty one is not sent at all.
+/// - The response is passed on as soon as its head arrives: the status, the
+///   end-to-end headers (every `Set-Cookie` kept) and a body that streams
+///   chunk by chunk, so event streams (`text/event-stream`) arrive live.
+///   Nothing is compressed; `Content-Type` and `Cache-Control` pass through.
+/// - Hop-by-hop headers are dropped in both directions.
+/// - Proxied responses carry the upstream's headers only, as before; the
+///   static security headers (`STATIC_DEFAULT_HEADERS`) stay on files.
+/// - When the browser goes away, hyper drops this future (before the response
+///   head) or the response body (after it). Either drops the upstream request
+///   and closes its connection, so the control plane ends its stream too.
 async fn static_gateway_proxy_handler(
     State(state): State<StaticRouterState>,
     req: Request<Body>,
 ) -> Response {
     let started = Instant::now();
-    let path_and_query = req
-        .uri()
+    let (parts, body) = req.into_parts();
+    let path_and_query = parts
+        .uri
         .path_and_query()
-        .map(|value| value.as_str())
-        .unwrap_or("/");
+        .map_or("/", |value| value.as_str());
     let target = format!("{}{}", state.control_plane_base(), path_and_query);
-    let method = req.method().clone();
-    let headers = req.headers().clone();
-    let collected_body = match req.into_body().collect().await {
-        Ok(collected) => collected.to_bytes(),
-        Err(err) => {
-            error!(
-                module = %state.module(),
-                error = %err,
-                "failed to read gateway proxy request body"
-            );
-            state.record_probe(started.elapsed(), false);
-            return (StatusCode::BAD_GATEWAY, "gateway proxy body read failed").into_response();
-        }
-    };
+    let method =
+        ReqwestMethod::from_bytes(parts.method.as_str().as_bytes()).unwrap_or(ReqwestMethod::GET);
 
-    let reqwest_method =
-        ReqwestMethod::from_bytes(method.as_str().as_bytes()).unwrap_or(ReqwestMethod::GET);
-    let mut request_builder = state.http_client().request(reqwest_method, target);
-    for (name, value) in headers.iter() {
-        if name == header::HOST {
+    let hop = HopByHop::new(
+        parts
+            .headers
+            .get_all(header::CONNECTION)
+            .iter()
+            .map(HeaderValue::as_bytes),
+    );
+    let mut upstream = state.proxy.client.request(method, target);
+    for (name, value) in &parts.headers {
+        if name == header::HOST || hop.contains(name.as_str()) {
             continue;
         }
-        if let Ok(value_str) = value.to_str() {
-            request_builder = request_builder.header(name.as_str(), value_str);
-        }
+        upstream = upstream.header(name.as_str(), value.as_bytes());
+    }
+    if body.size_hint().exact() != Some(0) {
+        upstream = upstream.body(reqwest::Body::wrap_stream(body.into_data_stream()));
     }
 
-    if !collected_body.is_empty() {
-        request_builder = request_builder.body(collected_body.to_vec());
-    }
-
-    let response_result = request_builder.send().await;
-    match response_result {
-        Ok(resp) => {
-            let status = resp.status();
-            let headers = resp.headers().clone();
-            match resp.bytes().await {
-                Ok(resp_bytes) => {
-                    let mut builder = Response::builder().status(
-                        StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
-                    );
-                    for (name, value) in headers.iter() {
-                        if name.as_str().eq_ignore_ascii_case("transfer-encoding") {
-                            continue;
-                        }
-                        if let Ok(value_str) = value.to_str() {
-                            builder = builder.header(name.as_str(), value_str);
-                        }
-                    }
-                    state.record_probe(started.elapsed(), true);
-                    builder.body(Body::from(resp_bytes)).unwrap_or_else(|_| {
-                        (
-                            StatusCode::BAD_GATEWAY,
-                            "gateway proxy response build failed",
-                        )
-                            .into_response()
-                    })
-                }
-                Err(err) => {
-                    warn!(
-                        module = %state.module(),
-                        error = %err,
-                        "gateway proxy response read failed"
-                    );
-                    state.record_probe(started.elapsed(), false);
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        "gateway proxy upstream read failed",
-                    )
-                        .into_response()
-                }
-            }
-        }
-        Err(err) => {
-            let error_msg = format!("Gateway proxy request failed: {}", err);
-            state.log_error(&error_msg);
+    let response = match tokio::time::timeout(state.proxy.first_byte_timeout, upstream.send()).await
+    {
+        Ok(Ok(response)) => response,
+        Ok(Err(err)) => {
+            let err = err.without_url();
+            state.log_error(&format!("Gateway proxy request failed: {err}"));
             warn!(
                 module = %state.module(),
                 error = %err,
                 "gateway proxy request failed"
             );
             state.record_probe(started.elapsed(), false);
-            (StatusCode::BAD_GATEWAY, "gateway proxy unavailable").into_response()
+            return (StatusCode::BAD_GATEWAY, "gateway proxy unavailable").into_response();
+        }
+        Err(_) => {
+            let timeout_s = state.proxy.first_byte_timeout.as_secs();
+            state.log_error(&format!(
+                "Gateway proxy upstream sent no response within {timeout_s}s"
+            ));
+            warn!(
+                module = %state.module(),
+                timeout_s,
+                "gateway proxy upstream sent no response head in time"
+            );
+            state.record_probe(started.elapsed(), false);
+            return (
+                StatusCode::GATEWAY_TIMEOUT,
+                "gateway proxy upstream timed out",
+            )
+                .into_response();
+        }
+    };
+
+    let status =
+        StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let hop = HopByHop::new(
+        response
+            .headers()
+            .get_all(reqwest::header::CONNECTION)
+            .iter()
+            .map(|value| value.as_bytes()),
+    );
+    let mut headers = HeaderMap::with_capacity(response.headers().len());
+    for (name, value) in response.headers() {
+        if hop.contains(name.as_str()) {
+            continue;
+        }
+        if let (Ok(name), Ok(value)) = (
+            HeaderName::from_bytes(name.as_str().as_bytes()),
+            HeaderValue::from_bytes(value.as_bytes()),
+        ) {
+            // `append`: a response may carry several `Set-Cookie` headers.
+            headers.append(name, value);
+        }
+    }
+    let body = ProxyBody::new(
+        response.bytes_stream(),
+        state.proxy.idle_timeout,
+        Arc::clone(&state.module),
+    );
+    let mut proxied = Response::new(Body::from_stream(body));
+    *proxied.status_mut() = status;
+    *proxied.headers_mut() = headers;
+    state.record_probe(started.elapsed(), true);
+    proxied
+}
+
+/// A proxied response body, passed on chunk by chunk as the upstream sends
+/// it. It ends with an error (the browser sees an aborted response, and an
+/// `EventSource` reconnects) when the upstream fails or stays silent for
+/// longer than `idle`.
+struct ProxyBody {
+    inner: Pin<Box<dyn Stream<Item = reqwest::Result<Bytes>> + Send>>,
+    idle: Duration,
+    timer: Pin<Box<tokio::time::Sleep>>,
+    module: Arc<String>,
+    finished: bool,
+}
+
+impl ProxyBody {
+    fn new(
+        inner: impl Stream<Item = reqwest::Result<Bytes>> + Send + 'static,
+        idle: Duration,
+        module: Arc<String>,
+    ) -> Self {
+        Self {
+            inner: Box::pin(inner),
+            idle,
+            timer: Box::pin(tokio::time::sleep(idle)),
+            module,
+            finished: false,
+        }
+    }
+}
+
+impl Stream for ProxyBody {
+    type Item = Result<Bytes, std::io::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = &mut *self;
+        if this.finished {
+            return Poll::Ready(None);
+        }
+        match this.inner.as_mut().poll_next(cx) {
+            Poll::Ready(Some(Ok(chunk))) => {
+                let deadline = tokio::time::Instant::now() + this.idle;
+                this.timer.as_mut().reset(deadline);
+                Poll::Ready(Some(Ok(chunk)))
+            }
+            Poll::Ready(Some(Err(err))) => {
+                this.finished = true;
+                let err = err.without_url();
+                warn!(
+                    module = %this.module,
+                    error = %err,
+                    "gateway proxy upstream body failed"
+                );
+                Poll::Ready(Some(Err(std::io::Error::other(err))))
+            }
+            Poll::Ready(None) => {
+                this.finished = true;
+                Poll::Ready(None)
+            }
+            Poll::Pending => match this.timer.as_mut().poll(cx) {
+                Poll::Ready(()) => {
+                    this.finished = true;
+                    warn!(
+                        module = %this.module,
+                        idle_s = this.idle.as_secs(),
+                        "gateway proxy upstream body went silent, closing it"
+                    );
+                    Poll::Ready(Some(Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "gateway proxy upstream idle",
+                    ))))
+                }
+                Poll::Pending => Poll::Pending,
+            },
+        }
+    }
+}
+
+impl Drop for ProxyBody {
+    fn drop(&mut self) {
+        if !self.finished {
+            debug!(
+                module = %self.module,
+                "gateway proxy client went away, upstream request dropped"
+            );
         }
     }
 }

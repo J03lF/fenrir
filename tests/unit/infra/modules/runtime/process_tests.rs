@@ -503,3 +503,531 @@ async fn static_router_sets_headers_on_static_routes_only() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// Static `/gateway` proxy: streaming, disconnects, header rules
+// ---------------------------------------------------------------------------
+
+mod gateway_proxy {
+    use super::*;
+    use futures::StreamExt;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::io::AsyncReadExt;
+    use tokio::net::TcpStream;
+    use tokio::sync::{mpsc, Notify};
+    use tokio::time::timeout;
+
+    const WAIT: Duration = Duration::from_secs(5);
+    const SSE_HEAD: &str = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\ntransfer-encoding: chunked\r\n\r\n";
+
+    fn chunk(data: &str) -> String {
+        format!("{:x}\r\n{data}\r\n", data.len())
+    }
+
+    async fn read_head(socket: &mut TcpStream) -> String {
+        let mut head = Vec::new();
+        let mut byte = [0_u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            match socket.read(&mut byte).await {
+                Ok(1) => head.push(byte[0]),
+                _ => break,
+            }
+        }
+        String::from_utf8_lossy(&head).into_owned()
+    }
+
+    /// Resolves once the peer has closed the connection.
+    async fn wait_for_close(socket: &mut TcpStream) {
+        let mut buf = [0_u8; 1024];
+        while matches!(socket.read(&mut buf).await, Ok(n) if n > 0) {}
+    }
+
+    /// A control-plane stand-in speaking raw HTTP/1.1, so a test decides
+    /// every byte of the response. Each request head goes to the receiver.
+    async fn fake_upstream<F, Fut>(script: F) -> (String, mpsc::UnboundedReceiver<String>)
+    where
+        F: Fn(TcpStream, String) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (heads_tx, heads_rx) = mpsc::unbounded_channel();
+        let script = Arc::new(script);
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let script = Arc::clone(&script);
+                let heads_tx = heads_tx.clone();
+                tokio::spawn(async move {
+                    let head = read_head(&mut socket).await;
+                    let _ = heads_tx.send(head.clone());
+                    script(socket, head).await;
+                });
+            }
+        });
+        (format!("http://{addr}"), heads_rx)
+    }
+
+    /// The static router on a real socket, proxying `/gateway` to `upstream`.
+    async fn static_proxy(upstream: &str, first_byte: Duration, idle: Duration) -> String {
+        let dir = std::env::temp_dir().join(format!("fenrir-proxy-{}", Uuid::new_v4()));
+        let profile = StaticSiteProfile::new(dir.join("browser"), dir.join("browser/index.html"));
+        let mut state = StaticRouterState::new(
+            &ModuleId::new("athene-web").unwrap(),
+            profile,
+            Arc::new(ServiceDiagnostics::new()),
+            upstream.to_string(),
+            dir.join("web.log"),
+        );
+        state.proxy.first_byte_timeout = first_byte;
+        state.proxy.idle_timeout = idle;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, static_router(state).into_make_service()).await;
+        });
+        format!("http://{addr}")
+    }
+
+    async fn default_proxy(upstream: &str) -> String {
+        static_proxy(
+            upstream,
+            STATIC_PROXY_FIRST_BYTE_TIMEOUT,
+            STATIC_PROXY_IDLE_TIMEOUT,
+        )
+        .await
+    }
+
+    /// The browser. Its total timeout only turns a hang into a failure.
+    fn client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .timeout(2 * WAIT)
+            .build()
+            .unwrap()
+    }
+
+    /// Raw HTTP/1.1 exchange, so the test controls (and sees) every header.
+    async fn raw_exchange(addr: &str, request: &str) -> (Vec<(String, String)>, Vec<u8>) {
+        let mut socket = TcpStream::connect(addr.trim_start_matches("http://"))
+            .await
+            .unwrap();
+        socket.write_all(request.as_bytes()).await.unwrap();
+        let head = timeout(WAIT, read_head(&mut socket)).await.unwrap();
+        let headers: Vec<(String, String)> = head
+            .lines()
+            .skip(1)
+            .filter_map(|line| line.split_once(':'))
+            .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_string()))
+            .collect();
+        let length: usize = headers
+            .iter()
+            .find(|(name, _)| name == "content-length")
+            .and_then(|(_, value)| value.parse().ok())
+            .unwrap_or(0);
+        let mut body = vec![0_u8; length];
+        timeout(WAIT, socket.read_exact(&mut body))
+            .await
+            .unwrap()
+            .unwrap();
+        (headers, body)
+    }
+
+    fn values<'a>(headers: &'a [(String, String)], name: &str) -> Vec<&'a str> {
+        headers
+            .iter()
+            .filter(|(n, _)| n == name)
+            .map(|(_, v)| v.as_str())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn event_stream_arrives_incrementally_before_upstream_closes() {
+        let release = Arc::new(Notify::new());
+        let upstream_done = Arc::new(AtomicBool::new(false));
+        let (upstream, _heads) = fake_upstream({
+            let release = Arc::clone(&release);
+            let upstream_done = Arc::clone(&upstream_done);
+            move |mut socket, _head| {
+                let release = Arc::clone(&release);
+                let upstream_done = Arc::clone(&upstream_done);
+                async move {
+                    let first = chunk("event: maintenance\ndata: {\"active\":false}\n\n");
+                    socket
+                        .write_all(format!("{SSE_HEAD}{first}").as_bytes())
+                        .await
+                        .unwrap();
+                    release.notified().await;
+                    let rest = format!(
+                        "{}{}0\r\n\r\n",
+                        chunk(": keep-alive\n\n"),
+                        chunk("event: maintenance\ndata: {\"active\":true}\n\n")
+                    );
+                    socket.write_all(rest.as_bytes()).await.unwrap();
+                    upstream_done.store(true, Ordering::SeqCst);
+                }
+            }
+        })
+        .await;
+        let proxy = default_proxy(&upstream).await;
+
+        let response = timeout(
+            WAIT,
+            client()
+                .get(format!(
+                    "{proxy}/gateway/services/x/api/v1/maintenance/stream"
+                ))
+                .header("accept", "text/event-stream")
+                .send(),
+        )
+        .await
+        .expect("response head arrives while the stream is open")
+        .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let header = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .map(|value| value.to_str().unwrap().to_string())
+        };
+        assert_eq!(header("content-type").as_deref(), Some("text/event-stream"));
+        assert_eq!(header("cache-control").as_deref(), Some("no-cache"));
+        assert_eq!(header("content-encoding"), None);
+        assert_eq!(header("content-length"), None);
+        // proxied responses keep the upstream's headers only
+        assert_eq!(header("x-content-type-options"), None);
+
+        let mut body = response.bytes_stream();
+        let first = timeout(WAIT, body.next())
+            .await
+            .expect("first event arrives before the upstream closes")
+            .unwrap()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&first)
+                .contains("event: maintenance\ndata: {\"active\":false}"),
+            "{first:?}"
+        );
+        assert!(!upstream_done.load(Ordering::SeqCst));
+
+        release.notify_one();
+        let mut rest = Vec::new();
+        while let Some(part) = timeout(WAIT, body.next()).await.unwrap() {
+            rest.extend_from_slice(&part.unwrap());
+        }
+        let rest = String::from_utf8(rest).unwrap();
+        assert!(rest.contains(": keep-alive"), "{rest}");
+        assert!(rest.contains("{\"active\":true}"), "{rest}");
+        assert!(upstream_done.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn client_disconnect_drops_the_upstream_request() {
+        // after the response head: the upstream is mid-stream
+        let (closed_tx, mut closed_rx) = mpsc::unbounded_channel::<&'static str>();
+        let (upstream, _heads) = fake_upstream(move |mut socket, head| {
+            let closed_tx = closed_tx.clone();
+            async move {
+                if head.contains("/streaming") {
+                    let first = chunk("event: feature-flags\ndata: []\n\n");
+                    socket
+                        .write_all(format!("{SSE_HEAD}{first}").as_bytes())
+                        .await
+                        .unwrap();
+                    wait_for_close(&mut socket).await;
+                    let _ = closed_tx.send("streaming");
+                } else {
+                    // before the response head: the upstream never answers
+                    wait_for_close(&mut socket).await;
+                    let _ = closed_tx.send("silent");
+                }
+            }
+        })
+        .await;
+        let proxy = default_proxy(&upstream).await;
+
+        let response = client()
+            .get(format!("{proxy}/gateway/streaming"))
+            .header("accept", "text/event-stream")
+            .send()
+            .await
+            .unwrap();
+        let mut body = response.bytes_stream();
+        let first = timeout(WAIT, body.next()).await.unwrap().unwrap().unwrap();
+        assert!(String::from_utf8_lossy(&first).contains("feature-flags"));
+        drop(body); // the browser goes away mid-stream
+        assert_eq!(
+            timeout(WAIT, closed_rx.recv())
+                .await
+                .expect("upstream closed"),
+            Some("streaming")
+        );
+
+        let gave_up = client()
+            .get(format!("{proxy}/gateway/silent"))
+            .timeout(Duration::from_millis(300))
+            .send()
+            .await;
+        assert!(gave_up.is_err());
+        assert_eq!(
+            timeout(WAIT, closed_rx.recv())
+                .await
+                .expect("upstream closed"),
+            Some("silent")
+        );
+    }
+
+    #[tokio::test]
+    async fn keeps_every_set_cookie_and_drops_hop_by_hop_headers() {
+        let (upstream, mut heads) = fake_upstream(|mut socket, _head| async move {
+            let response = "HTTP/1.1 200 OK\r\n\
+                content-type: text/plain\r\n\
+                set-cookie: athene_refresh=r1; Path=/; HttpOnly; SameSite=Strict\r\n\
+                set-cookie: athene_csrf=c1; Path=/\r\n\
+                connection: keep-alive, x-upstream-hop\r\n\
+                keep-alive: timeout=5\r\n\
+                x-upstream-hop: 1\r\n\
+                proxy-authenticate: Basic\r\n\
+                trailer: x-checksum\r\n\
+                upgrade: h2c\r\n\
+                x-end-to-end: kept\r\n\
+                content-length: 2\r\n\r\nok";
+            socket.write_all(response.as_bytes()).await.unwrap();
+            wait_for_close(&mut socket).await;
+        })
+        .await;
+        let proxy = default_proxy(&upstream).await;
+
+        let (headers, body) = raw_exchange(
+            &proxy,
+            "GET /gateway/services/x/api/v1/auth/refresh?probe=1 HTTP/1.1\r\n\
+             host: 127.0.0.1\r\n\
+             connection: keep-alive, x-client-hop\r\n\
+             keep-alive: timeout=5\r\n\
+             x-client-hop: 1\r\n\
+             te: trailers\r\n\
+             proxy-authorization: Basic eDp5\r\n\
+             upgrade: websocket\r\n\
+             cookie: athene_refresh=r0\r\n\
+             x-end-to-end: kept\r\n\r\n",
+        )
+        .await;
+        assert_eq!(body, b"ok");
+        assert_eq!(
+            values(&headers, "set-cookie"),
+            vec![
+                "athene_refresh=r1; Path=/; HttpOnly; SameSite=Strict",
+                "athene_csrf=c1; Path=/"
+            ]
+        );
+        assert_eq!(values(&headers, "x-end-to-end"), vec!["kept"]);
+        assert_eq!(values(&headers, "content-type"), vec!["text/plain"]);
+        for hop in [
+            "keep-alive",
+            "x-upstream-hop",
+            "proxy-authenticate",
+            "trailer",
+            "upgrade",
+        ] {
+            assert!(values(&headers, hop).is_empty(), "response leaked {hop}");
+        }
+        for value in values(&headers, "connection") {
+            assert!(!value.contains("x-upstream-hop"), "{value}");
+        }
+
+        let upstream_head = timeout(WAIT, heads.recv()).await.unwrap().unwrap();
+        let upstream_headers: Vec<(String, String)> = upstream_head
+            .lines()
+            .skip(1)
+            .filter_map(|line| line.split_once(':'))
+            .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_string()))
+            .collect();
+        assert!(
+            upstream_head
+                .starts_with("GET /gateway/services/x/api/v1/auth/refresh?probe=1 HTTP/1.1"),
+            "{upstream_head}"
+        );
+        assert_eq!(
+            values(&upstream_headers, "cookie"),
+            vec!["athene_refresh=r0"]
+        );
+        assert_eq!(values(&upstream_headers, "x-end-to-end"), vec!["kept"]);
+        assert_eq!(
+            values(&upstream_headers, "host"),
+            vec![upstream.trim_start_matches("http://")]
+        );
+        for hop in [
+            "connection",
+            "keep-alive",
+            "x-client-hop",
+            "te",
+            "proxy-authorization",
+            "upgrade",
+            "transfer-encoding",
+            "content-length",
+        ] {
+            assert!(
+                values(&upstream_headers, hop).is_empty(),
+                "request leaked {hop}: {upstream_head}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn large_bodies_stream_in_both_directions() {
+        const PART: usize = 1 << 20;
+        const TOTAL: usize = 4 * PART;
+        let pattern = |i: usize| (i % 251) as u8;
+        let release = Arc::new(Notify::new());
+        let (half_tx, mut half_rx) = mpsc::unbounded_channel::<()>();
+        let (upstream, mut heads) = fake_upstream({
+            let release = Arc::clone(&release);
+            move |mut socket, head| {
+                let release = Arc::clone(&release);
+                let half_tx = half_tx.clone();
+                async move {
+                    if head.starts_with("POST") {
+                        // request body: the first half must arrive before the
+                        // client has sent the second one
+                        let mut half = vec![0_u8; 64 * 1024];
+                        socket.read_exact(&mut half).await.unwrap();
+                        assert!(half.iter().all(|b| *b == b'a'));
+                        let _ = half_tx.send(());
+                        socket.read_exact(&mut half).await.unwrap();
+                        assert!(half.iter().all(|b| *b == b'b'));
+                        socket
+                            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
+                            .await
+                            .unwrap();
+                        wait_for_close(&mut socket).await;
+                        return;
+                    }
+                    let data: Vec<u8> = (0..TOTAL).map(pattern).collect();
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\ncontent-length: {TOTAL}\r\nconnection: close\r\n\r\n"
+                    );
+                    socket.write_all(head.as_bytes()).await.unwrap();
+                    socket.write_all(&data[..PART]).await.unwrap();
+                    release.notified().await;
+                    socket.write_all(&data[PART..]).await.unwrap();
+                    wait_for_close(&mut socket).await;
+                }
+            }
+        })
+        .await;
+        let proxy = default_proxy(&upstream).await;
+
+        // response body
+        let response = timeout(WAIT, client().get(format!("{proxy}/gateway/export")).send())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            response.headers().get("content-length").unwrap(),
+            &TOTAL.to_string()
+        );
+        let mut body = response.bytes_stream();
+        let mut received = Vec::with_capacity(TOTAL);
+        while received.len() < PART {
+            let part = timeout(WAIT, body.next())
+                .await
+                .expect("first megabyte arrives before the upstream sends the rest")
+                .unwrap()
+                .unwrap();
+            received.extend_from_slice(&part);
+        }
+        release.notify_one();
+        while let Some(part) = timeout(WAIT, body.next()).await.unwrap() {
+            received.extend_from_slice(&part.unwrap());
+        }
+        assert_eq!(received.len(), TOTAL);
+        assert!(received.iter().enumerate().all(|(i, b)| *b == pattern(i)));
+        let _ = heads.recv().await;
+
+        // request body, streamed with its content-length
+        let (parts_tx, parts_rx) = mpsc::unbounded_channel::<Result<Vec<u8>, std::io::Error>>();
+        parts_tx.send(Ok(vec![b'a'; 64 * 1024])).unwrap();
+        let upload = tokio::spawn({
+            let proxy = proxy.clone();
+            async move {
+                client()
+                    .post(format!("{proxy}/gateway/upload"))
+                    .header("content-length", (128 * 1024).to_string())
+                    .body(reqwest::Body::wrap_stream(
+                        tokio_stream::wrappers::UnboundedReceiverStream::new(parts_rx),
+                    ))
+                    .send()
+                    .await
+            }
+        });
+        timeout(WAIT, half_rx.recv())
+            .await
+            .expect("first half reaches the upstream while the client still sends");
+        parts_tx.send(Ok(vec![b'b'; 64 * 1024])).unwrap();
+        drop(parts_tx);
+        let response = timeout(WAIT, upload).await.unwrap().unwrap().unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let upload_head = timeout(WAIT, heads.recv()).await.unwrap().unwrap();
+        assert!(
+            upload_head.contains("content-length: 131072"),
+            "{upload_head}"
+        );
+        assert!(!upload_head.contains("transfer-encoding"), "{upload_head}");
+    }
+
+    #[tokio::test]
+    async fn silent_streams_and_missing_heads_time_out() {
+        let (closed_tx, mut closed_rx) = mpsc::unbounded_channel::<&'static str>();
+        let (upstream, _heads) = fake_upstream(move |mut socket, head| {
+            let closed_tx = closed_tx.clone();
+            async move {
+                if head.contains("/quiet-stream") {
+                    let first = chunk("event: maintenance\ndata: {}\n\n");
+                    socket
+                        .write_all(format!("{SSE_HEAD}{first}").as_bytes())
+                        .await
+                        .unwrap();
+                }
+                wait_for_close(&mut socket).await;
+                let _ = closed_tx.send(if head.contains("/quiet-stream") {
+                    "stream"
+                } else {
+                    "head"
+                });
+            }
+        })
+        .await;
+        let proxy = static_proxy(
+            &upstream,
+            Duration::from_millis(300),
+            Duration::from_millis(300),
+        )
+        .await;
+
+        let started = Instant::now();
+        let response = client()
+            .get(format!("{proxy}/gateway/no-head"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::GATEWAY_TIMEOUT);
+        assert!(started.elapsed() < WAIT);
+        assert_eq!(timeout(WAIT, closed_rx.recv()).await.unwrap(), Some("head"));
+
+        let response = client()
+            .get(format!("{proxy}/gateway/quiet-stream"))
+            .header("accept", "text/event-stream")
+            .send()
+            .await
+            .unwrap();
+        let mut body = response.bytes_stream();
+        let first = timeout(WAIT, body.next()).await.unwrap().unwrap().unwrap();
+        assert!(String::from_utf8_lossy(&first).contains("event: maintenance"));
+        // no heartbeat within the idle timeout: the stream is cut
+        let cut = timeout(WAIT, body.next()).await.expect("cut after idle");
+        assert!(!matches!(cut, Some(Ok(_))), "{cut:?}");
+        assert_eq!(
+            timeout(WAIT, closed_rx.recv()).await.unwrap(),
+            Some("stream")
+        );
+    }
+}

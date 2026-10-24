@@ -1647,6 +1647,36 @@ async fn convert_upstream_response(
     }
 }
 
+/// The control plane's event-stream hop on its own, for tests: a request is
+/// forwarded the way [`gateway_proxy`] forwards one that accepts
+/// `text/event-stream` (the streaming client, no total timeout) and answered
+/// through [`convert_upstream_response`], so the response body and its
+/// lifetime are exactly the gateway's. Routing, auth and audit are left out;
+/// they are done before the upstream request exists.
+#[cfg(test)]
+pub(crate) fn event_stream_hop(upstream: String) -> Router {
+    Router::new().fallback(move |uri: Uri| {
+        let target = format!(
+            "{upstream}{}",
+            uri.path_and_query().map_or("/", |value| value.as_str())
+        );
+        async move {
+            let sent = HTTP_GATEWAY_STREAMING_CLIENT
+                .get(target)
+                .header(reqwest::header::ACCEPT, "text/event-stream")
+                .send()
+                .await;
+            match sent {
+                Ok(response) => match convert_upstream_response(response).await {
+                    Ok(response) => response,
+                    Err(problem) => problem.into_response(),
+                },
+                Err(_) => StatusCode::BAD_GATEWAY.into_response(),
+            }
+        }
+    })
+}
+
 async fn list_installed_modules(State(state): State<HttpState>, headers: HeaderMap) -> Response {
     if let Err(problem) = authorize(&state.auth, &state.services, &headers, Role::Viewer) {
         return problem.into_response();
@@ -4793,5 +4823,193 @@ mod failover_tests {
         let response = result.unwrap().unwrap();
         assert_eq!(response.status().as_u16(), 201);
         assert_eq!(seen.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(test)]
+mod stream_disconnect_tests {
+    //! A proxied event stream must end upstream as soon as the client that
+    //! asked for it is gone, however it leaves: athene-api holds one of its
+    //! per-caller stream slots for every open upstream stream (SSE_LEAK).
+    use super::event_stream_hop;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::mpsc;
+    use tokio::time::timeout;
+
+    /// "Promptly": well inside one keep-alive interval (15 s).
+    const PROMPTLY: Duration = Duration::from_secs(2);
+    const WAIT: Duration = Duration::from_secs(5);
+
+    async fn read_head(socket: &mut TcpStream) -> String {
+        let mut head = Vec::new();
+        let mut byte = [0_u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            match socket.read(&mut byte).await {
+                Ok(1) => head.push(byte[0]),
+                _ => break,
+            }
+        }
+        String::from_utf8_lossy(&head).into_owned()
+    }
+
+    /// An upstream that opens an event stream, sends one event and then stays
+    /// silent, so only the proxy closing the connection ends it (no write of
+    /// its own can fail and end it early). `/short` answers a plain body.
+    /// Each ended stream is reported once the proxy has closed it.
+    async fn silent_stream_upstream() -> (String, mpsc::UnboundedReceiver<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (closed_tx, closed_rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let closed_tx = closed_tx.clone();
+                tokio::spawn(async move {
+                    loop {
+                        let head = read_head(&mut socket).await;
+                        if head.is_empty() {
+                            return;
+                        }
+                        if head.starts_with("GET /short ") {
+                            let _ = socket
+                                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
+                                .await;
+                            continue;
+                        }
+                        let event = "event: maintenance\ndata: {\"active\":false}\n\n";
+                        let _ = socket
+                            .write_all(
+                                format!(
+                                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                                     transfer-encoding: chunked\r\n\r\n{:x}\r\n{event}\r\n",
+                                    event.len()
+                                )
+                                .as_bytes(),
+                            )
+                            .await;
+                        let mut buf = [0_u8; 256];
+                        while matches!(socket.read(&mut buf).await, Ok(n) if n > 0) {}
+                        let _ = closed_tx.send(());
+                        return;
+                    }
+                });
+            }
+        });
+        (format!("http://{addr}"), closed_rx)
+    }
+
+    async fn serve(router: axum::Router) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        addr.to_string()
+    }
+
+    /// Sends a request on `socket` and reads its head.
+    async fn request(socket: &mut TcpStream, path: &str, accept: &str) -> String {
+        let request = format!("GET {path} HTTP/1.1\r\nhost: athene\r\naccept: {accept}\r\n\r\n");
+        socket.write_all(request.as_bytes()).await.unwrap();
+        timeout(WAIT, read_head(socket)).await.unwrap()
+    }
+
+    /// Opens a stream on `socket` and waits for its first event.
+    async fn open_stream(socket: &mut TcpStream) {
+        let head = request(socket, "/api/v1/maintenance/stream", "text/event-stream").await;
+        assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+        assert!(head.contains("text/event-stream"), "{head}");
+        let mut seen = Vec::new();
+        let mut buf = [0_u8; 256];
+        while !String::from_utf8_lossy(&seen).contains("maintenance") {
+            let n = timeout(WAIT, socket.read(&mut buf)).await.unwrap().unwrap();
+            assert!(n > 0, "the stream ended early");
+            seen.extend_from_slice(&buf[..n]);
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Leave {
+        /// The socket is closed (FIN): a closed tab, `curl` killed.
+        Close,
+        /// Only the sending side is shut; the client could still read.
+        HalfClose,
+        /// Reset (`SO_LINGER 0`): a killed browser process or context.
+        Reset,
+    }
+
+    async fn leave(socket: TcpStream, how: Leave) -> Option<TcpStream> {
+        match how {
+            Leave::Close => {
+                drop(socket);
+                None
+            }
+            Leave::HalfClose => {
+                let mut socket = socket;
+                socket.shutdown().await.unwrap();
+                Some(socket)
+            }
+            Leave::Reset => {
+                socket.set_linger(Some(Duration::ZERO)).unwrap();
+                drop(socket);
+                None
+            }
+        }
+    }
+
+    async fn assert_upstream_ends(closed: &mut mpsc::UnboundedReceiver<()>, case: &str) {
+        assert_eq!(
+            timeout(PROMPTLY, closed.recv()).await.ok().flatten(),
+            Some(()),
+            "{case}: the upstream stream stayed open after the client left"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_gateway_ends_an_upstream_stream_when_its_client_leaves() {
+        let (upstream, mut closed) = silent_stream_upstream().await;
+        let gateway = serve(event_stream_hop(upstream)).await;
+        for how in [Leave::Close, Leave::HalfClose, Leave::Reset] {
+            let mut socket = TcpStream::connect(&gateway).await.unwrap();
+            open_stream(&mut socket).await;
+            let _kept = leave(socket, how).await;
+            assert_upstream_ends(&mut closed, &format!("{how:?}")).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stream_on_a_reused_keep_alive_connection_ends_too() {
+        let (upstream, mut closed) = silent_stream_upstream().await;
+        let gateway = serve(event_stream_hop(upstream)).await;
+        let mut socket = TcpStream::connect(&gateway).await.unwrap();
+        for _ in 0..3 {
+            let head = request(&mut socket, "/short", "*/*").await;
+            assert!(head.contains("content-length: 2"), "{head}");
+            let mut body = [0_u8; 2];
+            timeout(WAIT, socket.read_exact(&mut body))
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        open_stream(&mut socket).await;
+        drop(socket);
+        assert_upstream_ends(&mut closed, "keep-alive reuse").await;
+    }
+
+    #[tokio::test]
+    async fn many_streams_leave_nothing_open_upstream() {
+        let (upstream, mut closed) = silent_stream_upstream().await;
+        let gateway = serve(event_stream_hop(upstream)).await;
+        let modes = [Leave::Close, Leave::HalfClose, Leave::Reset];
+        let mut kept = Vec::new();
+        for round in 0..96 {
+            let mut socket = TcpStream::connect(&gateway).await.unwrap();
+            open_stream(&mut socket).await;
+            kept.push(leave(socket, modes[round % modes.len()]).await);
+        }
+        for n in 0..96 {
+            assert_upstream_ends(&mut closed, &format!("stream {n}")).await;
+        }
     }
 }

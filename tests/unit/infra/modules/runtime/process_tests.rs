@@ -780,6 +780,84 @@ mod gateway_proxy {
         );
     }
 
+    /// The live path, both hops: browser → static edge (41002) → control
+    /// plane (8080, its event-stream hop) → athene-api. However the browser
+    /// leaves, the stream upstream ends promptly, so athene-api frees the
+    /// stream slot it holds for it (SSE_LEAK).
+    #[tokio::test]
+    async fn a_stream_through_both_hops_ends_upstream_when_the_browser_leaves() {
+        let (closed_tx, mut closed_rx) = mpsc::unbounded_channel::<()>();
+        let (upstream, _heads) = fake_upstream(move |mut socket, _head| {
+            let closed_tx = closed_tx.clone();
+            async move {
+                let first = chunk("event: maintenance\ndata: {\"active\":false}\n\n");
+                socket
+                    .write_all(format!("{SSE_HEAD}{first}").as_bytes())
+                    .await
+                    .unwrap();
+                // silent from here on: only the proxy closing ends it
+                wait_for_close(&mut socket).await;
+                let _ = closed_tx.send(());
+            }
+        })
+        .await;
+        let hop = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let hop_addr = hop.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(hop, crate::infra::http::event_stream_hop(upstream)).await;
+        });
+        let edge = default_proxy(&format!("http://{hop_addr}")).await;
+        let edge = edge.trim_start_matches("http://").to_string();
+
+        for (n, how) in ["close", "half-close", "reset"]
+            .into_iter()
+            .cycle()
+            .take(30)
+            .enumerate()
+        {
+            let mut socket = TcpStream::connect(&edge).await.unwrap();
+            socket
+                .write_all(
+                    b"GET /gateway/services/x/api/v1/maintenance/stream HTTP/1.1\r\n\
+                      host: athene\r\naccept: text/event-stream\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            let head = timeout(WAIT, read_head(&mut socket)).await.unwrap();
+            assert!(head.contains("text/event-stream"), "{head}");
+            let mut seen = Vec::new();
+            let mut buf = [0_u8; 256];
+            while !String::from_utf8_lossy(&seen).contains("maintenance") {
+                let read = timeout(WAIT, socket.read(&mut buf)).await.unwrap().unwrap();
+                assert!(read > 0, "the stream ended early");
+                seen.extend_from_slice(&buf[..read]);
+            }
+            let _kept = match how {
+                "close" => {
+                    drop(socket);
+                    None
+                }
+                "half-close" => {
+                    socket.shutdown().await.unwrap();
+                    Some(socket)
+                }
+                _ => {
+                    socket.set_linger(Some(Duration::ZERO)).unwrap();
+                    drop(socket);
+                    None
+                }
+            };
+            assert_eq!(
+                timeout(Duration::from_secs(2), closed_rx.recv())
+                    .await
+                    .ok()
+                    .flatten(),
+                Some(()),
+                "stream {n} ({how}): still open upstream after the browser left"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn keeps_every_set_cookie_and_drops_hop_by_hop_headers() {
         let (upstream, mut heads) = fake_upstream(|mut socket, _head| async move {

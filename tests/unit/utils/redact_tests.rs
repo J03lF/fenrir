@@ -1,4 +1,4 @@
-use super::{redact_uri_password, redact_uris_in_text};
+use super::{redact_uri_password, redact_uris_in_text, request_target};
 
 #[test]
 fn redacts_password_of_socket_uri() {
@@ -57,4 +57,51 @@ fn redacts_uris_inside_log_lines() {
         redact_uris_in_text("plain line\twith  tabs"),
         "plain line\twith  tabs"
     );
+}
+
+// --- Invite tokens in request targets (5.6, after 3.8a) ---
+
+#[test]
+fn masks_invite_tokens_in_paths_and_queries() {
+    for (raw, logged) in [
+        ("/invite/AbCdEf123", "/invite/<redacted>"),
+        (
+            "/gateway/services/module%3Aathene-api%3A%3Aapi-gateway/api/v1/invite/AbCdEf123/join",
+            "/gateway/services/module%3Aathene-api%3A%3Aapi-gateway/api/v1/invite/<redacted>/join",
+        ),
+        (
+            "/api/v1/workspaces/w1/invites/AbCdEf123/revoke",
+            "/api/v1/workspaces/w1/invites/<redacted>/revoke",
+        ),
+        ("/api/v1/INVITE/AbCdEf123", "/api/v1/INVITE/<redacted>"),
+        ("/api/v1/invite%2FAbCdEf123", "/api/v1/<redacted>"),
+        (
+            "/api/v1/invite?token=AbCdEf123&x=1",
+            "/api/v1/invite?token=<redacted>&x=1",
+        ),
+        (
+            "/auth/accept?invite=AbCdEf123",
+            "/auth/accept?invite=<redacted>",
+        ),
+        ("/x?Invite_Token=AbCdEf123", "/x?Invite_Token=<redacted>"),
+    ] {
+        let masked = request_target(raw);
+        assert_eq!(masked, logged, "{raw}");
+        assert!(!masked.contains("AbCdEf123"), "{raw}");
+    }
+}
+
+#[test]
+fn leaves_other_targets_alone() {
+    for raw in [
+        "/",
+        "/app/inbox",
+        "/api/v1/work/tickets?workspace_id=w1&limit=50",
+        "/api/v1/workspaces/w1/invites",
+        "/invite/",
+        "/api/v1/invitee/x",
+        "/x?tokens=1&token=",
+    ] {
+        assert_eq!(request_target(raw), raw);
+    }
 }

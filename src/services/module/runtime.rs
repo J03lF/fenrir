@@ -1661,6 +1661,12 @@ impl ModuleService {
                 endpoint.location(),
             ));
             env.push(("FENRIR_DB_CONNECTOR_URI".to_string(), endpoint.uri()));
+            // This host keeps framed connections open (5.6); kits without
+            // support ignore it and keep the one-shot protocol.
+            env.push((
+                fenrir_module_kit::ENV_CONNECTOR_FRAMED.to_string(),
+                fenrir_module_kit::CONNECTOR_FRAMED_VERSION.to_string(),
+            ));
         }
     }
 

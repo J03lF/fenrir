@@ -466,6 +466,16 @@ pub struct DbSection {
     pub schema: DbSchemaSection,
     #[serde(default)]
     pub backup: DbBackupSection,
+    /// `statement_timeout` of every pooled connection a module uses, in ms
+    /// (set when the connection opens, so a session reset keeps it). 0
+    /// turns it off. The host's own pool (CLI, migrations, schema tools)
+    /// never gets one: a migration may run long.
+    #[serde(default = "default_module_statement_timeout_ms")]
+    pub module_statement_timeout_ms: u64,
+}
+
+fn default_module_statement_timeout_ms() -> u64 {
+    30_000
 }
 
 #[derive(Debug, Deserialize, Clone)]

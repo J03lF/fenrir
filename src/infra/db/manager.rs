@@ -40,7 +40,8 @@ pub fn build_adapters(
             }
             DbEngine::Postgres => {
                 let adapter =
-                    adapters::postgres::PostgresAdapter::new(&override_cfg.uri, None, None)?;
+                    adapters::postgres::PostgresAdapter::new(&override_cfg.uri, None, None)?
+                        .with_module_statement_timeout(module_statement_timeout(cfg));
                 map.insert(DbEngine::Postgres, Arc::new(adapter));
             }
             other => {
@@ -62,7 +63,8 @@ pub fn build_adapters(
     // External postgres (only if NOT using embedded postgres).
     if embedded_engine != Some(DbEngine::Postgres) {
         if let Some(settings) = cfg.db.connections.postgres.as_ref() {
-            let adapter = build_postgres(settings)?;
+            let adapter = build_postgres(settings)?
+                .with_module_statement_timeout(module_statement_timeout(cfg));
             map.insert(DbEngine::Postgres, Arc::new(adapter));
         }
     }
@@ -84,6 +86,14 @@ pub fn build_adapters(
     }
 
     Ok(map)
+}
+
+/// `db.module_statement_timeout_ms`, `None` when 0.
+fn module_statement_timeout(cfg: &AppConfig) -> Option<std::time::Duration> {
+    match cfg.db.module_statement_timeout_ms {
+        0 => None,
+        ms => Some(std::time::Duration::from_millis(ms)),
+    }
 }
 
 fn build_postgres(settings: &DbConnectionSettings) -> Result<adapters::postgres::PostgresAdapter> {

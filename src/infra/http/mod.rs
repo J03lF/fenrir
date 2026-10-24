@@ -1,3 +1,4 @@
+pub(crate) mod compression;
 mod gateway;
 pub(crate) mod proxy_headers;
 mod routes;

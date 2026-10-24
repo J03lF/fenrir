@@ -583,7 +583,11 @@ mod gateway_proxy {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            let _ = axum::serve(listener, static_router(state).into_make_service()).await;
+            let _ = axum::serve(
+                listener,
+                static_router(state).into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await;
         });
         format!("http://{addr}")
     }
@@ -1029,5 +1033,562 @@ mod gateway_proxy {
             timeout(WAIT, closed_rx.recv()).await.unwrap(),
             Some("stream")
         );
+    }
+
+    // --- 5.6: client address at the edge, compression -------------------
+
+    fn json_body(len: usize) -> Vec<u8> {
+        let mut body = b"[".to_vec();
+        let mut n = 0u64;
+        while body.len() < len {
+            n = n
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            body.extend_from_slice(
+                format!(
+                    "{{\"id\":\"{:016x}\",\"title\":\"Ticket {}\"}},",
+                    n,
+                    n % 9973
+                )
+                .as_bytes(),
+            );
+        }
+        body.truncate(len);
+        body
+    }
+
+    fn decode(encoding: &str, bytes: &[u8]) -> Vec<u8> {
+        use std::io::Read;
+        let mut out = Vec::new();
+        match encoding {
+            "br" => {
+                brotli::Decompressor::new(bytes, 4096)
+                    .read_to_end(&mut out)
+                    .unwrap();
+            }
+            "gzip" => {
+                flate2::read::GzDecoder::new(bytes)
+                    .read_to_end(&mut out)
+                    .unwrap();
+            }
+            other => panic!("unexpected encoding {other}"),
+        }
+        out
+    }
+
+    /// Everything a partial Brotli stream already decodes to.
+    fn decode_prefix(bytes: &[u8]) -> Vec<u8> {
+        use std::io::Read;
+        let mut reader = brotli::Decompressor::new(bytes, 4096);
+        let mut out = Vec::new();
+        let mut buf = [0u8; 8192];
+        while let Ok(n) = reader.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            out.extend_from_slice(&buf[..n]);
+        }
+        out
+    }
+
+    fn header_values(response: &reqwest::Response, name: &str) -> Vec<String> {
+        response
+            .headers()
+            .get_all(name)
+            .iter()
+            .map(|value| value.to_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// An upstream answering every request with `body` as `content_type`
+    /// (plus `extra` header lines).
+    async fn fixed_upstream(
+        body: Vec<u8>,
+        content_type: &'static str,
+        extra: &'static str,
+    ) -> (String, mpsc::UnboundedReceiver<String>) {
+        let body = Arc::new(body);
+        fake_upstream(move |mut socket, _head| {
+            let body = Arc::clone(&body);
+            async move {
+                // One request per connection: the proxy must not reuse it.
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\n{extra}connection: close\r\ncontent-length: {}\r\n\r\n",
+                    body.len()
+                );
+                socket.write_all(head.as_bytes()).await.unwrap();
+                socket.write_all(&body).await.unwrap();
+                let _ = socket.shutdown().await;
+            }
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn the_edge_replaces_client_address_headers_with_the_peer() {
+        let (upstream, mut heads) = fixed_upstream(b"{}".to_vec(), "application/json", "").await;
+        let proxy = default_proxy(&upstream).await;
+        let (_headers, body) = raw_exchange(
+            &proxy,
+            "GET /gateway/services/x/api/v1/auth/login/request HTTP/1.1\r\n\
+             host: 127.0.0.1\r\n\
+             x-forwarded-for: 1.2.3.4\r\n\
+             x-forwarded-for: 5.6.7.8\r\n\
+             x-real-ip: 1.2.3.4\r\n\
+             forwarded: for=1.2.3.4\r\n\
+             x-fenrir-edge-hop: forged\r\n\
+             accept-encoding: br\r\n\r\n",
+        )
+        .await;
+        assert_eq!(body, b"{}");
+        let head = timeout(WAIT, heads.recv()).await.unwrap().unwrap();
+        let upstream_headers: Vec<(String, String)> = head
+            .lines()
+            .skip(1)
+            .filter_map(|line| line.split_once(':'))
+            .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_string()))
+            .collect();
+        assert_eq!(
+            values(&upstream_headers, "x-forwarded-for"),
+            vec!["127.0.0.1"]
+        );
+        assert!(values(&upstream_headers, "x-real-ip").is_empty());
+        assert!(values(&upstream_headers, "forwarded").is_empty());
+        assert!(values(&upstream_headers, "accept-encoding").is_empty());
+        assert_eq!(
+            values(&upstream_headers, "x-fenrir-edge-hop"),
+            vec![crate::infra::http::proxy_headers::edge_hop_secret()]
+        );
+    }
+
+    #[tokio::test]
+    async fn proxied_json_is_compressed_by_negotiation() {
+        let original = json_body(40_000);
+        let (upstream, _heads) =
+            fixed_upstream(original.clone(), "application/json; charset=utf-8", "").await;
+        let proxy = default_proxy(&upstream).await;
+        let url = format!("{proxy}/gateway/services/x/api/v1/work/tickets");
+        for (accept, expected) in [
+            ("gzip, deflate, br, zstd", "br"),
+            ("gzip", "gzip"),
+            ("br;q=0.2, gzip;q=0.8", "gzip"),
+        ] {
+            let response = client()
+                .get(&url)
+                .header("accept-encoding", accept)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), 200);
+            assert_eq!(header_values(&response, "content-encoding"), vec![expected]);
+            assert_eq!(header_values(&response, "vary"), vec!["accept-encoding"]);
+            assert!(response.headers().get("content-length").is_none());
+            let packed = response.bytes().await.unwrap();
+            assert!(
+                packed.len() < original.len() / 3,
+                "{accept}: {}",
+                packed.len()
+            );
+            assert_eq!(decode(expected, &packed), original, "{accept}");
+        }
+        // No Accept-Encoding: identity, but still `Vary`.
+        let response = client().get(&url).send().await.unwrap();
+        assert!(response.headers().get("content-encoding").is_none());
+        assert_eq!(header_values(&response, "vary"), vec!["accept-encoding"]);
+        assert_eq!(
+            header_values(&response, "content-length"),
+            vec![original.len().to_string()]
+        );
+        assert_eq!(response.bytes().await.unwrap().to_vec(), original);
+    }
+
+    #[tokio::test]
+    async fn secrets_cookies_small_and_encoded_bodies_stay_as_they_are() {
+        let big = json_body(10_000);
+        let cases: Vec<(Vec<u8>, &'static str, &'static str, &'static str)> = vec![
+            // BREACH: token-bearing paths and Set-Cookie.
+            (
+                big.clone(),
+                "application/json",
+                "",
+                "/api/v1/auth/login/confirm",
+            ),
+            (big.clone(), "application/json", "", "/api/v1/auth/refresh"),
+            (
+                big.clone(),
+                "application/json",
+                "",
+                "/api/v1/admin/api-keys",
+            ),
+            (
+                big.clone(),
+                "application/json",
+                "set-cookie: athene_refresh=r1; HttpOnly\r\n",
+                "/api/v1/work/tickets",
+            ),
+            // Small bodies and types that do not compress.
+            (
+                b"{\"ok\":true}".to_vec(),
+                "application/json",
+                "",
+                "/api/v1/work/stats",
+            ),
+            (big.clone(), "image/png", "", "/api/v1/files/1"),
+            (big.clone(), "font/woff2", "", "/api/v1/files/2"),
+            // Already encoded upstream: passed on untouched.
+            (
+                big.clone(),
+                "application/json",
+                "content-encoding: gzip\r\n",
+                "/api/v1/work/x",
+            ),
+        ];
+        for (body, content_type, extra, path) in cases {
+            let (upstream, _heads) = fixed_upstream(body.clone(), content_type, extra).await;
+            let proxy = default_proxy(&upstream).await;
+            let response = client()
+                .get(format!("{proxy}/gateway/services/x{path}"))
+                .header("accept-encoding", "gzip, br")
+                .send()
+                .await
+                .unwrap();
+            let encoding = header_values(&response, "content-encoding");
+            if extra.starts_with("content-encoding") {
+                assert_eq!(encoding, vec!["gzip"], "{path}");
+            } else {
+                assert!(encoding.is_empty(), "{path} {content_type} was compressed");
+            }
+            assert_eq!(response.bytes().await.unwrap().to_vec(), body, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn event_streams_stay_uncompressed_and_live() {
+        let release = Arc::new(Notify::new());
+        let gate = Arc::clone(&release);
+        let (upstream, _heads) = fake_upstream(move |mut socket, _head| {
+            let gate = Arc::clone(&gate);
+            async move {
+                let first = chunk("event: maintenance\ndata: {\"active\":false}\n\n");
+                socket
+                    .write_all(format!("{SSE_HEAD}{first}").as_bytes())
+                    .await
+                    .unwrap();
+                gate.notified().await;
+                let _ = socket.write_all(b"0\r\n\r\n").await;
+            }
+        })
+        .await;
+        let proxy = default_proxy(&upstream).await;
+        let response = timeout(
+            WAIT,
+            client()
+                .get(format!(
+                    "{proxy}/gateway/services/x/api/v1/maintenance/stream"
+                ))
+                .header("accept", "text/event-stream")
+                .header("accept-encoding", "gzip, deflate, br")
+                .send(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(response.headers().get("content-encoding").is_none());
+        assert_eq!(
+            header_values(&response, "content-type"),
+            vec!["text/event-stream"]
+        );
+        let mut stream = response.bytes_stream();
+        let first = timeout(WAIT, stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&first).contains("event: maintenance"));
+        release.notify_one();
+    }
+
+    #[tokio::test]
+    async fn compressed_bodies_keep_streaming() {
+        const PART: usize = 512 * 1024;
+        let original = json_body(2 * PART);
+        let release = Arc::new(Notify::new());
+        let gate = Arc::clone(&release);
+        let body = Arc::new(original.clone());
+        let (upstream, _heads) = fake_upstream(move |mut socket, _head| {
+            let gate = Arc::clone(&gate);
+            let body = Arc::clone(&body);
+            async move {
+                let head = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\n\r\n";
+                socket.write_all(head.as_bytes()).await.unwrap();
+                socket
+                    .write_all(format!("{:x}\r\n", PART).as_bytes())
+                    .await
+                    .unwrap();
+                socket.write_all(&body[..PART]).await.unwrap();
+                socket.write_all(b"\r\n").await.unwrap();
+                gate.notified().await;
+                socket
+                    .write_all(format!("{:x}\r\n", PART).as_bytes())
+                    .await
+                    .unwrap();
+                socket.write_all(&body[PART..]).await.unwrap();
+                socket.write_all(b"\r\n0\r\n\r\n").await.unwrap();
+                wait_for_close(&mut socket).await;
+            }
+        })
+        .await;
+        let proxy = default_proxy(&upstream).await;
+        let response = client()
+            .get(format!("{proxy}/gateway/services/x/api/v1/work/tickets"))
+            .header("accept-encoding", "br")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(header_values(&response, "content-encoding"), vec!["br"]);
+        let mut stream = response.bytes_stream();
+        let mut received = Vec::new();
+        // The first half arrives, compressed, while the upstream waits.
+        while decode_prefix(&received).len() < PART {
+            let chunk = timeout(WAIT, stream.next())
+                .await
+                .expect("compressed output before the upstream finished")
+                .unwrap()
+                .unwrap();
+            received.extend_from_slice(&chunk);
+        }
+        assert_eq!(decode_prefix(&received)[..PART], original[..PART]);
+        release.notify_one();
+        while let Some(chunk) = timeout(WAIT, stream.next()).await.unwrap() {
+            received.extend_from_slice(&chunk.unwrap());
+        }
+        assert_eq!(decode("br", &received), original);
+    }
+}
+
+mod static_compression {
+    use super::*;
+    use tower::ServiceExt;
+
+    fn site() -> (PathBuf, Router) {
+        let dir = std::env::temp_dir().join(format!("fenrir-static-br-{}", Uuid::new_v4()));
+        let browser = dir.join("browser");
+        std::fs::create_dir_all(&browser).unwrap();
+        let script: String = (0..4000)
+            .map(|i| format!("export const v{i} = \"value-{}\";\n", i % 97))
+            .collect();
+        std::fs::write(browser.join("main-ABCD1234.js"), &script).unwrap();
+        let html = format!(
+            "<!doctype html><html><body>{}</body></html>",
+            "<p>athene</p>".repeat(200)
+        );
+        std::fs::write(browser.join("index.html"), html).unwrap();
+        std::fs::write(browser.join("en.json"), "{\"a\":1}").unwrap();
+        let png: Vec<u8> = (0..5000u32)
+            .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+            .collect();
+        std::fs::write(browser.join("logo.png"), png).unwrap();
+        let profile = StaticSiteProfile::new(browser.clone(), browser.join("index.html"));
+        let mut profile = profile;
+        profile.html_headers = vec![(
+            HeaderName::from_static("content-security-policy-report-only"),
+            HeaderValue::from_static(TEST_CSP),
+        )];
+        let state = StaticRouterState::new(
+            &ModuleId::new("athene-web").unwrap(),
+            profile,
+            Arc::new(ServiceDiagnostics::new()),
+            "http://127.0.0.1:9".to_string(),
+            dir.join("web.log"),
+        );
+        (browser, static_router(state))
+    }
+
+    async fn get(
+        router: &Router,
+        path: &str,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, HeaderMap, Vec<u8>) {
+        let mut request = Request::builder().uri(path);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        let response = router
+            .clone()
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec();
+        (status, headers, body)
+    }
+
+    fn h<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+        headers.get(name).and_then(|value| value.to_str().ok())
+    }
+
+    fn unbrotli(bytes: &[u8]) -> Vec<u8> {
+        use std::io::Read;
+        let mut out = Vec::new();
+        brotli::Decompressor::new(bytes, 4096)
+            .read_to_end(&mut out)
+            .unwrap();
+        out
+    }
+
+    fn ungzip(bytes: &[u8]) -> Vec<u8> {
+        use std::io::Read;
+        let mut out = Vec::new();
+        flate2::read::GzDecoder::new(bytes)
+            .read_to_end(&mut out)
+            .unwrap();
+        out
+    }
+
+    #[tokio::test]
+    async fn static_files_are_served_as_brotli_or_gzip() {
+        let (root, router) = site();
+        let original = std::fs::read(root.join("main-ABCD1234.js")).unwrap();
+        let (status, plain, body) = get(&router, "/main-ABCD1234.js", &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, original);
+        assert!(plain.get("content-encoding").is_none());
+        assert_eq!(h(&plain, "vary"), Some("accept-encoding"));
+        let etag = h(&plain, "etag").unwrap().to_string();
+
+        let (_, br, body) = get(
+            &router,
+            "/main-ABCD1234.js",
+            &[("accept-encoding", "gzip, deflate, br, zstd")],
+        )
+        .await;
+        assert_eq!(h(&br, "content-encoding"), Some("br"));
+        assert_eq!(h(&br, "vary"), Some("accept-encoding"));
+        assert_eq!(
+            h(&br, "etag"),
+            Some(format!("{}-br\"", etag.trim_end_matches('"')).as_str())
+        );
+        assert_eq!(
+            h(&br, "content-length"),
+            Some(body.len().to_string().as_str())
+        );
+        assert!(body.len() < original.len() / 4);
+        assert_eq!(unbrotli(&body), original);
+        // H1 and H2 unchanged on the compressed variant.
+        assert_eq!(h(&br, "cache-control"), Some(STATIC_CACHE_IMMUTABLE));
+        assert_eq!(
+            h(&br, "content-type"),
+            Some("application/javascript; charset=utf-8")
+        );
+        for (name, value) in STATIC_DEFAULT_HEADERS {
+            assert_eq!(h(&br, name), Some(*value), "{name}");
+        }
+
+        let (_, gz, body) = get(&router, "/main-ABCD1234.js", &[("accept-encoding", "gzip")]).await;
+        assert_eq!(h(&gz, "content-encoding"), Some("gzip"));
+        assert_eq!(ungzip(&body), original);
+
+        // HTML keeps the module's headers (CSP) when compressed.
+        let (_, html, body) = get(&router, "/app/inbox", &[("accept-encoding", "br")]).await;
+        assert_eq!(h(&html, "content-encoding"), Some("br"));
+        assert_eq!(
+            h(&html, "content-security-policy-report-only"),
+            Some(TEST_CSP)
+        );
+        assert_eq!(h(&html, "cache-control"), Some(STATIC_CACHE_REVALIDATE));
+        assert!(String::from_utf8(unbrotli(&body))
+            .unwrap()
+            .starts_with("<!doctype html>"));
+    }
+
+    #[tokio::test]
+    async fn every_variant_etag_revalidates_with_304() {
+        let (_, router) = site();
+        let (_, plain, _) = get(&router, "/main-ABCD1234.js", &[]).await;
+        let etag = h(&plain, "etag").unwrap().to_string();
+        let (_, br, _) = get(&router, "/main-ABCD1234.js", &[("accept-encoding", "br")]).await;
+        let br_etag = h(&br, "etag").unwrap().to_string();
+        assert_ne!(etag, br_etag);
+        for (accept, presented) in [
+            ("br", br_etag.clone()),
+            ("br", etag.clone()),
+            ("br", format!("W/{br_etag}")),
+            ("", br_etag.clone()),
+            ("gzip", format!("\"other\", {br_etag}")),
+        ] {
+            let mut headers = vec![("if-none-match", presented.as_str())];
+            if !accept.is_empty() {
+                headers.push(("accept-encoding", accept));
+            }
+            let (status, response, body) = get(&router, "/main-ABCD1234.js", &headers).await;
+            assert_eq!(status, StatusCode::NOT_MODIFIED, "{accept} {presented}");
+            assert!(body.is_empty());
+            assert_eq!(h(&response, "vary"), Some("accept-encoding"));
+            assert!(response.get("content-encoding").is_none());
+        }
+        let (status, _, _) = get(
+            &router,
+            "/main-ABCD1234.js",
+            &[("if-none-match", "\"0000\""), ("accept-encoding", "br")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn small_and_binary_files_are_not_compressed() {
+        let (root, router) = site();
+        let (_, json, body) = get(&router, "/en.json", &[("accept-encoding", "br")]).await;
+        assert!(json.get("content-encoding").is_none());
+        assert_eq!(body, b"{\"a\":1}");
+        let (_, png, body) = get(&router, "/logo.png", &[("accept-encoding", "br")]).await;
+        assert!(png.get("content-encoding").is_none());
+        assert!(png.get("vary").is_none());
+        assert_eq!(body, std::fs::read(root.join("logo.png")).unwrap());
+    }
+}
+
+mod access_log {
+    //! 5.6, after 3.8a: invite tokens never reach the static site's log.
+    use super::*;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn invite_tokens_are_masked_in_the_static_log() {
+        let dir = std::env::temp_dir().join(format!("fenrir-static-log-{}", Uuid::new_v4()));
+        let browser = dir.join("browser");
+        std::fs::create_dir_all(&browser).unwrap();
+        std::fs::write(browser.join("index.html"), "<!doctype html>").unwrap();
+        let log = dir.join("web.log");
+        let state = StaticRouterState::new(
+            &ModuleId::new("athene-web").unwrap(),
+            StaticSiteProfile::new(browser.clone(), browser.join("index.html")),
+            Arc::new(ServiceDiagnostics::new()),
+            // Closed port: the gateway proxy fails and logs that too.
+            "http://127.0.0.1:9".to_string(),
+            log.clone(),
+        );
+        let router = static_router(state);
+        for path in [
+            "/invite/SECRET-INVITE-ONE",
+            "/gateway/services/module%3Aathene-api%3A%3Aapi-gateway/api/v1/invite/SECRET-INVITE-TWO/join?token=SECRET-QUERY-THREE",
+            "/gateway/services/x/api/v1/workspaces/w1/invites/SECRET-INVITE-FOUR/revoke",
+        ] {
+            let response = router
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let _ = axum::body::to_bytes(response.into_body(), usize::MAX).await;
+        }
+        let written = std::fs::read_to_string(&log).unwrap();
+        assert!(!written.contains("SECRET-"), "token in the log:\n{written}");
+        assert!(written.contains("/invite/<redacted>"), "{written}");
+        assert!(written.contains("/invites/<redacted>/revoke"), "{written}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

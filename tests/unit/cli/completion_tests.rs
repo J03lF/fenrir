@@ -141,6 +141,7 @@ fn test_config() -> Arc<AppConfig> {
             runtime: DbRuntimeSection::default(),
             schema: DbSchemaSection::default(),
             backup: DbBackupSection::default(),
+            module_statement_timeout_ms: 30_000,
         },
         telemetry: TelemetrySection {
             tracing: TelemetryTracingSection {

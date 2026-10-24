@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crate::domain::db::{DbAdminPort, DbEngine, DbError, DbResult};
+use crate::domain::db::{DbAdminPort, DbEngine, DbError, DbPoolStatus, DbResult};
 
 use super::DbShellSession;
 
@@ -60,6 +60,13 @@ impl DbShellService {
             .get(&engine)
             .cloned()
             .ok_or(DbError::EngineNotConfigured { engine })
+    }
+
+    /// Pool counters of the default engine's adapter, if it pools.
+    pub fn pool_status(&self) -> Option<DbPoolStatus> {
+        self.adapters
+            .get(&self.default_engine)
+            .and_then(|adapter| adapter.pool_status())
     }
 
     pub fn create_session(self: &Arc<Self>) -> DbShellSession {

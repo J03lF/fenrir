@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use axum::{
     body::{Body, Bytes, HttpBody as _},
-    extract::State,
+    extract::{ConnectInfo, State},
     http::{header, HeaderMap, HeaderName, HeaderValue, Request, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::{any, get},
@@ -15,6 +15,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::future::Future;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{Command, Stdio};
@@ -33,7 +34,10 @@ use crate::domain::module::{
     ModuleId, ModuleRuntimeError, ModuleRuntimeInfo, ModuleRuntimeInstanceInfo, ModuleRuntimeKind,
     ModuleRuntimePort, ModuleRuntimeStatus, ModuleStartConfig, ModuleStoragePort, ModuleVersion,
 };
-use crate::infra::http::proxy_headers::HopByHop;
+use crate::infra::http::compression::{self, Encoding};
+use crate::infra::http::proxy_headers::{
+    edge_hop_secret, HopByHop, CLIENT_ADDRESS_HEADERS, EDGE_HOP_HEADER, FORWARDED_FOR,
+};
 use crate::services::ServiceDiagnostics;
 use crate::utils::messages;
 use time::format_description::well_known::Rfc3339;
@@ -160,6 +164,113 @@ const STATIC_PROXY_FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(40);
 const STATIC_PROXY_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 const STATIC_PROXY_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const STATIC_PROXY_POOL_MAX_IDLE: usize = 16;
+/// Compressed static files kept in memory (all modules' variants together
+/// stay well below this; content-hashed chunks never change).
+const STATIC_VARIANT_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Fills the variant cache for every compressible file of the site (one
+/// file at a time, on the blocking pool). Requests that come first compress
+/// on demand; the result is the same.
+async fn warm_static_variants(root: Arc<PathBuf>, cache: Arc<StaticVariantCache>) {
+    let started = Instant::now();
+    let mut pending = vec![root.as_ref().clone()];
+    let mut files = 0usize;
+    while let Some(dir) = pending.pop() {
+        let Ok(mut entries) = fs::read_dir(&dir).await else {
+            continue;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            let Ok(kind) = entry.file_type().await else {
+                continue;
+            };
+            if kind.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if !compression::is_compressible(content_type_for(&path)) {
+                continue;
+            }
+            let Ok(bytes) = fs::read(&path).await else {
+                continue;
+            };
+            if bytes.len() < compression::MIN_SIZE {
+                continue;
+            }
+            let etag = static_etag(&bytes);
+            let bytes = Bytes::from(bytes);
+            for encoding in [Encoding::Brotli, Encoding::Gzip] {
+                let _ = cache.get_or_compress(&etag, encoding, &bytes).await;
+            }
+            files += 1;
+        }
+    }
+    debug!(
+        root = %root.display(),
+        files,
+        elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "static variants compressed"
+    );
+}
+
+/// Compressed variants of static files, keyed by content hash (the ETag)
+/// and encoding, so a changed file is a new key and nothing goes stale.
+struct StaticVariantCache {
+    budget: usize,
+    inner: std::sync::Mutex<StaticVariantEntries>,
+}
+
+#[derive(Default)]
+struct StaticVariantEntries {
+    bytes: usize,
+    variants: HashMap<(String, Encoding), Bytes>,
+}
+
+impl StaticVariantCache {
+    fn new(budget: usize) -> Self {
+        Self {
+            budget,
+            inner: std::sync::Mutex::new(StaticVariantEntries::default()),
+        }
+    }
+
+    /// The `encoding` variant of a file with this `etag`, compressed on
+    /// first use (on the blocking pool: Brotli at its best level takes a
+    /// while for a large chunk).
+    async fn get_or_compress(
+        &self,
+        etag: &str,
+        encoding: Encoding,
+        bytes: &Bytes,
+    ) -> Option<Bytes> {
+        let key = (etag.to_string(), encoding);
+        if let Ok(entries) = self.inner.lock() {
+            if let Some(hit) = entries.variants.get(&key) {
+                return Some(hit.clone());
+            }
+        }
+        let input = bytes.clone();
+        let packed =
+            tokio::task::spawn_blocking(move || compression::compress_static(&input, encoding))
+                .await
+                .ok()?
+                .ok()?;
+        // Not worth it: serve the original.
+        if packed.len() >= bytes.len() {
+            return None;
+        }
+        let packed = Bytes::from(packed);
+        if let Ok(mut entries) = self.inner.lock() {
+            if entries.bytes.saturating_add(packed.len()) > self.budget {
+                entries.variants.clear();
+                entries.bytes = 0;
+            }
+            entries.bytes = entries.bytes.saturating_add(packed.len());
+            entries.variants.insert(key, packed.clone());
+        }
+        Some(packed)
+    }
+}
 
 #[derive(Debug, Clone)]
 struct StaticSiteProfile {
@@ -968,13 +1079,23 @@ impl ProcessModuleRuntime {
         diagnostics: Arc<ServiceDiagnostics>,
         log_file: PathBuf,
     ) -> Router {
-        static_router(StaticRouterState::new(
+        let state = StaticRouterState::new(
             module_id,
             profile,
             diagnostics,
             self.control_plane_base.clone(),
             log_file,
-        ))
+        );
+        // Brotli at its best level takes about a second for a 500 KB chunk:
+        // compress the site once in the background instead of on the first
+        // request for each file.
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::spawn(warm_static_variants(
+                Arc::clone(&state.root),
+                Arc::clone(&state.compressed),
+            ));
+        }
+        static_router(state)
     }
 
     // Static-site spawn carries the full lifecycle context (module identity,
@@ -1016,10 +1137,15 @@ impl ProcessModuleRuntime {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let module_for_log = module_id.to_string();
         let handle = tokio::spawn(async move {
-            let server =
-                axum::serve(listener, router.into_make_service()).with_graceful_shutdown(async {
-                    let _ = shutdown_rx.await;
-                });
+            // With the peer address: the `/gateway` proxy sets
+            // `X-Forwarded-For` from it (5.6).
+            let server = axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(async {
+                let _ = shutdown_rx.await;
+            });
             if let Err(err) = server.await {
                 error!(
                     module = %module_for_log,
@@ -1951,6 +2077,7 @@ struct StaticRouterState {
     metric_id: Arc<String>,
     control_plane_base: Arc<String>,
     proxy: StaticGatewayProxy,
+    compressed: Arc<StaticVariantCache>,
     log_file: Arc<PathBuf>,
 }
 
@@ -1974,6 +2101,7 @@ impl StaticRouterState {
             metric_id,
             control_plane_base: Arc::new(control_plane_base),
             proxy: StaticGatewayProxy::new(),
+            compressed: Arc::new(StaticVariantCache::new(STATIC_VARIANT_CACHE_BYTES)),
             log_file: Arc::new(log_file),
         }
     }
@@ -2092,7 +2220,8 @@ async fn static_request_logger(
     next: axum::middleware::Next,
 ) -> Response {
     let method = request.method().to_string();
-    let path = request.uri().path().to_string();
+    // Invite tokens never reach the log (5.6, after 3.8a).
+    let path = crate::utils::request_target(request.uri().path()).into_owned();
     let started = Instant::now();
 
     let response = next.run(request).await;
@@ -2216,13 +2345,33 @@ async fn static_gateway_proxy_handler(
             .iter()
             .map(HeaderValue::as_bytes),
     );
+    // This is the browser's edge: whatever address headers the client sent
+    // are dropped, `X-Forwarded-For` is the TCP peer, and the edge-hop
+    // secret tells the control plane to keep it (5.6). `Accept-Encoding`
+    // stays here too: the edge compresses, the upstream answers identity.
+    let peer = parts
+        .extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|info| info.0.ip().to_canonical());
+    let encoding = compression::negotiate(&parts.headers);
+    let secret_path = compression::is_secret_bearing_path(parts.uri.path());
+    let is_head = parts.method == axum::http::Method::HEAD;
     let mut upstream = state.proxy.client.request(method, target);
     for (name, value) in &parts.headers {
-        if name == header::HOST || hop.contains(name.as_str()) {
+        if name == header::HOST
+            || name == header::ACCEPT_ENCODING
+            || name.as_str() == EDGE_HOP_HEADER
+            || CLIENT_ADDRESS_HEADERS.contains(&name.as_str())
+            || hop.contains(name.as_str())
+        {
             continue;
         }
         upstream = upstream.header(name.as_str(), value.as_bytes());
     }
+    if let Some(peer) = peer {
+        upstream = upstream.header(FORWARDED_FOR, peer.to_string());
+    }
+    upstream = upstream.header(EDGE_HOP_HEADER, edge_hop_secret());
     if body.size_hint().exact() != Some(0) {
         upstream = upstream.body(reqwest::Body::wrap_stream(body.into_data_stream()));
     }
@@ -2287,11 +2436,82 @@ async fn static_gateway_proxy_handler(
         state.proxy.idle_timeout,
         Arc::clone(&state.module),
     );
-    let mut proxied = Response::new(Body::from_stream(body));
+    let compress = proxied_compression(&mut headers, status, secret_path, is_head, encoding);
+    let body = match compress {
+        Some(encoding) => {
+            headers.remove(header::CONTENT_LENGTH);
+            headers.insert(header::CONTENT_ENCODING, encoding.header_value());
+            weaken_etag(&mut headers);
+            Body::from_stream(compression::CompressedStream::new(body, encoding))
+        }
+        None => Body::from_stream(body),
+    };
+    let mut proxied = Response::new(body);
     *proxied.status_mut() = status;
     *proxied.headers_mut() = headers;
     state.record_probe(started.elapsed(), true);
     proxied
+}
+
+/// Whether (and how) a proxied response is compressed; adds
+/// `Vary: Accept-Encoding` whenever the answer depends on it.
+///
+/// Never: event streams and other non-text types, bodies that are already
+/// encoded or smaller than `compression::MIN_SIZE`, `HEAD`, statuses
+/// without a body, and (BREACH) token-bearing paths and responses that set
+/// cookies.
+fn proxied_compression(
+    headers: &mut HeaderMap,
+    status: StatusCode,
+    secret_path: bool,
+    is_head: bool,
+    encoding: Option<Encoding>,
+) -> Option<Encoding> {
+    let compressible_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(compression::is_compressible);
+    let eligible = compressible_type
+        && !secret_path
+        && !headers.contains_key(header::SET_COOKIE)
+        && !headers.contains_key(header::CONTENT_ENCODING)
+        && !headers.contains_key(header::CONTENT_RANGE);
+    if !eligible {
+        return None;
+    }
+    let too_small = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .is_some_and(|len| len < compression::MIN_SIZE);
+    if too_small {
+        return None;
+    }
+    compression::add_vary(headers);
+    let has_body = !(status.is_informational()
+        || status == StatusCode::NO_CONTENT
+        || status == StatusCode::NOT_MODIFIED);
+    if is_head || !has_body {
+        return None;
+    }
+    encoding
+}
+
+/// A compressed body is another representation: a strong upstream `ETag`
+/// becomes weak.
+fn weaken_etag(headers: &mut HeaderMap) {
+    let Some(etag) = headers
+        .get(header::ETAG)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return;
+    };
+    if etag.starts_with("W/") {
+        return;
+    }
+    if let Ok(weak) = HeaderValue::from_str(&format!("W/{etag}")) {
+        headers.insert(header::ETAG, weak);
+    }
 }
 
 /// A proxied response body, passed on chunk by chunk as the upstream sends
@@ -2405,18 +2625,18 @@ async fn static_asset_handler(
 ) -> Response {
     let started = Instant::now();
     let mut success = false;
-    let if_none_match = request_headers.get(header::IF_NONE_MATCH);
     let response = if let Some(path) = state.resolve_asset(uri.path()) {
         match fs::read(&path).await {
             Ok(bytes) => {
                 success = true;
-                build_static_response(
+                negotiated_static_response(
+                    &state,
                     bytes,
                     &path,
                     file_modified(&path).await,
-                    &state.html_headers,
-                    if_none_match,
+                    &request_headers,
                 )
+                .await
             }
             Err(err) => {
                 let error_msg = format!("Failed to read asset '{}': {}", path.display(), err);
@@ -2434,13 +2654,14 @@ async fn static_asset_handler(
         match fs::read(state.index()).await {
             Ok(bytes) => {
                 success = true;
-                build_static_response(
+                negotiated_static_response(
+                    &state,
                     bytes,
                     state.index(),
                     file_modified(state.index()).await,
-                    &state.html_headers,
-                    if_none_match,
+                    &request_headers,
                 )
+                .await
             }
             Err(err) => {
                 let error_msg = format!("index.html missing or unreadable: {}", err);
@@ -2473,6 +2694,72 @@ fn sanitize_request_path(path: &str) -> PathBuf {
     buf
 }
 
+/// The identity response of a static file (no negotiation): what the
+/// d4596a7 tests pin down.
+#[cfg(test)]
+fn build_static_response(
+    bytes: Vec<u8>,
+    path: &Path,
+    modified: Option<SystemTime>,
+    html_headers: &[(HeaderName, HeaderValue)],
+    if_none_match: Option<&HeaderValue>,
+) -> Response {
+    let etag = static_etag(&bytes);
+    build_static_variant(
+        Bytes::from(bytes),
+        &etag,
+        path,
+        modified,
+        html_headers,
+        if_none_match,
+        None,
+        false,
+    )
+}
+
+/// [`build_static_response`] with content negotiation (5.6): text-like
+/// files of at least `compression::MIN_SIZE` go out as Brotli or gzip when
+/// the client accepts it, compressed once per content hash and cached.
+/// Compressible types always carry `Vary: Accept-Encoding`.
+async fn negotiated_static_response(
+    state: &StaticRouterState,
+    bytes: Vec<u8>,
+    path: &Path,
+    modified: Option<SystemTime>,
+    request_headers: &HeaderMap,
+) -> Response {
+    let compressible = compression::is_compressible(content_type_for(path));
+    let etag = static_etag(&bytes);
+    let bytes = Bytes::from(bytes);
+    let mut variant = None;
+    if compressible && bytes.len() >= compression::MIN_SIZE {
+        if let Some(encoding) = compression::negotiate(request_headers) {
+            variant = state
+                .compressed
+                .get_or_compress(&etag, encoding, &bytes)
+                .await
+                .map(|packed| (encoding, packed));
+        }
+    }
+    build_static_variant(
+        bytes,
+        &etag,
+        path,
+        modified,
+        &state.html_headers,
+        request_headers.get(header::IF_NONE_MATCH),
+        variant,
+        compressible,
+    )
+}
+
+/// The ETag of an encoded variant: one per encoding, so caches never mix
+/// them up (`"<hash>"`, `"<hash>-br"`, `"<hash>-gzip"`).
+fn variant_etag(etag: &str, encoding: Encoding) -> String {
+    let hash = etag.trim_matches('"');
+    format!("\"{hash}-{}\"", encoding.token())
+}
+
 /// Build the response for a static file (or the SPA fallback `index.html`).
 ///
 /// - Every response carries `STATIC_DEFAULT_HEADERS`, an `ETag` (content
@@ -2481,12 +2768,19 @@ fn sanitize_request_path(path: &str) -> PathBuf {
 /// - Only content-hashed build outputs are cached as `immutable`; everything
 ///   else (HTML, i18n JSON, unhashed scripts, icons) is `no-cache`, i.e. the
 ///   browser revalidates and gets a `304` when the `ETag` still matches.
-fn build_static_response(
-    bytes: Vec<u8>,
+/// - A compressed `variant` carries `Content-Encoding` and its own `ETag`;
+///   every variant's `ETag` (and the plain one) answers `304`, they all
+///   name the same content.
+#[allow(clippy::too_many_arguments)]
+fn build_static_variant(
+    bytes: Bytes,
+    etag: &str,
     path: &Path,
     modified: Option<SystemTime>,
     html_headers: &[(HeaderName, HeaderValue)],
     if_none_match: Option<&HeaderValue>,
+    variant: Option<(Encoding, Bytes)>,
+    vary: bool,
 ) -> Response {
     let content_type = content_type_for(path);
     let is_html = content_type.starts_with("text/html");
@@ -2495,14 +2789,17 @@ fn build_static_response(
     } else {
         STATIC_CACHE_REVALIDATE
     };
-    let etag = static_etag(&bytes);
+    let served_etag = match &variant {
+        Some((encoding, _)) => variant_etag(etag, *encoding),
+        None => etag.to_string(),
+    };
 
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static(cache_control),
     );
-    if let Ok(value) = HeaderValue::from_str(&etag) {
+    if let Ok(value) = HeaderValue::from_str(&served_etag) {
         headers.insert(header::ETAG, value);
     }
     if let Some(value) = modified.and_then(http_date) {
@@ -2519,15 +2816,30 @@ fn build_static_response(
             headers.insert(name.clone(), value.clone());
         }
     }
+    if vary {
+        compression::add_vary(&mut headers);
+    }
 
-    let not_modified = if_none_match.is_some_and(|value| etag_matches(value, &etag));
+    // Any variant's ETag (or the plain one) still validates: same content.
+    let not_modified = if_none_match.is_some_and(|value| {
+        etag_matches(value, etag)
+            || [Encoding::Brotli, Encoding::Gzip]
+                .into_iter()
+                .any(|encoding| etag_matches(value, &variant_etag(etag, encoding)))
+    });
     let mut response = if not_modified {
         let mut response = Response::new(Body::empty());
         *response.status_mut() = StatusCode::NOT_MODIFIED;
         response
     } else {
         headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
-        Response::new(Body::from(bytes))
+        match variant {
+            Some((encoding, packed)) => {
+                headers.insert(header::CONTENT_ENCODING, encoding.header_value());
+                Response::new(Body::from(packed))
+            }
+            None => Response::new(Body::from(bytes)),
+        }
     };
     *response.headers_mut() = headers;
     response

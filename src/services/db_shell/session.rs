@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::domain::db::{
-    DbEngine, DbError, DbExecutionResult, DbResult, DbTable, DbTableSchema, DbValue,
+    DbCallContext, DbEngine, DbError, DbExecutionResult, DbResult, DbTable, DbTableSchema, DbValue,
 };
 use crate::utils::messages::services::db_shell::errors as db_shell_errors;
 
@@ -86,5 +86,40 @@ impl DbShellSession {
         self.guard_enabled()?;
         let adapter = self.service.adapter(self.current_engine)?;
         adapter.prepared_execute(statement, params).await
+    }
+
+    /// Like [`Self::simple_query`], on behalf of `ctx` (pool, read-only).
+    pub async fn simple_query_in(
+        &self,
+        ctx: &DbCallContext,
+        statement: &str,
+    ) -> DbResult<Vec<DbExecutionResult>> {
+        self.guard_enabled()?;
+        let adapter = self.service.adapter(self.current_engine)?;
+        adapter.simple_query_in(ctx, statement).await
+    }
+
+    /// Like [`Self::prepared_query`], on behalf of `ctx`.
+    pub async fn prepared_query_in(
+        &self,
+        ctx: &DbCallContext,
+        statement: &str,
+        params: &[DbValue],
+    ) -> DbResult<Vec<DbExecutionResult>> {
+        self.guard_enabled()?;
+        let adapter = self.service.adapter(self.current_engine)?;
+        adapter.prepared_query_in(ctx, statement, params).await
+    }
+
+    /// Like [`Self::prepared_execute`], on behalf of `ctx`.
+    pub async fn prepared_execute_in(
+        &self,
+        ctx: &DbCallContext,
+        statement: &str,
+        params: &[DbValue],
+    ) -> DbResult<u64> {
+        self.guard_enabled()?;
+        let adapter = self.service.adapter(self.current_engine)?;
+        adapter.prepared_execute_in(ctx, statement, params).await
     }
 }

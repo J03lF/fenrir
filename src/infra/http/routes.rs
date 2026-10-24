@@ -74,6 +74,9 @@ use fenrir_module_kit::{ModuleTokenExchangeRequest, ModuleTokenExchangeResponse}
 
 use super::gateway::{HTTP_GATEWAY_CLIENT, HTTP_GATEWAY_STREAMING_CLIENT, SERVICE_RATE_LIMITER};
 use super::proxy_headers::HopByHop;
+use super::proxy_headers::{
+    forwarded_for, is_edge_hop, CLIENT_ADDRESS_HEADERS, EDGE_HOP_HEADER, FORWARDED_FOR,
+};
 use super::server::HTTP_SERVICE_ID;
 use super::state::{HttpInfo, HttpState};
 
@@ -1418,13 +1421,16 @@ mod service_route_path_tests {
     }
 
     #[tokio::test]
-    async fn failover_only_on_connect_or_timeout_errors() {
+    async fn failover_on_connect_errors_for_every_method() {
         let err = Client::new()
             .get("http://127.0.0.1:9")
             .send()
             .await
             .expect_err("connection should fail");
-        assert!(should_fail_over_gateway_error(&err));
+        // Nothing was sent: safe for POST too.
+        for method in [Method::GET, Method::POST, Method::PATCH] {
+            assert!(should_fail_over_gateway_error(&method, &err), "{method}");
+        }
     }
 
     #[test]
@@ -1509,8 +1515,50 @@ fn should_fail_over_gateway_response(method: &Method, status: reqwest::StatusCod
         )
 }
 
-fn should_fail_over_gateway_error(err: &reqwest::Error) -> bool {
-    err.is_timeout() || err.is_connect()
+/// Whether a failed upstream attempt may be repeated on the next target.
+///
+/// - Connect errors: always; the request never left (no connection).
+/// - Timeouts (and every other error after the request may have been
+///   sent): only for safe methods. A POST or PATCH that timed out may have
+///   run upstream; sending it again created duplicates (Q-022).
+fn should_fail_over_gateway_error(method: &Method, err: &reqwest::Error) -> bool {
+    if err.is_connect() {
+        return true;
+    }
+    is_retry_safe_method(method) && err.is_timeout()
+}
+
+/// Sends the request to the targets in turn and moves on to the next one
+/// only where that is safe (`should_fail_over_gateway_error` /
+/// `should_fail_over_gateway_response`); the last target's result counts.
+/// `None` only without targets.
+async fn send_with_failover<T, F, Fut>(
+    method: &Method,
+    targets: &[T],
+    mut send: F,
+) -> Option<reqwest::Result<reqwest::Response>>
+where
+    F: FnMut(&T) -> Fut,
+    Fut: std::future::Future<Output = reqwest::Result<reqwest::Response>>,
+{
+    for (index, target) in targets.iter().enumerate() {
+        let more = index + 1 < targets.len();
+        match send(target).await {
+            Ok(response)
+                if more && should_fail_over_gateway_response(method, response.status()) =>
+            {
+                continue;
+            }
+            Err(err) if more && should_fail_over_gateway_error(method, &err) => continue,
+            result => return Some(result),
+        }
+    }
+    None
+}
+
+/// Safe methods (RFC 9110 9.2.1): repeating them changes nothing.
+fn is_retry_safe_method(method: &Method) -> bool {
+    matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
 }
 
 fn map_reqwest_method(method: &Method) -> Result<ReqwestMethod, ServiceActionProblem> {
@@ -1587,7 +1635,7 @@ async fn convert_upstream_response(
             .map_err(|err| {
                 http_problem(
                     StatusCode::BAD_GATEWAY,
-                    http_messages::problems::gateway_upstream_read_failed(err),
+                    http_messages::problems::gateway_upstream_read_failed(err.without_url()),
                 )
             })?;
         builder.body(Body::from(body)).map_err(|err| {
@@ -2258,6 +2306,8 @@ async fn release_dev_overrides(State(state): State<HttpState>, headers: HeaderMa
 struct GatewayRoute {
     service_param: String,
     tail: String,
+    /// TCP peer of the request, for `X-Forwarded-For`.
+    peer: Option<std::net::IpAddr>,
 }
 
 struct OptionalPeerAddr(Option<std::net::SocketAddr>);
@@ -2279,15 +2329,6 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for OptionalPeerAddr {
     }
 }
 
-fn inject_forwarded_for(headers: &mut HeaderMap, peer: std::net::SocketAddr) {
-    if headers.contains_key("x-forwarded-for") {
-        return;
-    }
-    if let Ok(value) = HeaderValue::from_str(&peer.ip().to_string()) {
-        headers.insert("x-forwarded-for", value);
-    }
-}
-
 async fn proxy_module_service(
     State(state): State<HttpState>,
     OptionalPeerAddr(peer_addr): OptionalPeerAddr,
@@ -2297,13 +2338,10 @@ async fn proxy_module_service(
     OriginalUri(original_uri): OriginalUri,
     body: Body,
 ) -> Response {
-    let mut headers = headers;
-    if let Some(addr) = peer_addr {
-        inject_forwarded_for(&mut headers, addr);
-    }
     let route = GatewayRoute {
         service_param,
         tail,
+        peer: peer_addr.map(|addr| addr.ip()),
     };
     match gateway_proxy(
         state,
@@ -2330,13 +2368,10 @@ async fn proxy_module_service_grpc(
     OriginalUri(original_uri): OriginalUri,
     body: Body,
 ) -> Response {
-    let mut headers = headers;
-    if let Some(addr) = peer_addr {
-        inject_forwarded_for(&mut headers, addr);
-    }
     let route = GatewayRoute {
         service_param,
         tail,
+        peer: peer_addr.map(|addr| addr.ip()),
     };
     match gateway_proxy(
         state,
@@ -2490,6 +2525,8 @@ async fn proxy_static_module_impl(
     }
 
     let response = builder.body(body_bytes).send().await.map_err(|err| {
+        // `without_url`: the URL carries the request path (invite tokens).
+        let err = err.without_url();
         tracing::warn!(
             module = %module_id,
             port,
@@ -2525,6 +2562,7 @@ async fn gateway_proxy(
     let GatewayRoute {
         service_param,
         tail,
+        peer,
     } = route;
     let Some(module_service) = state.services.module_service() else {
         return Err(module_service_unavailable());
@@ -2535,7 +2573,8 @@ async fn gateway_proxy(
             http_messages::problems::gateway_security_unavailable(),
         ));
     };
-    let request_path = original_uri.path().to_string();
+    // For the gateway audit: invite tokens masked (5.6, after 3.8a).
+    let request_path = crate::utils::request_target(original_uri.path()).into_owned();
 
     let (result, audit) = async {
         let service_id = match decode_service_id(&service_param) {
@@ -2713,9 +2752,23 @@ async fn gateway_proxy(
         };
         let request_method = method.clone();
         let reqwest_method_template = reqwest_method.clone();
-        let mut saw_transport_failure = false;
 
-        for (index, target) in targets.iter().enumerate() {
+        // `X-Forwarded-For` (5.6): kept and extended with the TCP peer only
+        // when the caller is a trusted hop, i.e. the host's own static edge
+        // (edge-hop secret) or a module with a valid service token. Anyone
+        // else is the client: its claim is replaced by its peer address.
+        let trusted_hop = claims.is_some()
+            || is_edge_hop(headers.get(EDGE_HOP_HEADER).map(HeaderValue::as_bytes));
+        let forwarded = forwarded_for(
+            headers
+                .get_all(FORWARDED_FOR)
+                .iter()
+                .map(HeaderValue::as_bytes),
+            peer,
+            trusted_hop,
+        );
+
+        let send = |target: &ModuleIngressTarget| {
             let target_url = build_target_url(target, &path);
             let target_label = target_log_label(target);
             let mut builder = client
@@ -2743,7 +2796,11 @@ async fn gateway_proxy(
             }
 
             for (name, value) in headers.iter() {
-                if name == HOST {
+                if name == HOST
+                    || name.as_str() == EDGE_HOP_HEADER
+                    || name.as_str() == FORWARDED_FOR
+                    || (!trusted_hop && CLIENT_ADDRESS_HEADERS.contains(&name.as_str()))
+                {
                     continue;
                 }
                 if let (Ok(header_name), Ok(header_value)) = (
@@ -2753,53 +2810,52 @@ async fn gateway_proxy(
                     builder = builder.header(header_name, header_value);
                 }
             }
-
-            let response = match builder.body(body_bytes.clone()).send().await {
-                Ok(resp) => resp,
-                Err(err) => {
-                    tracing::warn!(
+            if let Some(value) = &forwarded {
+                builder = builder.header(FORWARDED_FOR, value.as_str());
+            }
+            let request = builder.body(body_bytes.clone());
+            let service_id = service_id.clone();
+            let request_method = request_method.clone();
+            async move {
+                // `without_url`: the URL carries the request path and query
+                // (invite tokens).
+                let result = request.send().await.map_err(reqwest::Error::without_url);
+                match &result {
+                    Err(err) => tracing::warn!(
                         service = %service_id,
                         target = %target_label,
                         error = %err,
                         "module gateway upstream request failed"
-                    );
-                    if should_fail_over_gateway_error(&err) && index + 1 < targets.len() {
-                        saw_transport_failure = true;
-                        continue;
+                    ),
+                    Ok(response)
+                        if should_fail_over_gateway_response(
+                            &request_method,
+                            response.status(),
+                        ) =>
+                    {
+                        tracing::warn!(
+                            service = %service_id,
+                            target = %target_label,
+                            status = %response.status(),
+                            "module gateway upstream returned failover-eligible status"
+                        );
                     }
-                    return (
-                        Err(http_problem(
-                            StatusCode::BAD_GATEWAY,
-                            http_messages::problems::gateway_upstream_unreachable(&service_id),
-                        )),
-                        audit_ctx,
-                    );
+                    Ok(_) => {}
                 }
-            };
-
-            if should_fail_over_gateway_response(&request_method, response.status())
-                && index + 1 < targets.len()
-            {
-                tracing::warn!(
-                    service = %service_id,
-                    target = %target_label,
-                    status = %response.status(),
-                    "module gateway upstream returned failover-eligible status"
-                );
-                continue;
+                result
             }
+        };
 
-            return (convert_upstream_response(response).await, audit_ctx);
+        match send_with_failover(&method, &targets, send).await {
+            Some(Ok(response)) => (convert_upstream_response(response).await, audit_ctx),
+            Some(Err(_)) | None => (
+                Err(http_problem(
+                    StatusCode::BAD_GATEWAY,
+                    http_messages::problems::gateway_upstream_unreachable(&service_id),
+                )),
+                audit_ctx,
+            ),
         }
-
-        let _ = saw_transport_failure;
-        (
-            Err(http_problem(
-                StatusCode::BAD_GATEWAY,
-                http_messages::problems::gateway_upstream_unreachable(&service_id),
-            )),
-            audit_ctx,
-        )
     }
     .await;
 
@@ -4625,5 +4681,117 @@ mod upstream_response_tests {
             let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
             assert_eq!(&body[..], b"{}", "{label}");
         }
+    }
+}
+
+#[cfg(test)]
+mod failover_tests {
+    //! Q-022 (5.6): the gateway repeats a request on the next target only
+    //! when that cannot run it twice.
+    use super::{send_with_failover, Method};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Counts requests; answers each after `delay`.
+    async fn slow_upstream(delay: Duration) -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&seen);
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let counter = Arc::clone(&counter);
+                tokio::spawn(async move {
+                    let mut head = Vec::new();
+                    let mut byte = [0_u8; 1];
+                    while !head.ends_with(b"\r\n\r\n")
+                        && socket.read(&mut byte).await.unwrap_or(0) == 1
+                    {
+                        head.push(byte[0]);
+                    }
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(delay).await;
+                    let _ = socket
+                        .write_all(b"HTTP/1.1 201 Created\r\ncontent-length: 2\r\n\r\nok")
+                        .await;
+                });
+            }
+        });
+        (format!("http://{addr}/work/tickets"), seen)
+    }
+
+    fn client(timeout: Duration) -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .timeout(timeout)
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_post_that_times_out_is_sent_exactly_once() {
+        let (url, seen) = slow_upstream(Duration::from_secs(2)).await;
+        let client = client(Duration::from_millis(300));
+        // Two targets that both reach the same module, as when a module has
+        // a declared and a runtime endpoint.
+        let targets = vec![url.clone(), url];
+        for method in [Method::POST, Method::PATCH, Method::PUT, Method::DELETE] {
+            seen.store(0, Ordering::SeqCst);
+            let result = send_with_failover(&method, &targets, |target: &String| {
+                client
+                    .request(
+                        reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap(),
+                        target,
+                    )
+                    .body("{}")
+                    .send()
+            })
+            .await;
+            assert!(
+                matches!(result, Some(Err(ref err)) if err.is_timeout()),
+                "{method}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert_eq!(
+                seen.load(Ordering::SeqCst),
+                1,
+                "{method} was sent more than once"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_get_that_times_out_moves_on_to_the_next_target() {
+        let (url, seen) = slow_upstream(Duration::from_secs(2)).await;
+        let client = client(Duration::from_millis(300));
+        let targets = vec![url.clone(), url];
+        let result = send_with_failover(&Method::GET, &targets, |target: &String| {
+            client.get(target).send()
+        })
+        .await;
+        assert!(matches!(result, Some(Err(_))));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(seen.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_connect_error_moves_on_for_every_method() {
+        // Nothing listens on the first target: the request never left.
+        let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead = format!("http://{}/work/tickets", closed.local_addr().unwrap());
+        drop(closed);
+        let (url, seen) = slow_upstream(Duration::from_millis(10)).await;
+        let client = client(Duration::from_secs(2));
+        let targets = vec![dead, url];
+        let result = send_with_failover(&Method::POST, &targets, |target: &String| {
+            client.post(target).body("{}").send()
+        })
+        .await;
+        let response = result.unwrap().unwrap();
+        assert_eq!(response.status().as_u16(), 201);
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
     }
 }

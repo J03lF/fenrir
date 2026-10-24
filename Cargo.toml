@@ -50,6 +50,7 @@ toml = "0.8.23"
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls", "blocking", "stream"] }
 urlencoding = "2.1"
 flate2 = { version = "1.0", default-features = true }
+brotli = "8.0.4"
 tar = "0.4"
 argon2 = { version = "0.5", default-features = false, features = ["std", "password-hash"] }
 password-hash = { version = "0.5", features = ["std"] }

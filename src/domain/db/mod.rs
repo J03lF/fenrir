@@ -1,3 +1,4 @@
+mod context;
 mod engine;
 mod error;
 mod ports;
@@ -5,6 +6,9 @@ mod result;
 mod schema;
 mod value;
 
+pub use context::{
+    DbAccess, DbCallContext, DbPoolKey, DbPoolKeyStatus, DbPoolStatus, DbSessionEffect,
+};
 pub use engine::DbEngine;
 pub use error::DbError;
 pub use ports::DbAdminPort;

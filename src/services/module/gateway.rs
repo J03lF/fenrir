@@ -239,7 +239,10 @@ impl RuntimeGatewayContext {
                 Ok(response) => {
                     let status = response.status().as_u16();
                     let headers = map_headers(response.headers());
-                    let bytes = response.bytes().await.map_err(GatewayError::Http)?;
+                    let bytes = response
+                        .bytes()
+                        .await
+                        .map_err(|err| GatewayError::Http(err.without_url()))?;
                     let body = GatewayBody::from_bytes(&bytes);
                     return Ok(GatewayResponsePayload {
                         status,
@@ -248,13 +251,13 @@ impl RuntimeGatewayContext {
                         body,
                     });
                 }
-                Err(err) if should_fail_over(&err, candidate_index, ingresses.len()) => {
+                Err(err) if should_fail_over(&method, &err, candidate_index, ingresses.len()) => {
                     candidate_index += 1;
                     sleep(self.backoff).await;
                     continue;
                 }
                 Err(err)
-                    if should_retry(&err, attempt, self.retries)
+                    if should_retry(&method, &err, attempt, self.retries)
                         && candidate_index == last_candidate =>
                 {
                     attempt += 1;
@@ -303,7 +306,12 @@ impl RuntimeGatewayContext {
             }
             request = request.body(serialized);
         }
-        request.send().await.map_err(GatewayError::Http)
+        // `without_url`: the URL carries the path and query (invite tokens),
+        // and the error text goes back to the calling module's log.
+        request
+            .send()
+            .await
+            .map_err(|err| GatewayError::Http(err.without_url()))
     }
 }
 
@@ -496,24 +504,30 @@ fn encode_query(params: &HashMap<String, String>) -> String {
     format!("?{}", encoded.join("&"))
 }
 
-fn should_retry(err: &GatewayError, attempt: u32, max_retries: u32) -> bool {
-    if attempt >= max_retries {
-        return false;
+/// Whether a failed attempt may be sent again (Q-022): after a connect
+/// error always (the request never left), after a timeout only for safe
+/// methods. A POST or PATCH that timed out may have run upstream.
+fn repeat_is_safe(method: &Method, err: &GatewayError) -> bool {
+    match err {
+        GatewayError::Http(e) if e.is_connect() => true,
+        GatewayError::Http(e) if e.is_timeout() => {
+            matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
+        }
+        _ => false,
     }
-    matches!(
-        err,
-        GatewayError::Http(e) if e.is_timeout() || e.is_connect()
-    )
 }
 
-fn should_fail_over(err: &GatewayError, candidate_index: usize, candidate_count: usize) -> bool {
-    if candidate_index + 1 >= candidate_count {
-        return false;
-    }
-    matches!(
-        err,
-        GatewayError::Http(e) if e.is_timeout() || e.is_connect()
-    )
+fn should_retry(method: &Method, err: &GatewayError, attempt: u32, max_retries: u32) -> bool {
+    attempt < max_retries && repeat_is_safe(method, err)
+}
+
+fn should_fail_over(
+    method: &Method,
+    err: &GatewayError,
+    candidate_index: usize,
+    candidate_count: usize,
+) -> bool {
+    candidate_index + 1 < candidate_count && repeat_is_safe(method, err)
 }
 
 fn map_headers(headers: &HeaderMap) -> HashMap<String, String> {
@@ -534,5 +548,78 @@ fn normalize_path(value: &str) -> String {
         trimmed.to_string()
     } else {
         format!("/{}", trimmed)
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    //! Q-022: the runtime gateway (module-to-module `/call`) repeats a call
+    //! only when that cannot run it twice, and its errors carry no URL.
+    use super::*;
+
+    /// An upstream that accepts and never answers.
+    async fn silent_upstream() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    sleep(Duration::from_secs(5)).await;
+                    drop(socket);
+                });
+            }
+        });
+        format!("http://{addr}/invite/SECRET-TOKEN/join?token=SECRET-QUERY")
+    }
+
+    fn client() -> Client {
+        Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_millis(200))
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_post_is_not_repeated() {
+        let url = silent_upstream().await;
+        for method in [Method::POST, Method::PATCH, Method::PUT, Method::DELETE] {
+            let err = client()
+                .request(method.clone(), &url)
+                .send()
+                .await
+                .map_err(|err| GatewayError::Http(err.without_url()))
+                .expect_err("times out");
+            assert!(!should_retry(&method, &err, 0, 2), "{method} retried");
+            assert!(
+                !should_fail_over(&method, &err, 0, 2),
+                "{method} failed over"
+            );
+        }
+        let err = client()
+            .get(&url)
+            .send()
+            .await
+            .map_err(|err| GatewayError::Http(err.without_url()))
+            .expect_err("times out");
+        assert!(should_retry(&Method::GET, &err, 0, 2));
+        assert!(should_fail_over(&Method::GET, &err, 0, 2));
+        assert!(!err.message().contains("SECRET"), "{}", err.message());
+    }
+
+    #[tokio::test]
+    async fn a_connect_error_is_repeated_for_every_method() {
+        let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/work/tickets", closed.local_addr().unwrap());
+        drop(closed);
+        let err = client()
+            .post(&url)
+            .send()
+            .await
+            .map_err(|err| GatewayError::Http(err.without_url()))
+            .expect_err("refused");
+        assert!(should_retry(&Method::POST, &err, 0, 2));
+        assert!(should_fail_over(&Method::POST, &err, 0, 2));
+        assert!(!should_retry(&Method::POST, &err, 2, 2));
     }
 }

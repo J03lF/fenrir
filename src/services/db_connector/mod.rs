@@ -1,14 +1,18 @@
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use once_cell::sync::Lazy;
 use serde_json::Value as JsonValue;
 use tracing::warn;
 
-use crate::domain::db::{DbEngine, DbError, DbExecutionResult, DbValue};
+use crate::domain::db::{
+    DbAccess, DbCallContext, DbEngine, DbError, DbExecutionResult, DbPoolKey, DbPoolStatus,
+    DbSessionEffect, DbValue,
+};
 use crate::security::manager::{SecurityError, SecurityManager};
 use crate::security::service::{ServiceScope, ServiceScopeError};
 use crate::security::service_tokens::{DelegatedActor, DelegatedTokenClaims};
@@ -18,11 +22,15 @@ use crate::utils::messages::services::db_connector::{
     errors as db_connector_errors, logs as db_connector_logs,
 };
 use fenrir_module_kit::{
-    DbConnectorCommand, DbConnectorIntent, DbConnectorRequest, DbConnectorResponse,
-    DbConnectorResultView, DbPreparedParam, DbTenantBindingMode, DbTenantPolicy,
+    analyze_statement, DbConnectorCommand, DbConnectorIntent, DbConnectorRequest,
+    DbConnectorResponse, DbConnectorResultView, DbPreparedParam, DbTenantBindingMode,
+    DbTenantPolicy, SessionEffect, StatementAnalysis,
 };
 
 const MAX_STATEMENT_LEN: usize = 32 * 1024;
+/// How often the pool counters are copied into the runtime metrics
+/// (`GET /services/db-connector/runtime-metrics`).
+const POOL_METRICS_INTERVAL: Duration = Duration::from_secs(5);
 
 static DB_SCOPE_READ: Lazy<ServiceScope> =
     Lazy::new(|| ServiceScope::new("db:read").expect("db:read scope"));
@@ -71,6 +79,9 @@ pub struct DbConnectorService {
     db_shell: Arc<DbShellService>,
     security: Arc<SecurityManager>,
     diagnostics: Arc<ServiceDiagnostics>,
+    started: Instant,
+    /// Milliseconds since `started` of the last metrics copy.
+    metrics_published_ms: Arc<AtomicU64>,
 }
 
 impl DbConnectorService {
@@ -83,6 +94,8 @@ impl DbConnectorService {
             db_shell,
             security,
             diagnostics,
+            started: Instant::now(),
+            metrics_published_ms: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -98,6 +111,7 @@ impl DbConnectorService {
             }
         };
         self.record_metrics(started_at, success);
+        self.publish_pool_metrics_if_due();
         response
     }
 
@@ -128,9 +142,13 @@ impl DbConnectorService {
                 ))
             }
         };
-        let detected_intent = DbConnectorIntent::detect(statement);
-        let exec_intent = request.intent.unwrap_or(detected_intent);
-        let required_scope = match detected_intent {
+        // The host classifies the statement itself and never trusts the
+        // intent the client sent: that only picks the result shape (rows or
+        // an affected-row count). A write needs `db:write`; a read runs in a
+        // read-only transaction (defence in depth for functions that write).
+        let analysis = analyze_statement(statement);
+        let exec_intent = request.intent.unwrap_or(analysis.intent);
+        let required_scope = match analysis.intent {
             DbConnectorIntent::Read => DB_SCOPE_READ.as_str(),
             DbConnectorIntent::Write => DB_SCOPE_WRITE.as_str(),
         };
@@ -139,6 +157,12 @@ impl DbConnectorService {
                 db_connector_errors::missing_scope(required_scope),
             ));
         }
+        let DelegatedActor::Service { service_id, .. } = &claims.actor else {
+            return Err(DbConnectorError::Unauthorized(
+                db_connector_errors::actors_service_only().to_string(),
+            ));
+        };
+        let ctx = Self::call_context(service_id, &claims.tenant_id, &analysis);
 
         let mut session = self.db_shell.create_session();
         if let Some(engine_raw) = request.engine.as_deref() {
@@ -151,9 +175,53 @@ impl DbConnectorService {
 
         let command = self.prepare_command(request.command, request.tenant, &claims.tenant_id)?;
         let payload = self
-            .execute_command(&mut session, command, exec_intent)
+            .execute_command(&mut session, &ctx, command, exec_intent)
             .await?;
         Ok(DbConnectorResult { payload })
+    }
+
+    /// Pool, access mode and session effect of one statement: one pool per
+    /// module service and tenant; reads read-only.
+    fn call_context(
+        service_id: &str,
+        tenant_id: &str,
+        analysis: &StatementAnalysis,
+    ) -> DbCallContext {
+        DbCallContext {
+            pool: DbPoolKey::service(service_id, tenant_id),
+            access: if analysis.is_read() {
+                DbAccess::ReadOnly
+            } else {
+                DbAccess::ReadWrite
+            },
+            session: match analysis.session {
+                SessionEffect::None => DbSessionEffect::None,
+                SessionEffect::Resettable => DbSessionEffect::Resettable,
+                SessionEffect::Unrecoverable => DbSessionEffect::Unrecoverable,
+            },
+        }
+    }
+
+    /// Pool counters (no URIs, no credentials) for the runtime-metrics
+    /// endpoint, copied at most every `POOL_METRICS_INTERVAL`.
+    fn publish_pool_metrics_if_due(&self) {
+        let now_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let last = self.metrics_published_ms.load(Ordering::Acquire);
+        let interval = u64::try_from(POOL_METRICS_INTERVAL.as_millis()).unwrap_or(u64::MAX);
+        if last != 0 && now_ms.saturating_sub(last) < interval {
+            return;
+        }
+        if self
+            .metrics_published_ms
+            .compare_exchange(last, now_ms.max(1), Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        if let Some(status) = self.db_shell.pool_status() {
+            self.diagnostics
+                .update_runtime_metrics("db-connector", pool_status_json(&status));
+        }
     }
 
     fn record_metrics(&self, started_at: Instant, success: bool) {
@@ -170,13 +238,14 @@ impl DbConnectorService {
     async fn execute_command(
         &self,
         session: &mut crate::services::db_shell::DbShellSession,
+        ctx: &DbCallContext,
         command: DbConnectorCommand,
         intent: DbConnectorIntent,
     ) -> Result<Vec<DbConnectorResultView>, DbConnectorError> {
         match command {
             DbConnectorCommand::Simple { statement } => {
                 let results = session
-                    .simple_query(&statement)
+                    .simple_query_in(ctx, &statement)
                     .await
                     .map_err(DbConnectorError::Db)?;
                 Ok(results
@@ -188,7 +257,7 @@ impl DbConnectorService {
                 let values = Self::convert_prepared_params(params)?;
                 if matches!(intent, DbConnectorIntent::Write) {
                     let affected = session
-                        .prepared_execute(&statement, &values)
+                        .prepared_execute_in(ctx, &statement, &values)
                         .await
                         .map_err(DbConnectorError::Db)?;
                     Ok(vec![DbConnectorResultView::AffectedRows {
@@ -196,7 +265,7 @@ impl DbConnectorService {
                     }])
                 } else {
                     let results = session
-                        .prepared_query(&statement, &values)
+                        .prepared_query_in(ctx, &statement, &values)
                         .await
                         .map_err(DbConnectorError::Db)?;
                     Ok(results
@@ -475,6 +544,41 @@ impl DbConnectorService {
             && bytes[13] == b':'
             && bytes[16] == b':'
     }
+}
+
+fn pool_status_json(status: &DbPoolStatus) -> JsonValue {
+    let pools: Vec<JsonValue> = status
+        .pools
+        .iter()
+        .map(|pool| {
+            serde_json::json!({
+                "key": pool.key,
+                "open": pool.open,
+                "idle": pool.idle,
+                "in_use": pool.in_use,
+                "waiting": pool.waiting,
+                "created": pool.created,
+                "reused": pool.reused,
+                "closed": pool.closed,
+                "resets": pool.resets,
+                "wait_timeouts": pool.wait_timeouts,
+                "connect_failures": pool.connect_failures,
+                "statement_cache_hits": pool.statement_cache_hits,
+                "statement_cache_misses": pool.statement_cache_misses,
+                "statement_cache_invalidations": pool.statement_cache_invalidations,
+                "retries": pool.retries,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "pool": {
+            "max_per_pool": status.max_per_pool,
+            "max_total": status.max_total,
+            "open_total": status.open_total,
+            "in_use_total": status.in_use_total,
+            "pools": pools,
+        }
+    })
 }
 
 #[derive(Debug)]

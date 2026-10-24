@@ -12,9 +12,14 @@ use tracing::{error, info, warn};
 
 use crate::services::db_connector::{DbConnectorEndpoint, DbConnectorService};
 use crate::utils::messages::infra::db::connector as connector_messages;
-use fenrir_module_kit::{DbConnectorRequest, DbConnectorResponse};
+use fenrir_module_kit::{
+    DbConnectorRequest, DbConnectorResponse, CONNECTOR_FRAMED_IDLE_TIMEOUT,
+    CONNECTOR_FRAMED_PREAMBLE, CONNECTOR_MAX_REQUEST_FRAME,
+};
 
-const MAX_REQUEST_SIZE: usize = 64 * 1024;
+const MAX_REQUEST_SIZE: usize = CONNECTOR_MAX_REQUEST_FRAME;
+/// A frame's body must follow its length within this time.
+const FRAME_BODY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 pub async fn start_connector_server(
     runtime_dir: &Path,
@@ -121,12 +126,49 @@ fn spawn_tcp_connection(stream: TcpStream, service: Arc<DbConnectorService>) {
     });
 }
 
+/// One connection from a module.
+///
+/// - Starting with [`CONNECTOR_FRAMED_PREAMBLE`] (kits since 5.6, when the
+///   host announced it via `FENRIR_DB_CONNECTOR_FRAMED`): length-prefixed
+///   frames in both directions, one request at a time, until the module
+///   closes or stays silent for [`CONNECTOR_FRAMED_IDLE_TIMEOUT`].
+/// - Anything else is the legacy one-shot protocol of earlier kits: one JSON
+///   request until EOF, one JSON response, close. Unchanged.
 async fn process_stream<S>(mut stream: S, service: Arc<DbConnectorService>) -> anyhow::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut buf = Vec::new();
-    stream.read_to_end(&mut buf).await?;
+    let mut head = Vec::with_capacity(CONNECTOR_FRAMED_PREAMBLE.len());
+    while head.len() < CONNECTOR_FRAMED_PREAMBLE.len()
+        && CONNECTOR_FRAMED_PREAMBLE.starts_with(&head)
+    {
+        let mut chunk = [0u8; 64];
+        let wanted = CONNECTOR_FRAMED_PREAMBLE.len() - head.len();
+        let read = stream.read(&mut chunk[..wanted]).await?;
+        if read == 0 {
+            break;
+        }
+        head.extend_from_slice(&chunk[..read]);
+    }
+    if head.as_slice() == CONNECTOR_FRAMED_PREAMBLE {
+        return process_framed(stream, service).await;
+    }
+    process_legacy(stream, head, service).await
+}
+
+async fn process_legacy<S>(
+    mut stream: S,
+    head: Vec<u8>,
+    service: Arc<DbConnectorService>,
+) -> anyhow::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut buf = head;
+    (&mut stream)
+        .take(u64::try_from(MAX_REQUEST_SIZE).unwrap_or(u64::MAX) + 1)
+        .read_to_end(&mut buf)
+        .await?;
     if buf.len() > MAX_REQUEST_SIZE {
         let response = DbConnectorResponse::err(connector_messages::request_too_large());
         write_response(stream, response).await?;
@@ -140,6 +182,56 @@ where
     Ok(())
 }
 
+async fn process_framed<S>(mut stream: S, service: Arc<DbConnectorService>) -> anyhow::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    loop {
+        let mut header = [0u8; 4];
+        match tokio::time::timeout(
+            CONNECTOR_FRAMED_IDLE_TIMEOUT,
+            stream.read_exact(&mut header),
+        )
+        .await
+        {
+            // Idle for too long, or the module closed: done.
+            Err(_) => return Ok(()),
+            Ok(Err(err)) if err.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+            Ok(Err(err)) => return Err(err.into()),
+            Ok(Ok(_)) => {}
+        }
+        let len = usize::try_from(u32::from_be_bytes(header)).unwrap_or(usize::MAX);
+        if len > MAX_REQUEST_SIZE {
+            let response = DbConnectorResponse::err(connector_messages::request_too_large());
+            write_frame(&mut stream, &response).await?;
+            return Err(anyhow!(connector_messages::request_too_large()));
+        }
+        let mut body = vec![0u8; len];
+        tokio::time::timeout(FRAME_BODY_TIMEOUT, stream.read_exact(&mut body))
+            .await
+            .map_err(|_| anyhow!("db connector frame incomplete"))??;
+        let response = match serde_json::from_slice::<DbConnectorRequest>(&body) {
+            Ok(request) => service.execute(request).await,
+            Err(err) => DbConnectorResponse::err(connector_messages::request_invalid(err)),
+        };
+        write_frame(&mut stream, &response).await?;
+    }
+}
+
+async fn write_frame<S>(stream: &mut S, response: &DbConnectorResponse) -> anyhow::Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
+    let payload = serde_json::to_vec(response)?;
+    let len = u32::try_from(payload.len()).map_err(|_| anyhow!("db connector answer too large"))?;
+    let mut frame = Vec::with_capacity(4 + payload.len());
+    frame.extend_from_slice(&len.to_be_bytes());
+    frame.extend_from_slice(&payload);
+    stream.write_all(&frame).await?;
+    stream.flush().await?;
+    Ok(())
+}
+
 async fn write_response<S>(mut stream: S, response: DbConnectorResponse) -> anyhow::Result<()>
 where
     S: AsyncWrite + Unpin,
@@ -149,3 +241,7 @@ where
     stream.shutdown().await?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/infra/db/connector_tests.rs"]
+mod tests;

@@ -8,13 +8,16 @@ use base64::{engine::general_purpose::STANDARD as BASE64_ENGINE, Engine as _};
 use serde_json::{Number as JsonNumber, Value as JsonValue};
 use tokio::time;
 use tokio_postgres::{
+    error::SqlState,
     types::{Json, ToSql, Type},
-    NoTls, Row, SimpleQueryMessage,
+    Client, NoTls, Row, SimpleQueryMessage, Statement,
 };
 
+use super::pool::{ConnectFn, PgPool, PoolSettings, PooledConn};
 use crate::domain::db::{
-    DbAdminPort, DbColumn, DbError, DbExecutionResult, DbResult, DbResultSet, DbTable, DbTableKind,
-    DbTableSchema, DbValue,
+    DbAccess, DbAdminPort, DbCallContext, DbColumn, DbError, DbExecutionResult, DbPoolKey,
+    DbPoolStatus, DbResult, DbResultSet, DbSessionEffect, DbTable, DbTableKind, DbTableSchema,
+    DbValue,
 };
 use crate::utils::messages::infra::db as infra_db_messages;
 
@@ -27,28 +30,254 @@ enum ConnectionMode {
     UnixSocket(PathBuf),
 }
 
+/// Puts a connection back into a clean session without touching its
+/// prepared statements (no `DISCARD ALL` / `DEALLOCATE`): ends any open or
+/// failed transaction, resets settings and role, closes cursors, drops
+/// `LISTEN`s, advisory locks, temporary tables and sequence caches.
+const SESSION_RESET: &str = "ROLLBACK; RESET ALL; SET SESSION AUTHORIZATION DEFAULT; \
+    CLOSE ALL; UNLISTEN *; SELECT pg_advisory_unlock_all(); DISCARD TEMP; DISCARD SEQUENCES";
+
+/// Opens connections: parsed config plus how to reach the server.
+#[derive(Clone)]
+struct PgConnector {
+    config: Arc<tokio_postgres::Config>,
+    /// Config for module pools: `config` plus `-c statement_timeout=…` in
+    /// the startup options, when a module timeout is set.
+    module_config: Arc<tokio_postgres::Config>,
+    mode: ConnectionMode,
+}
+
+impl PgConnector {
+    fn new(config: tokio_postgres::Config, mode: ConnectionMode) -> Self {
+        let config = Arc::new(config);
+        Self {
+            module_config: Arc::clone(&config),
+            config,
+            mode,
+        }
+    }
+
+    /// Module connections start with `statement_timeout` set as a
+    /// connection option. That makes it the session's default: the session
+    /// reset (`RESET ALL`) keeps it, and a module's own `SET` lasts only
+    /// until that reset.
+    fn with_module_statement_timeout(mut self, timeout: Option<Duration>) -> Self {
+        let Some(timeout) = timeout else {
+            self.module_config = Arc::clone(&self.config);
+            return self;
+        };
+        let mut config = (*self.config).clone();
+        let setting = format!("-c statement_timeout={}", timeout.as_millis());
+        let options = match config.get_options() {
+            Some(existing) if !existing.trim().is_empty() => format!("{existing} {setting}"),
+            _ => setting,
+        };
+        config.options(&options);
+        self.module_config = Arc::new(config);
+        self
+    }
+
+    /// The host's own pool never gets the module statement timeout.
+    fn config_for(&self, key: &DbPoolKey) -> &tokio_postgres::Config {
+        if *key == DbPoolKey::host() {
+            &self.config
+        } else {
+            &self.module_config
+        }
+    }
+
+    async fn connect(&self, key: &DbPoolKey) -> DbResult<Client> {
+        let config = self.config_for(key);
+        match &self.mode {
+            ConnectionMode::Tcp => {
+                let (client, connection) =
+                    config.connect(NoTls).await.map_err(DbError::connection)?;
+                tokio::spawn(async move {
+                    if let Err(err) = connection.await {
+                        tracing::debug!(error = %err, "postgres connection terminated");
+                    }
+                });
+                Ok(client)
+            }
+            ConnectionMode::UnixSocket(socket_dir) => {
+                let socket = tokio::net::UnixStream::connect(self.socket_path(socket_dir))
+                    .await
+                    .map_err(|err| {
+                        DbError::connection(format!(
+                            "failed to connect to the Postgres Unix socket: {err}"
+                        ))
+                    })?;
+                let (client, connection) =
+                    config.connect_raw(socket, NoTls).await.map_err(|err| {
+                        DbError::connection(format!(
+                            "postgres handshake failed on Unix socket: {err}"
+                        ))
+                    })?;
+                tokio::spawn(async move {
+                    if let Err(err) = connection.await {
+                        tracing::debug!(error = %err, "postgres unix socket connection terminated");
+                    }
+                });
+                Ok(client)
+            }
+        }
+    }
+
+    /// PostgreSQL socket naming convention: `.s.PGSQL.<port>` (default 5432).
+    fn socket_path(&self, socket_dir: &Path) -> PathBuf {
+        let port = self.config.get_ports().first().copied().unwrap_or(5432);
+        socket_dir.join(format!(".s.PGSQL.{port}"))
+    }
+
+    /// Best effort: ask the server to cancel what `client` is running (after
+    /// a timeout, before the connection is dropped).
+    fn cancel_in_background(&self, client: &Client) {
+        let token = client.cancel_token();
+        let connector = self.clone();
+        tokio::spawn(async move {
+            let result = match &connector.mode {
+                ConnectionMode::Tcp => token.cancel_query(NoTls).await,
+                ConnectionMode::UnixSocket(socket_dir) => {
+                    match tokio::net::UnixStream::connect(connector.socket_path(socket_dir)).await {
+                        Ok(stream) => token.cancel_query_raw(stream, NoTls).await,
+                        Err(err) => {
+                            tracing::debug!(error = %err, "postgres cancel: socket unreachable");
+                            return;
+                        }
+                    }
+                }
+            };
+            if let Err(err) = result {
+                tracing::debug!(error = %err, "postgres cancel request failed");
+            }
+        });
+    }
+}
+
 pub struct PostgresAdapter {
-    uri: Arc<String>,
     query_timeout: Option<Duration>,
-    connection_mode: ConnectionMode,
+    connector: PgConnector,
+    pool: PgPool,
+}
+
+/// What a prepared statement returns to the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    Rows,
+    AffectedRows,
+}
+
+enum Executed {
+    Rows(Vec<Row>),
+    Affected(u64),
+    Simple(Vec<SimpleQueryMessage>),
+}
+
+/// Why one attempt failed, and whether a second attempt is safe.
+enum Failure {
+    /// The cached statement no longer fits the schema (result type changed,
+    /// statement gone). Raised at Bind, before anything ran: safe to retry
+    /// for reads and writes.
+    StalePlan(DbError),
+    /// The connection broke or timed out. Nothing is known about a write.
+    Connection(DbError),
+    /// The server rejected the statement; the connection is fine.
+    Statement(DbError),
+}
+
+impl Failure {
+    fn into_error(self) -> DbError {
+        match self {
+            Failure::StalePlan(err) | Failure::Connection(err) | Failure::Statement(err) => err,
+        }
+    }
+}
+
+fn is_stale_plan(err: &tokio_postgres::Error) -> bool {
+    err.code().is_some_and(|code| {
+        (*code == SqlState::FEATURE_NOT_SUPPORTED
+            && err
+                .to_string()
+                .contains("cached plan must not change result type"))
+            || *code == SqlState::INVALID_SQL_STATEMENT_NAME
+    })
+}
+
+/// Server errors that end the session: connection exceptions (class 08)
+/// and operator intervention (57P01 admin shutdown, 57P02 crash shutdown,
+/// 57P03 cannot connect now, 57P04 database dropped, 57P05 idle session
+/// timeout).
+fn ends_the_session(code: &SqlState) -> bool {
+    let code = code.code();
+    code.starts_with("08") || code.starts_with("57P")
+}
+
+fn classify_pg_error(err: tokio_postgres::Error) -> Failure {
+    if is_stale_plan(&err) {
+        return Failure::StalePlan(DbError::query(err));
+    }
+    match err.code() {
+        Some(code) if !ends_the_session(code) => Failure::Statement(DbError::query(err)),
+        _ => Failure::Connection(DbError::query(err)),
+    }
 }
 
 impl PostgresAdapter {
-    pub fn new(uri: &str, _pool_max: Option<u32>, timeout_ms: Option<u64>) -> Result<Self> {
+    pub fn new(uri: &str, pool_max: Option<u32>, timeout_ms: Option<u64>) -> Result<Self> {
         let uri = uri.trim();
         if uri.is_empty() {
             anyhow::bail!(infra_db_messages::postgres::uri_empty());
         }
-        let timeout = timeout_ms.map(Duration::from_millis);
+        let mut settings = PoolSettings::default();
+        if let Some(max) = pool_max.and_then(|max| usize::try_from(max).ok()) {
+            if max > 0 {
+                settings.max_per_pool = max;
+                settings.max_total = settings.max_total.max(max);
+            }
+        }
+        Self::with_settings(uri, settings, timeout_ms.map(Duration::from_millis))
+    }
 
-        // Detect if URI uses Unix socket (host parameter points to a directory)
-        let connection_mode = Self::detect_connection_mode(uri);
-
+    pub(crate) fn with_settings(
+        uri: &str,
+        settings: PoolSettings,
+        query_timeout: Option<Duration>,
+    ) -> Result<Self> {
+        let config: tokio_postgres::Config = uri
+            .parse()
+            .map_err(|err| anyhow::anyhow!(infra_db_messages::postgres::invalid_config(err)))?;
+        let connector = PgConnector::new(config, Self::detect_connection_mode(uri))
+            .with_module_statement_timeout(settings.module_statement_timeout);
+        let connect = Self::connect_fn(&connector);
         Ok(Self {
-            uri: Arc::new(uri.to_string()),
-            query_timeout: timeout,
-            connection_mode,
+            query_timeout,
+            connector,
+            pool: PgPool::new(settings, connect),
         })
+    }
+
+    fn connect_fn(connector: &PgConnector) -> ConnectFn {
+        let connect_with = connector.clone();
+        Arc::new(move |key: &DbPoolKey| {
+            let connector = connect_with.clone();
+            let key = key.clone();
+            Box::pin(async move { connector.connect(&key).await })
+        })
+    }
+
+    /// Sets the `statement_timeout` of module pools
+    /// (`db.module_statement_timeout_ms`; `None` turns it off). Applies to
+    /// connections opened afterwards, so call it right after construction.
+    #[must_use]
+    pub fn with_module_statement_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.connector = self.connector.with_module_statement_timeout(timeout);
+        self.pool.set_connect(Self::connect_fn(&self.connector));
+        self
+    }
+
+    /// Empties every pooled connection's statement cache (after migrations).
+    pub fn invalidate_statement_caches(&self) {
+        self.pool.invalidate_statement_caches();
     }
 
     /// Detect if the URI uses a Unix socket or TCP connection
@@ -73,85 +302,6 @@ impl PostgresAdapter {
         ConnectionMode::Tcp
     }
 
-    async fn connect(&self) -> DbResult<tokio_postgres::Client> {
-        let config: tokio_postgres::Config = self
-            .uri
-            .parse()
-            .map_err(|err| DbError::connection(infra_db_messages::postgres::invalid_config(err)))?;
-
-        match &self.connection_mode {
-            ConnectionMode::Tcp => {
-                // Standard TCP connection
-                let (client, connection) = Self::await_pg(
-                    self.query_timeout,
-                    config.connect(NoTls),
-                    || DbError::connection(infra_db_messages::postgres::connection_timeout()),
-                    DbError::connection,
-                )
-                .await?;
-                tokio::spawn(async move {
-                    if let Err(err) = connection.await {
-                        tracing::error!(error = %err, "postgres connection terminated");
-                    }
-                });
-                Ok(client)
-            }
-            ConnectionMode::UnixSocket(socket_dir) => {
-                // Unix socket connection
-                self.connect_unix_socket(&config, socket_dir).await
-            }
-        }
-    }
-
-    /// Connect via Unix socket
-    async fn connect_unix_socket(
-        &self,
-        config: &tokio_postgres::Config,
-        socket_dir: &Path,
-    ) -> DbResult<tokio_postgres::Client> {
-        use tokio::net::UnixStream;
-
-        // PostgreSQL socket naming convention: .s.PGSQL.<port>
-        // Default port is 5432 if not specified
-        let port = config.get_ports().first().copied().unwrap_or(5432);
-        let socket_path = socket_dir.join(format!(".s.PGSQL.{}", port));
-
-        // Connect to the Unix socket
-        let socket = UnixStream::connect(&socket_path).await.map_err(|err| {
-            DbError::connection(format!(
-                "failed to connect to Unix socket at {}: {}",
-                socket_path.display(),
-                err
-            ))
-        })?;
-
-        // Use connect_raw with the socket
-        let (client, connection) = config.connect_raw(socket, NoTls).await.map_err(|err| {
-            DbError::connection(format!("postgres handshake failed on Unix socket: {}", err))
-        })?;
-
-        tokio::spawn(async move {
-            if let Err(err) = connection.await {
-                tracing::error!(error = %err, "postgres unix socket connection terminated");
-            }
-        });
-
-        Ok(client)
-    }
-
-    async fn exec_simple_query(&self, statement: &str) -> DbResult<Vec<SimpleQueryMessage>> {
-        let client = self.connect().await?;
-        let fut = client.simple_query(statement);
-        let messages = Self::await_pg(
-            self.query_timeout,
-            fut,
-            || DbError::query(infra_db_messages::postgres::query_timeout()),
-            DbError::query,
-        )
-        .await?;
-        Ok(messages)
-    }
-
     async fn await_pg<T, Fut, TimeoutFn, MapErr>(
         timeout: Option<Duration>,
         fut: Fut,
@@ -171,6 +321,243 @@ impl PostgresAdapter {
         } else {
             fut.await.map_err(map_err)
         }
+    }
+
+    /// Runs `fut` with the query timeout. A timeout is a connection failure:
+    /// the server is asked to cancel and the connection is not reused.
+    async fn timed<T, Fut>(&self, client: &Client, fut: Fut) -> Result<T, Failure>
+    where
+        Fut: Future<Output = Result<T, Failure>>,
+    {
+        let Some(limit) = self.query_timeout else {
+            return fut.await;
+        };
+        match time::timeout(limit, fut).await {
+            Ok(result) => result,
+            Err(_) => {
+                self.connector.cancel_in_background(client);
+                Err(Failure::Connection(DbError::query(
+                    infra_db_messages::postgres::query_timeout(),
+                )))
+            }
+        }
+    }
+
+    /// The cached prepared statement for `sql` on this connection, prepared
+    /// on first use.
+    async fn statement(&self, pooled: &mut PooledConn, sql: &str) -> Result<Statement, Failure> {
+        let cached = pooled
+            .conn()
+            .map_err(Failure::Connection)?
+            .statements
+            .get(sql);
+        pooled.record_cache(cached.is_some());
+        if let Some(statement) = cached {
+            return Ok(statement);
+        }
+        let conn = pooled.conn().map_err(Failure::Connection)?;
+        let client = &conn.client;
+        let statement = self
+            .timed(client, async {
+                client.prepare(sql).await.map_err(classify_pg_error)
+            })
+            .await?;
+        pooled
+            .conn()
+            .map_err(Failure::Connection)?
+            .statements
+            .insert(sql, statement.clone());
+        Ok(statement)
+    }
+
+    async fn prepared_once(
+        &self,
+        pooled: &mut PooledConn,
+        ctx: &DbCallContext,
+        sql: &str,
+        params: &[DbValue],
+        shape: Shape,
+    ) -> Result<Executed, Failure> {
+        let statement = self.statement(pooled, sql).await?;
+        let bindings =
+            Self::prepare_typed_params(params, statement.params()).map_err(Failure::Statement)?;
+        let refs: Vec<&(dyn ToSql + Sync)> = bindings
+            .iter()
+            .map(|binding| binding.as_binding())
+            .collect();
+        let conn = pooled.conn().map_err(Failure::Connection)?;
+        let client = &conn.client;
+        let run = async {
+            match shape {
+                Shape::Rows => client.query(&statement, &refs).await.map(Executed::Rows),
+                Shape::AffectedRows => client
+                    .execute(&statement, &refs)
+                    .await
+                    .map(Executed::Affected),
+            }
+        };
+        let result = match ctx.access {
+            DbAccess::ReadWrite => {
+                self.timed(client, async { run.await.map_err(classify_pg_error) })
+                    .await
+            }
+            DbAccess::ReadOnly => self.timed(client, Self::read_only(client, run)).await,
+        };
+        if let Err(Failure::StalePlan(_)) = &result {
+            conn.statements.remove(sql);
+            pooled.record_invalidation();
+        }
+        result
+    }
+
+    async fn simple_once(
+        &self,
+        pooled: &mut PooledConn,
+        ctx: &DbCallContext,
+        sql: &str,
+    ) -> Result<Executed, Failure> {
+        let conn = pooled.conn().map_err(Failure::Connection)?;
+        let client = &conn.client;
+        let run = async { client.simple_query(sql).await.map(Executed::Simple) };
+        match ctx.access {
+            DbAccess::ReadWrite => {
+                self.timed(client, async { run.await.map_err(classify_pg_error) })
+                    .await
+            }
+            DbAccess::ReadOnly => self.timed(client, Self::read_only(client, run)).await,
+        }
+    }
+
+    /// `run` inside `BEGIN READ ONLY` … `COMMIT`, pipelined into one round
+    /// trip. A failed `run` makes the `COMMIT` a rollback; nothing is left
+    /// open either way.
+    async fn read_only<Fut>(client: &Client, run: Fut) -> Result<Executed, Failure>
+    where
+        Fut: Future<Output = Result<Executed, tokio_postgres::Error>>,
+    {
+        let (begin, result, commit) = tokio::join!(
+            client.batch_execute("BEGIN READ ONLY"),
+            run,
+            client.batch_execute("COMMIT")
+        );
+        if let Err(err) = begin {
+            return Err(Failure::Connection(DbError::query(err)));
+        }
+        let executed = result.map_err(classify_pg_error)?;
+        commit.map_err(|err| Failure::Connection(DbError::query(err)))?;
+        Ok(executed)
+    }
+
+    /// Leaves the connection clean for the next caller of its pool, or marks
+    /// it for closing.
+    async fn settle(
+        &self,
+        pooled: &mut PooledConn,
+        ctx: &DbCallContext,
+        failure: Option<&Failure>,
+    ) {
+        if matches!(failure, Some(Failure::Connection(_))) {
+            pooled.discard();
+            return;
+        }
+        match ctx.session {
+            DbSessionEffect::None => {}
+            DbSessionEffect::Unrecoverable => pooled.discard(),
+            DbSessionEffect::Resettable => {
+                let Ok(conn) = pooled.conn() else {
+                    return;
+                };
+                let connection = conn.id;
+                let reset = time::timeout(
+                    Duration::from_secs(2),
+                    conn.client.batch_execute(SESSION_RESET),
+                )
+                .await;
+                pooled.record_reset();
+                if !matches!(reset, Ok(Ok(()))) {
+                    tracing::debug!(
+                        connection,
+                        "postgres session reset failed, closing the connection"
+                    );
+                    pooled.discard();
+                }
+            }
+        }
+    }
+
+    /// One statement on behalf of `ctx`, through the pool. Retries once,
+    /// on a new connection, when that is safe: a stale cached plan (nothing
+    /// ran), or a broken reused connection for a read-only statement.
+    async fn run(
+        &self,
+        ctx: &DbCallContext,
+        sql: &str,
+        params: Option<&[DbValue]>,
+        shape: Shape,
+    ) -> DbResult<Executed> {
+        let mut attempt = 0u8;
+        loop {
+            attempt = attempt.saturating_add(1);
+            let mut pooled = self.pool.get(&ctx.pool).await?;
+            let outcome = match params {
+                Some(params) => {
+                    self.prepared_once(&mut pooled, ctx, sql, params, shape)
+                        .await
+                }
+                None => self.simple_once(&mut pooled, ctx, sql).await,
+            };
+            match outcome {
+                Ok(executed) => {
+                    self.settle(&mut pooled, ctx, None).await;
+                    return Ok(executed);
+                }
+                Err(failure) => {
+                    let retry = attempt == 1
+                        && match &failure {
+                            Failure::StalePlan(_) => true,
+                            Failure::Connection(_) => {
+                                pooled.reused() && ctx.access == DbAccess::ReadOnly
+                            }
+                            Failure::Statement(_) => false,
+                        };
+                    self.settle(&mut pooled, ctx, Some(&failure)).await;
+                    if retry {
+                        pooled.record_retry();
+                        drop(pooled);
+                        continue;
+                    }
+                    return Err(failure.into_error());
+                }
+            }
+        }
+    }
+
+    async fn exec_simple_query(
+        &self,
+        ctx: &DbCallContext,
+        statement: &str,
+    ) -> DbResult<Vec<SimpleQueryMessage>> {
+        match self.run(ctx, statement, None, Shape::Rows).await? {
+            Executed::Simple(messages) => Ok(messages),
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    /// A host-internal query with typed rows (catalog lookups).
+    async fn host_rows(&self, sql: &str, params: &[&(dyn ToSql + Sync)]) -> DbResult<Vec<Row>> {
+        let mut pooled = self.pool.get(&DbPoolKey::host()).await?;
+        let conn = pooled.conn()?;
+        let result = Self::await_pg(
+            self.query_timeout,
+            conn.client.query(sql, params),
+            || DbError::query(infra_db_messages::postgres::query_timeout()),
+            DbError::query,
+        )
+        .await;
+        if result.is_err() {
+            pooled.discard();
+        }
+        result
     }
 
     fn map_simple_messages(messages: Vec<SimpleQueryMessage>) -> DbResult<Vec<DbExecutionResult>> {
@@ -639,10 +1026,20 @@ fn split_table_reference(input: &str) -> (&str, &str) {
     }
 }
 
+/// Host-internal catalog lookups leave nothing behind.
+fn host_catalog_context() -> DbCallContext {
+    DbCallContext {
+        session: DbSessionEffect::None,
+        ..DbCallContext::host()
+    }
+}
+
 #[async_trait::async_trait]
 impl DbAdminPort for PostgresAdapter {
     async fn ping(&self) -> DbResult<()> {
-        let messages = self.exec_simple_query("SELECT 1;").await?;
+        let messages = self
+            .exec_simple_query(&host_catalog_context(), "SELECT 1;")
+            .await?;
         if messages.is_empty() {
             return Err(DbError::query(
                 infra_db_messages::postgres::empty_ping_response(),
@@ -652,29 +1049,14 @@ impl DbAdminPort for PostgresAdapter {
     }
 
     async fn simple_query(&self, statement: &str) -> DbResult<Vec<DbExecutionResult>> {
-        let trimmed = statement.trim();
-        if trimmed.is_empty() {
-            return Err(DbError::invalid_input(
-                infra_db_messages::postgres::statement_empty(),
-            ));
-        }
-        let messages = self.exec_simple_query(trimmed).await?;
-        Self::map_simple_messages(messages)
+        self.simple_query_in(&DbCallContext::host(), statement)
+            .await
     }
 
     async fn list_tables(&self) -> DbResult<Vec<DbTable>> {
         const SQL: &str = "SELECT table_schema, table_name, table_type FROM information_schema.tables \
             WHERE table_schema NOT IN ('pg_catalog', 'information_schema') ORDER BY table_schema, table_name";
-        let client = self.connect().await?;
-        let empty_params: Vec<&(dyn ToSql + Sync)> = Vec::new();
-        let fut = client.query(SQL, &empty_params);
-        let rows = Self::await_pg(
-            self.query_timeout,
-            fut,
-            || DbError::query(infra_db_messages::postgres::query_timeout()),
-            DbError::query,
-        )
-        .await?;
+        let rows = self.host_rows(SQL, &[]).await?;
         let mut result = Vec::with_capacity(rows.len());
         for row in rows {
             let schema: String = row.get(0);
@@ -691,22 +1073,13 @@ impl DbAdminPort for PostgresAdapter {
 
     async fn describe_table(&self, table: &str) -> DbResult<DbTableSchema> {
         let (schema, name) = split_table_reference(table);
-        let client = self.connect().await?;
         const SQL: &str = "SELECT column_name, data_type, is_nullable, column_default \
             FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 ORDER BY ordinal_position";
         let schema_owned = schema.to_string();
         let name_owned = name.to_string();
         let schema_param: &(dyn ToSql + Sync) = &schema_owned;
         let name_param: &(dyn ToSql + Sync) = &name_owned;
-        let params: Vec<&(dyn ToSql + Sync)> = vec![schema_param, name_param];
-        let fut = client.query(SQL, &params);
-        let rows = Self::await_pg(
-            self.query_timeout,
-            fut,
-            || DbError::query(infra_db_messages::postgres::query_timeout()),
-            DbError::query,
-        )
-        .await?;
+        let rows = self.host_rows(SQL, &[schema_param, name_param]).await?;
         if rows.is_empty() {
             return Err(DbError::InvalidInput {
                 message: infra_db_messages::postgres::table_not_found(&schema_owned, &name_owned),
@@ -740,53 +1113,59 @@ impl DbAdminPort for PostgresAdapter {
         statement: &str,
         params: &[DbValue],
     ) -> DbResult<Vec<DbExecutionResult>> {
-        let client = self.connect().await?;
-        let stmt = Self::await_pg(
-            self.query_timeout,
-            client.prepare(statement),
-            || DbError::query(infra_db_messages::postgres::query_timeout()),
-            DbError::query,
-        )
-        .await?;
-        let bindings = Self::prepare_typed_params(params, stmt.params())?;
-        let refs: Vec<&(dyn ToSql + Sync)> = bindings
-            .iter()
-            .map(|binding| binding.as_binding())
-            .collect();
-        let fut = client.query(&stmt, &refs);
-        let rows = Self::await_pg(
-            self.query_timeout,
-            fut,
-            || DbError::query(infra_db_messages::postgres::query_timeout()),
-            DbError::query,
-        )
-        .await?;
-        Self::map_rows(rows)
+        self.prepared_query_in(&DbCallContext::host(), statement, params)
+            .await
     }
 
     async fn prepared_execute(&self, statement: &str, params: &[DbValue]) -> DbResult<u64> {
-        let client = self.connect().await?;
-        let stmt = Self::await_pg(
-            self.query_timeout,
-            client.prepare(statement),
-            || DbError::query(infra_db_messages::postgres::query_timeout()),
-            DbError::query,
-        )
-        .await?;
-        let bindings = Self::prepare_typed_params(params, stmt.params())?;
-        let refs: Vec<&(dyn ToSql + Sync)> = bindings
-            .iter()
-            .map(|binding| binding.as_binding())
-            .collect();
-        let fut = client.execute(&stmt, &refs);
-        let affected = Self::await_pg(
-            self.query_timeout,
-            fut,
-            || DbError::query(infra_db_messages::postgres::query_timeout()),
-            DbError::query,
-        )
-        .await?;
-        Ok(affected)
+        self.prepared_execute_in(&DbCallContext::host(), statement, params)
+            .await
+    }
+
+    async fn simple_query_in(
+        &self,
+        ctx: &DbCallContext,
+        statement: &str,
+    ) -> DbResult<Vec<DbExecutionResult>> {
+        let trimmed = statement.trim();
+        if trimmed.is_empty() {
+            return Err(DbError::invalid_input(
+                infra_db_messages::postgres::statement_empty(),
+            ));
+        }
+        let messages = self.exec_simple_query(ctx, trimmed).await?;
+        Self::map_simple_messages(messages)
+    }
+
+    async fn prepared_query_in(
+        &self,
+        ctx: &DbCallContext,
+        statement: &str,
+        params: &[DbValue],
+    ) -> DbResult<Vec<DbExecutionResult>> {
+        match self.run(ctx, statement, Some(params), Shape::Rows).await? {
+            Executed::Rows(rows) => Self::map_rows(rows),
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    async fn prepared_execute_in(
+        &self,
+        ctx: &DbCallContext,
+        statement: &str,
+        params: &[DbValue],
+    ) -> DbResult<u64> {
+        match self
+            .run(ctx, statement, Some(params), Shape::AffectedRows)
+            .await?
+        {
+            Executed::Affected(count) => Ok(count),
+            _ => Ok(0),
+        }
+    }
+
+    fn pool_status(&self) -> Option<DbPoolStatus> {
+        Some(self.pool.status())
     }
 }
 
@@ -862,3 +1241,7 @@ mod tests {
         assert!(msg.contains("UUID parameter"), "unexpected error: {msg}");
     }
 }
+
+#[cfg(test)]
+#[path = "../../../../../tests/unit/infra/db/postgres_pool_tests.rs"]
+mod pool_tests;

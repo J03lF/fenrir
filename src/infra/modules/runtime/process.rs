@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use axum::{
     body::Body,
     extract::State,
-    http::{header, Request, StatusCode, Uri},
+    http::{header, HeaderMap, HeaderName, HeaderValue, Request, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::{any, get},
     Json, Router,
@@ -11,7 +11,8 @@ use http_body_util::BodyExt;
 use reqwest::{Client as HttpClient, Method as ReqwestMethod};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -108,13 +109,48 @@ struct RuntimeStaticSiteSection {
     asset_roots: Vec<String>,
     #[serde(default)]
     index_file: Option<String>,
+    /// Extra response headers the module wants on its HTML documents
+    /// (index.html and the SPA fallback), e.g. `Content-Security-Policy`.
+    /// They override a host default of the same name. Headers the host owns
+    /// (see `STATIC_HOST_OWNED_HEADERS`) are ignored.
+    #[serde(default)]
+    response_headers: BTreeMap<String, String>,
 }
+
+/// Security headers on every file the static-site runtime serves.
+const STATIC_DEFAULT_HEADERS: &[(&str, &str)] = &[
+    ("x-content-type-options", "nosniff"),
+    ("referrer-policy", "same-origin"),
+    (
+        "permissions-policy",
+        "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+    ),
+    ("x-frame-options", "DENY"),
+    ("cross-origin-opener-policy", "same-origin"),
+];
+
+/// Headers that `response_headers` from a module manifest may not set,
+/// because the static handler derives them itself.
+const STATIC_HOST_OWNED_HEADERS: &[&str] = &[
+    "cache-control",
+    "connection",
+    "content-length",
+    "content-type",
+    "etag",
+    "last-modified",
+    "transfer-encoding",
+];
+
+const STATIC_CACHE_IMMUTABLE: &str = "public, max-age=31536000, immutable";
+const STATIC_CACHE_REVALIDATE: &str = "no-cache";
 
 #[derive(Debug, Clone)]
 struct StaticSiteProfile {
     asset_root: PathBuf,
     index_file: PathBuf,
     services_manifest: Option<PathBuf>,
+    /// Module-supplied headers for HTML responses, already validated.
+    html_headers: Vec<(HeaderName, HeaderValue)>,
 }
 
 impl StaticSiteProfile {
@@ -124,7 +160,46 @@ impl StaticSiteProfile {
             asset_root,
             index_file,
             services_manifest,
+            html_headers: Vec::new(),
         }
+    }
+
+    /// Attach the manifest's `response_headers`. Invalid names or values and
+    /// host-owned headers are skipped with a warning instead of failing the
+    /// module start.
+    fn with_response_headers(
+        mut self,
+        module_id: &ModuleId,
+        raw: &BTreeMap<String, String>,
+    ) -> Self {
+        self.html_headers = raw
+            .iter()
+            .filter_map(|(name, value)| {
+                let parsed = HeaderName::from_bytes(name.trim().as_bytes())
+                    .ok()
+                    .zip(HeaderValue::from_str(value.trim()).ok());
+                match parsed {
+                    Some((name, _)) if STATIC_HOST_OWNED_HEADERS.contains(&name.as_str()) => {
+                        warn!(
+                            module_id = %module_id,
+                            header = %name,
+                            "static_site.response_headers: header is set by the host, ignored"
+                        );
+                        None
+                    }
+                    Some(pair) => Some(pair),
+                    None => {
+                        warn!(
+                            module_id = %module_id,
+                            header = %name,
+                            "static_site.response_headers: invalid header name or value, ignored"
+                        );
+                        None
+                    }
+                }
+            })
+            .collect();
+        self
     }
 
     fn root(&self) -> &Path {
@@ -686,7 +761,10 @@ impl ProcessModuleRuntime {
                     .parent()
                     .map(Path::to_path_buf)
                     .unwrap_or_else(|| module_path.to_path_buf());
-                return Ok(Some(StaticSiteProfile::new(root, resolved)));
+                return Ok(Some(
+                    StaticSiteProfile::new(root, resolved)
+                        .with_response_headers(module_id, &static_cfg.response_headers),
+                ));
             } else {
                 return Err(ModuleRuntimeError::StartFailed {
                     module_id: module_id.to_string(),
@@ -714,7 +792,9 @@ impl ProcessModuleRuntime {
             }
             let candidate = module_path.join(trimmed);
             if let Some(profile) = Self::build_profile_from_root(&candidate, index_name) {
-                return Ok(Some(profile));
+                return Ok(Some(
+                    profile.with_response_headers(module_id, &static_cfg.response_headers),
+                ));
             }
         }
         Err(ModuleRuntimeError::StartFailed {
@@ -1812,6 +1892,7 @@ struct StaticRouterState {
     root: Arc<PathBuf>,
     index: Arc<PathBuf>,
     services_manifest: Option<Arc<PathBuf>>,
+    html_headers: Arc<Vec<(HeaderName, HeaderValue)>>,
     diagnostics: Arc<ServiceDiagnostics>,
     metric_id: Arc<String>,
     control_plane_base: Arc<String>,
@@ -1834,6 +1915,7 @@ impl StaticRouterState {
             root: Arc::new(profile.asset_root),
             index: Arc::new(profile.index_file),
             services_manifest: profile.services_manifest.map(Arc::new),
+            html_headers: Arc::new(profile.html_headers),
             diagnostics,
             metric_id,
             control_plane_base: Arc::new(control_plane_base),
@@ -2166,14 +2248,25 @@ fn default_static_services_payload(module: &str) -> Value {
     })
 }
 
-async fn static_asset_handler(State(state): State<StaticRouterState>, uri: Uri) -> Response {
+async fn static_asset_handler(
+    State(state): State<StaticRouterState>,
+    uri: Uri,
+    request_headers: HeaderMap,
+) -> Response {
     let started = Instant::now();
     let mut success = false;
+    let if_none_match = request_headers.get(header::IF_NONE_MATCH);
     let response = if let Some(path) = state.resolve_asset(uri.path()) {
         match fs::read(&path).await {
             Ok(bytes) => {
                 success = true;
-                build_static_response(bytes, &path)
+                build_static_response(
+                    bytes,
+                    &path,
+                    file_modified(&path).await,
+                    &state.html_headers,
+                    if_none_match,
+                )
             }
             Err(err) => {
                 let error_msg = format!("Failed to read asset '{}': {}", path.display(), err);
@@ -2191,7 +2284,13 @@ async fn static_asset_handler(State(state): State<StaticRouterState>, uri: Uri) 
         match fs::read(state.index()).await {
             Ok(bytes) => {
                 success = true;
-                build_static_response(bytes, state.index())
+                build_static_response(
+                    bytes,
+                    state.index(),
+                    file_modified(state.index()).await,
+                    &state.html_headers,
+                    if_none_match,
+                )
             }
             Err(err) => {
                 let error_msg = format!("index.html missing or unreadable: {}", err);
@@ -2224,26 +2323,125 @@ fn sanitize_request_path(path: &str) -> PathBuf {
     buf
 }
 
-fn build_static_response(bytes: Vec<u8>, path: &Path) -> Response {
+/// Build the response for a static file (or the SPA fallback `index.html`).
+///
+/// - Every response carries `STATIC_DEFAULT_HEADERS`, an `ETag` (content
+///   hash) and, when known, `Last-Modified`.
+/// - HTML responses additionally carry the module's `response_headers`.
+/// - Only content-hashed build outputs are cached as `immutable`; everything
+///   else (HTML, i18n JSON, unhashed scripts, icons) is `no-cache`, i.e. the
+///   browser revalidates and gets a `304` when the `ETag` still matches.
+fn build_static_response(
+    bytes: Vec<u8>,
+    path: &Path,
+    modified: Option<SystemTime>,
+    html_headers: &[(HeaderName, HeaderValue)],
+    if_none_match: Option<&HeaderValue>,
+) -> Response {
     let content_type = content_type_for(path);
-    let cache_control = if content_type.starts_with("text/html") {
-        "no-cache"
+    let is_html = content_type.starts_with("text/html");
+    let cache_control = if !is_html && is_content_hashed(path) {
+        STATIC_CACHE_IMMUTABLE
     } else {
-        "public, max-age=31536000, immutable"
+        STATIC_CACHE_REVALIDATE
     };
+    let etag = static_etag(&bytes);
 
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, content_type)
-        .header(header::CACHE_CONTROL, cache_control)
-        .body(Body::from(bytes))
-        .unwrap_or_else(|err| {
-            error!(error = %err, "failed to build static asset response");
-            Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Body::from("internal server error"))
-                .unwrap()
-        })
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(cache_control),
+    );
+    if let Ok(value) = HeaderValue::from_str(&etag) {
+        headers.insert(header::ETAG, value);
+    }
+    if let Some(value) = modified.and_then(http_date) {
+        headers.insert(header::LAST_MODIFIED, value);
+    }
+    for (name, value) in STATIC_DEFAULT_HEADERS {
+        headers.insert(
+            HeaderName::from_static(name),
+            HeaderValue::from_static(value),
+        );
+    }
+    if is_html {
+        for (name, value) in html_headers {
+            headers.insert(name.clone(), value.clone());
+        }
+    }
+
+    let not_modified = if_none_match.is_some_and(|value| etag_matches(value, &etag));
+    let mut response = if not_modified {
+        let mut response = Response::new(Body::empty());
+        *response.status_mut() = StatusCode::NOT_MODIFIED;
+        response
+    } else {
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+        Response::new(Body::from(bytes))
+    };
+    *response.headers_mut() = headers;
+    response
+}
+
+/// True for file names that carry a build content hash, i.e. that change name
+/// whenever their content changes and can therefore be cached forever.
+///
+/// Equivalent regexes on the file name:
+/// - Angular application builder (esbuild): `^.+-[A-Z0-9]{8}\.[^.]+$`
+///   (`chunk-ABAH6MG5.js`, `styles-BAY5EODU.css`, `media/font-XYZ12345.woff2`)
+/// - Angular browser builder (webpack): `^.+\.([0-9a-f]{16}|[0-9a-f]{20})\.[^.]+$`
+///   (`main.0123456789abcdef.js`, `font.0123456789abcdef0123.woff2`)
+///
+/// `theme-boot.js`, `en.json`, `favicon.ico`, `logo.svg` and source maps
+/// (`chunk-ABAH6MG5.js.map`) do not match.
+fn is_content_hashed(path: &Path) -> bool {
+    if path.extension().is_none() {
+        return false;
+    }
+    let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+        return false;
+    };
+    let esbuild = stem.rsplit_once('-').is_some_and(|(name, hash)| {
+        !name.is_empty()
+            && hash.len() == 8
+            && hash
+                .bytes()
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+    });
+    let webpack = stem.rsplit_once('.').is_some_and(|(name, hash)| {
+        !name.is_empty()
+            && matches!(hash.len(), 16 | 20)
+            && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    });
+    esbuild || webpack
+}
+
+/// Strong ETag from the first 128 bits of the SHA-256 of the body.
+fn static_etag(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    format!("\"{}\"", hex::encode(&digest[..16]))
+}
+
+/// `If-None-Match` uses the weak comparison (RFC 9110, 13.1.2).
+fn etag_matches(if_none_match: &HeaderValue, etag: &str) -> bool {
+    let Ok(value) = if_none_match.to_str() else {
+        return false;
+    };
+    value.split(',').map(str::trim).any(|candidate| {
+        candidate == "*" || candidate.strip_prefix("W/").unwrap_or(candidate) == etag
+    })
+}
+
+fn http_date(time: SystemTime) -> Option<HeaderValue> {
+    let format = time::macros::format_description!(
+        "[weekday repr:short], [day] [month repr:short] [year] [hour]:[minute]:[second] GMT"
+    );
+    let formatted = OffsetDateTime::from(time).format(&format).ok()?;
+    HeaderValue::from_str(&formatted).ok()
+}
+
+async fn file_modified(path: &Path) -> Option<SystemTime> {
+    fs::metadata(path).await.ok()?.modified().ok()
 }
 
 fn content_type_for(path: &Path) -> &'static str {

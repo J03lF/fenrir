@@ -36,5 +36,9 @@ export AUTH_DEV_PIN_SINK=/Users/jfurocket/Documents/personal/modules/runtime/aut
 # Shared service token auth-service -> notification-service (0600 file outside git).
 export NOTIFY_INTERNAL_SERVICE_AUTH_TOKEN_FILE=/Users/jfurocket/Documents/personal/modules/runtime/secrets/notify-service.token
 export AUTH_NOTIFICATION_SERVICE_TOKEN_FILE=/Users/jfurocket/Documents/personal/modules/runtime/secrets/notify-service.token
+# Step 3.6 (2026-10-24): shared service token athene-api -> athene -> auth-service
+# (0600 file outside git). Enforce is the default; *_ENFORCE_INTERNAL_SERVICE_AUTH=false is the rollback.
+export ATHENE_INTERNAL_SERVICE_AUTH_TOKEN_FILE=/Users/jfurocket/Documents/personal/modules/runtime/secrets/athene-internal.token
+export AUTH_INTERNAL_SERVICE_AUTH_TOKEN_FILE=/Users/jfurocket/Documents/personal/modules/runtime/secrets/athene-internal.token
 # athene-api: Swagger, OpenAPI and /metrics/internal for the host scrape (ignored in production).
 export ATHENE_API_DEV_ENDPOINTS=true

@@ -42,3 +42,7 @@ export ATHENE_INTERNAL_SERVICE_AUTH_TOKEN_FILE=/Users/jfurocket/Documents/person
 export AUTH_INTERNAL_SERVICE_AUTH_TOKEN_FILE=/Users/jfurocket/Documents/personal/modules/runtime/secrets/athene-internal.token
 # athene-api: Swagger, OpenAPI and /metrics/internal for the host scrape (ignored in production).
 export ATHENE_API_DEV_ENDPOINTS=true
+# athene-api: open live streams per caller. Every local client shares the caller
+# ip:127.0.0.1 (EventSource sends no bearer), so the default 16 is the whole machine.
+# Dev only, until stream slots are keyed per session (ROADMAP 3.6d).
+export ATHENE_API_RATE_LIMIT_STREAM_CONCURRENT=64

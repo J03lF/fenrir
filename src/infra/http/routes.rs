@@ -43,6 +43,7 @@ use crate::domain::module::{
     ModuleInstallStatus, ModuleManifest, ModuleRegistryError, ModuleRuntimeError,
     ModuleRuntimeKind, ModuleSearchQuery, ModuleServiceError, ModuleStorageError, ModuleVersion,
 };
+use crate::infra::db::runtime::RuntimeStatus;
 use crate::infra::{logging, telemetry};
 use crate::security::auth::{AuthError, ControlPlaneAuthorizer, Role};
 use crate::security::identity::{IdentityProvider, IssueTokenRequest};
@@ -66,7 +67,8 @@ use crate::services::{
 };
 use crate::utils::messages::infra::http::{self as http_messages, ProblemText};
 use crate::utils::{
-    format_offset_datetime, format_optional_offset_datetime, system_time_to_rfc3339,
+    format_offset_datetime, format_optional_offset_datetime, redact_uri_password,
+    redact_uris_in_text, system_time_to_rfc3339,
 };
 use fenrir_module_kit::{ModuleTokenExchangeRequest, ModuleTokenExchangeResponse};
 
@@ -3688,10 +3690,12 @@ async fn db_runtime_status(
     headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    // viewer role reicht für Status
-    if let Err(problem) = authorize(&state.auth, &state.services, &headers, Role::Viewer) {
-        return problem.into_response();
-    }
+    // Viewer is enough for the status itself. The URI is always redacted;
+    // `logs` (postgres output can carry statement text) is admin only.
+    let role = match authorize(&state.auth, &state.services, &headers, Role::Viewer) {
+        Ok(role) => role,
+        Err(problem) => return problem.into_response(),
+    };
     let tail = params
         .get("tail")
         .and_then(|v| v.parse::<usize>().ok())
@@ -3699,26 +3703,13 @@ async fn db_runtime_status(
     let Some(status) = state.services.db_runtime_status() else {
         return (StatusCode::NOT_FOUND, "not found".to_string()).into_response();
     };
-    let diag = state.services.diagnostics().snapshot("db-runtime");
-    let resp = DbRuntimeStatusResponse {
-        engine: status.engine.as_str().to_string(),
-        running: status.running,
-        adapter_status: status.adapter_status.as_str().to_string(),
-        uri: status.connector_uri,
-        port: status.port,
-        pid: status.pid,
-        last_health: status.last_health.map(format_offset_datetime),
-        last_checkpoint: status.last_checkpoint.map(format_offset_datetime),
-        snapshot_updated_at: status.snapshot_updated_at.map(format_offset_datetime),
-        last_backup_path: status.last_backup_path,
-        last_backup_state_path: status.last_backup_state_path,
-        applied_migrations: status.applied_migrations,
-        logs: if tail > 0 {
-            Some(state.services.db_runtime_logs(tail))
-        } else {
-            None
-        },
-        diagnostics: diag.map(|d| ServiceHealthView {
+    let logs = (tail > 0 && role.satisfies(DB_RUNTIME_SECRET_ROLE))
+        .then(|| state.services.db_runtime_logs(tail));
+    let diagnostics = state
+        .services
+        .diagnostics()
+        .snapshot("db-runtime")
+        .map(|d| ServiceHealthView {
             state: if d.error_rate_pct.unwrap_or(0.0) > 0.0 {
                 "degraded"
             } else {
@@ -3728,9 +3719,44 @@ async fn db_runtime_status(
             latency_p50_ms: d.latency_p50_ms,
             latency_p95_ms: d.latency_p95_ms,
             error_rate_pct: d.error_rate_pct,
-        }),
-    };
-    Json(resp).into_response()
+        });
+    Json(db_runtime_status_response(status, role, logs, diagnostics)).into_response()
+}
+
+/// Role required for db-runtime fields that can carry secrets (postgres logs).
+const DB_RUNTIME_SECRET_ROLE: Role = Role::Admin;
+
+/// Builds the db-runtime status body. The connection URI never carries the
+/// password, and `logs` is dropped unless `role` is admin.
+fn db_runtime_status_response(
+    status: RuntimeStatus,
+    role: Role,
+    logs: Option<Vec<String>>,
+    diagnostics: Option<ServiceHealthView>,
+) -> DbRuntimeStatusResponse {
+    let logs = logs
+        .filter(|_| role.satisfies(DB_RUNTIME_SECRET_ROLE))
+        .map(redact_log_lines);
+    DbRuntimeStatusResponse {
+        engine: status.engine.as_str().to_string(),
+        running: status.running,
+        adapter_status: status.adapter_status.as_str().to_string(),
+        uri: status.connector_uri.as_deref().map(redact_uri_password),
+        port: status.port,
+        pid: status.pid,
+        last_health: status.last_health.map(format_offset_datetime),
+        last_checkpoint: status.last_checkpoint.map(format_offset_datetime),
+        snapshot_updated_at: status.snapshot_updated_at.map(format_offset_datetime),
+        last_backup_path: status.last_backup_path,
+        last_backup_state_path: status.last_backup_state_path,
+        applied_migrations: status.applied_migrations,
+        logs,
+        diagnostics,
+    }
+}
+
+fn redact_log_lines(lines: Vec<String>) -> Vec<String> {
+    lines.iter().map(|line| redact_uris_in_text(line)).collect()
 }
 
 async fn db_runtime_logs(
@@ -3738,15 +3764,21 @@ async fn db_runtime_logs(
     headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    // viewer role reicht für Logs
-    if let Err(problem) = authorize(&state.auth, &state.services, &headers, Role::Viewer) {
+    // Postgres output can carry statement text: admin only, like the
+    // `logs` field of the status response.
+    if let Err(problem) = authorize(
+        &state.auth,
+        &state.services,
+        &headers,
+        DB_RUNTIME_SECRET_ROLE,
+    ) {
         return problem.into_response();
     }
     let tail = params
         .get("tail")
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(50);
-    let logs = state.services.db_runtime_logs(tail.max(1));
+    let logs = redact_log_lines(state.services.db_runtime_logs(tail.max(1)));
     Json(logs).into_response()
 }
 
@@ -4426,3 +4458,75 @@ fn ensure_viewer_access(state: &HttpState, headers: &HeaderMap) -> Option<Respon
     None
 }
 const INDEX_HTML: &str = include_str!("../../../static/index.html");
+
+#[cfg(test)]
+mod db_runtime_status_tests {
+    use super::{db_runtime_status_response, RuntimeStatus};
+    use crate::config::EmbeddedEngineKind;
+    use crate::infra::db::runtime::state::AdapterHealthStatus;
+    use crate::security::auth::Role;
+
+    const PASSWORD: &str = "c2VjcmV0K3Bhc3N3b3JkPQ%3D%3D";
+
+    fn status() -> RuntimeStatus {
+        RuntimeStatus {
+            engine: EmbeddedEngineKind::Postgres,
+            running: true,
+            connector_uri: Some(format!(
+                "postgres://fenrir_embedded:{PASSWORD}@/postgres?host=/opt/run/db/socket"
+            )),
+            last_health: None,
+            port: Some(55432),
+            pid: Some(4242),
+            last_checkpoint: None,
+            applied_migrations: vec!["0001_init.sql".to_string()],
+            logs: Vec::new(),
+            adapter_status: AdapterHealthStatus::Ready,
+            snapshot_updated_at: None,
+            last_backup_path: None,
+            last_backup_state_path: None,
+        }
+    }
+
+    fn logs() -> Option<Vec<String>> {
+        Some(vec![
+            "postgres started (socket:/opt/run/db/socket, auth=scram-sha-256, pid=4242)".into(),
+            format!("probe failed for postgres://fenrir_embedded:{PASSWORD}@/postgres"),
+        ])
+    }
+
+    #[test]
+    fn status_never_contains_the_password() {
+        for role in [Role::Viewer, Role::Operator, Role::Admin] {
+            let body =
+                serde_json::to_string(&db_runtime_status_response(status(), role, logs(), None))
+                    .expect("serialize status");
+            assert!(
+                !body.contains(PASSWORD),
+                "{role:?} response leaks the password"
+            );
+            let json: serde_json::Value = serde_json::from_str(&body).expect("parse status");
+            assert_eq!(
+                json["uri"],
+                "postgres://fenrir_embedded:***@/postgres?host=/opt/run/db/socket"
+            );
+            assert_eq!(json["port"], 55432);
+            assert_eq!(json["adapter_status"], "ready");
+        }
+    }
+
+    #[test]
+    fn logs_are_admin_only() {
+        for role in [Role::Viewer, Role::Operator] {
+            let resp = db_runtime_status_response(status(), role, logs(), None);
+            assert!(resp.logs.is_none(), "{role:?} must not receive logs");
+        }
+        let admin = db_runtime_status_response(status(), Role::Admin, logs(), None);
+        let lines = admin.logs.expect("admin receives logs");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            lines[1],
+            "probe failed for postgres://fenrir_embedded:***@/postgres"
+        );
+    }
+}

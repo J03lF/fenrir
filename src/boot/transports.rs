@@ -1,5 +1,6 @@
 use std::{
     env,
+    future::Future,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -31,19 +32,23 @@ use super::context::BootContext;
 
 pub async fn start_transports(ctx: &BootContext) -> Result<()> {
     initialize_db_connector(ctx).await?;
-    let module_service = ctx.services.module_service();
-    if !ctx.config.modules.bootstrap.is_empty() {
-        match module_service.clone() {
-            Some(module_service) => {
-                bootstrap_modules(Arc::clone(&ctx.config), module_service).await;
-            }
-            None => {
-                warn!("{}", transport_messages::MODULE_SERVICE_NOT_ATTACHED);
-            }
-        }
+
+    // Modules call the control plane while they boot (`/modules/runtime/tokens`,
+    // service manifest publishing), so its listener is bound before the first
+    // module is spawned. `/health/ready` stays 503 until the modules have been
+    // started, as it did when the listener only came up after them.
+    let control_plane = ctx
+        .config
+        .server
+        .enable_http
+        .then(|| start_http_control_plane(ctx));
+    let hold_readiness = control_plane.is_some();
+    if hold_readiness {
+        telemetry::mark_not_ready();
     }
-    if let Some(service) = module_service {
-        service.ensure_all_running().await;
+    control_plane_before_modules(control_plane, start_modules(ctx)).await;
+    if hold_readiness {
+        telemetry::mark_ready();
     }
 
     let cfg = Arc::clone(&ctx.config);
@@ -65,32 +70,65 @@ pub async fn start_transports(ctx: &BootContext) -> Result<()> {
         }
     });
 
-    if ctx.config.server.enable_http {
-        let registry = ctx.services.registry();
-        registry.set_status(
-            HTTP_SERVICE_ID,
-            ServiceStatus::Starting,
-            Some(transport_messages::HTTP_STARTING_NOTE.to_string()),
-        );
-        let http_server = Arc::clone(&ctx.http_server);
-        tokio::spawn(async move {
-            if let Err(err) = http_server.start().await {
-                tracing::error!(
-                    error = %err,
-                    "{}",
-                    transport_messages::HTTP_SERVER_START_FAILED
-                );
-                registry.set_status(
-                    HTTP_SERVICE_ID,
-                    ServiceStatus::Failed,
-                    Some(transport_messages::http_start_failure_note(&err)),
-                );
-            }
-        });
-    }
     spawn_config_reloader(ctx)?;
     info!("{}", transport_messages::TRANSPORT_INITIALISATION_TRIGGERED);
     Ok(())
+}
+
+/// Binds the HTTP control plane. `HttpServer::start` returns once the
+/// listener is bound and serves requests from its own task, so the control
+/// plane accepts connections as soon as this resolves. A failure is logged
+/// and recorded; module startup continues, as before.
+async fn start_http_control_plane(ctx: &BootContext) {
+    let registry = ctx.services.registry();
+    registry.set_status(
+        HTTP_SERVICE_ID,
+        ServiceStatus::Starting,
+        Some(transport_messages::HTTP_STARTING_NOTE.to_string()),
+    );
+    if let Err(err) = ctx.http_server.start().await {
+        tracing::error!(
+            error = %err,
+            "{}",
+            transport_messages::HTTP_SERVER_START_FAILED
+        );
+        registry.set_status(
+            HTTP_SERVICE_ID,
+            ServiceStatus::Failed,
+            Some(transport_messages::http_start_failure_note(&err)),
+        );
+    }
+}
+
+/// Installs the bootstrap modules and starts every module runtime.
+async fn start_modules(ctx: &BootContext) {
+    let module_service = ctx.services.module_service();
+    if !ctx.config.modules.bootstrap.is_empty() {
+        match module_service.clone() {
+            Some(module_service) => {
+                bootstrap_modules(Arc::clone(&ctx.config), module_service).await;
+            }
+            None => {
+                warn!("{}", transport_messages::MODULE_SERVICE_NOT_ATTACHED);
+            }
+        }
+    }
+    if let Some(service) = module_service {
+        service.ensure_all_running().await;
+    }
+}
+
+/// Drives `control_plane` to completion before `modules` is first polled, so
+/// no module process exists before the control plane accepts connections.
+async fn control_plane_before_modules<C, M>(control_plane: Option<C>, modules: M)
+where
+    C: Future<Output = ()>,
+    M: Future<Output = ()>,
+{
+    if let Some(control_plane) = control_plane {
+        control_plane.await;
+    }
+    modules.await;
 }
 
 async fn initialize_db_connector(ctx: &BootContext) -> Result<()> {
@@ -363,3 +401,7 @@ fn push_existing_path(paths: &mut Vec<PathBuf>, path: &Path) {
         paths.push(path.to_path_buf());
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/boot/transports_tests.rs"]
+mod tests;

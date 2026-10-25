@@ -46,3 +46,6 @@ export ATHENE_API_DEV_ENDPOINTS=true
 # ip:127.0.0.1 (EventSource sends no bearer), so the default 16 is the whole machine.
 # Dev only, until stream slots are keyed per session (ROADMAP 3.6d).
 export ATHENE_API_RATE_LIMIT_STREAM_CONCURRENT=64
+# athene: active Athene AI quality model (folder under ~/Documents/personal/modules/models).
+# "off" unloads it; older versions stay installed for rollback.
+export ATHENE_QUALITY_MODEL=athene-quality/0.4.1-beta3

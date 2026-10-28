@@ -1,0 +1,110 @@
+<!doctype html>
+<!--
+  The Athenos maintenance page, served by Caddy (infra/beta/caddy/Caddyfile)
+  for every path while /var/lib/athenos-maintenance/status.json exists
+  (`athenos-wartung an …`), and as the "unplanned" variant when the app
+  behind Caddy does not answer (handle_errors 502/503/504).
+
+  Self-contained on purpose: no Athenos JavaScript, nothing from another
+  origin, no inline script or style (the CSP is `default-src 'none'` with
+  'self' for scripts, styles, the font and the status poll). Without
+  JavaScript it still reads as a calm German notice.
+-->
+<html lang="de" data-variant="wartung">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="robots" content="noindex" />
+    <meta name="theme-color" content="#f4f4f6" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#111113" media="(prefers-color-scheme: dark)" />
+    <title>Athenos · Gleich wieder da</title>
+    <link rel="icon" type="image/svg+xml" href="/_maintenance/favicon.svg" />
+    <link rel="icon" href="/_maintenance/favicon.ico" sizes="16x16 32x32 48x48" />
+    <link rel="apple-touch-icon" href="/_maintenance/apple-touch-icon.png" />
+    <link rel="preload" href="/_maintenance/geist.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/_maintenance/maintenance.css" />
+    <script src="/_maintenance/maintenance.js" defer></script>
+  </head>
+  <body>
+    <div class="backdrop" aria-hidden="true"></div>
+    <main class="stage">
+      <div class="brand">
+        <span class="brand__mark" aria-hidden="true">
+          <svg class="brand__glyph" viewBox="0 0 100 100" focusable="false">
+            <path d="M46.5 24h7L78 79H62L50 53 38 79H22z" />
+          </svg>
+        </span>
+        <span class="brand__name">Athenos</span>
+      </div>
+
+      <section class="card" aria-labelledby="m-title" aria-describedby="m-lead">
+        <div class="badge" aria-hidden="true">
+          <span class="badge__ring"></span>
+          <span class="badge__ring badge__ring--late"></span>
+          <span class="badge__tile">
+            <!-- One icon per reason (lucide, ISC); the stylesheet shows the right one. -->
+            <svg class="badge__icon badge__icon--update" viewBox="0 0 24 24" focusable="false">
+              <path
+                d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"
+              />
+              <path d="M20 2v4" />
+              <path d="M22 4h-4" />
+              <circle cx="4" cy="20" r="2" />
+            </svg>
+            <svg class="badge__icon badge__icon--fix" viewBox="0 0 24 24" focusable="false">
+              <path
+                d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.106-3.105c.32-.322.863-.22.983.218a6 6 0 0 1-8.259 7.057l-7.91 7.91a1 1 0 0 1-2.999-3l7.91-7.91a6 6 0 0 1 7.057-8.259c.438.12.54.662.219.984z"
+              />
+            </svg>
+            <svg class="badge__icon badge__icon--wartung" viewBox="0 0 24 24" focusable="false">
+              <path
+                d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"
+              />
+              <circle cx="12" cy="12" r="3" />
+            </svg>
+            <svg class="badge__icon badge__icon--unplanned" viewBox="0 0 24 24" focusable="false">
+              <path
+                d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"
+              />
+            </svg>
+          </span>
+        </div>
+
+        <h1 class="title" id="m-title">
+          <span data-text="title">Wir pflegen gerade die Technik</span>
+          <span class="title__emoji" data-text="emoji" aria-hidden="true">🛠️</span>
+        </h1>
+        <p class="lead" id="m-lead" data-text="lead">
+          Athenos ist für eine geplante Wartung kurz offline. Deine Daten sind sicher.
+        </p>
+        <p class="note" data-slot="message" hidden></p>
+
+        <div class="meter" aria-hidden="true"><span class="meter__bar"></span></div>
+
+        <dl class="facts">
+          <div class="facts__row" data-slot="eta" hidden>
+            <dt class="facts__icon">
+              <svg viewBox="0 0 24 24" focusable="false">
+                <circle cx="12" cy="12" r="10" />
+                <path d="M12 6v6l4 2" />
+              </svg>
+            </dt>
+            <dd data-slot="eta-text"></dd>
+          </div>
+          <div class="facts__row">
+            <dt class="facts__icon facts__icon--live"><span class="live"></span></dt>
+            <dd data-text="auto" role="status">Diese Seite lädt automatisch neu.</dd>
+          </div>
+        </dl>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <span data-text="questions">Fragen?</span>
+      <a href="mailto:privacy@athenos.dev">privacy@athenos.dev</a>
+      <span aria-hidden="true">·</span>
+      <a href="/_maintenance/impressum.html" data-text="impressum">Impressum</a>
+    </footer>
+  </body>
+</html>

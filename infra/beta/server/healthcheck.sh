@@ -11,6 +11,11 @@
 # Cloudflare), disk usage, age of the newest database backup, validity of
 # the Cloudflare edge certificate and of the origin certificate.
 #
+# While the maintenance page is on (athenos-wartung), the public checks
+# expect it instead of the app (503 with X-Athenos-Maintenance: planned),
+# and the switch itself becomes a problem once it has been on for more
+# than MAINTENANCE_MAX_HOURS (forgotten, or a deploy that ended unhealthy).
+#
 # Alerts (alert.sh) on a new problem, every ALERT_REPEAT_HOURS while it
 # lasts, and once when everything is fine again. Exit code 1 if a check
 # failed. With HEALTHCHECK_HEARTBEAT_URL set, an all-green run pings it (dead
@@ -36,6 +41,8 @@ load_env_file "${BACKUP_ENV_FILE:-/etc/athenos/backup.env}"
 : "${ORIGIN_TLS_ADDRESS:=127.0.0.1:443}"
 : "${ALERT_REPEAT_HOURS:=6}"
 : "${MONITOR_STATE_DIR:=/var/lib/athenos/monitor}"
+: "${MAINTENANCE_STATUS:=/var/lib/athenos-maintenance/status.json}"
+: "${MAINTENANCE_MAX_HOURS:=2}"
 
 alert=1
 quiet=0
@@ -73,13 +80,31 @@ if command -v jq >/dev/null 2>&1; then
 fi
 if http_ok "$EDGE_URL/healthz"; then pass "static edge healthz"; else problem "static edge $EDGE_URL/healthz fails"; fi
 
-# public path: DNS, TLS, Caddy, edge, control plane, gateway
-if http_ok "$PUBLIC_URL/healthz"; then pass "public $PUBLIC_URL/healthz"; else problem "public $PUBLIC_URL/healthz fails"; fi
-api=$(curl -fsS -m 10 -- "$PUBLIC_URL$API_SERVICE_PATH/health" 2>/dev/null || true)
-case $api in
-*'"status":"healthy"'*) pass "public API health" ;;
-*) problem "public API $PUBLIC_URL$API_SERVICE_PATH/health not healthy" ;;
-esac
+# public path: DNS, TLS, Caddy, edge, control plane, gateway - or, while
+# the maintenance page is on, that visitors get it.
+if [ -r "$MAINTENANCE_STATUS" ]; then
+	since=$(jq -r '.since // empty' "$MAINTENANCE_STATUS" 2>/dev/null || true)
+	reason=$(jq -r '.reason // "?"' "$MAINTENANCE_STATUS" 2>/dev/null || echo "?")
+	on_h=0
+	if [[ $since =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+		since_epoch=$(date -u -d "$since" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$since" +%s 2>/dev/null || echo 0)
+		[ "$since_epoch" = 0 ] || on_h=$((($(date -u +%s) - since_epoch) / 3600))
+	fi
+	if [ "$on_h" -ge "$MAINTENANCE_MAX_HOURS" ]; then
+		problem "maintenance page ($reason) on for ${on_h} h (limit ${MAINTENANCE_MAX_HOURS} h): sudo athenos-wartung status"
+	else
+		pass "maintenance page on ($reason, since $since)"
+	fi
+	marker=$(curl -sS -m 10 -o /dev/null -D - -- "$PUBLIC_URL/" 2>/dev/null | tr -d '\r' | awk -F': ' 'tolower($1) == "x-athenos-maintenance" {print $2}')
+	if [ "$marker" = planned ]; then pass "public $PUBLIC_URL/ shows the maintenance page"; else problem "maintenance is on but $PUBLIC_URL/ does not show the page (Caddyfile installed?)"; fi
+else
+	if http_ok "$PUBLIC_URL/healthz"; then pass "public $PUBLIC_URL/healthz"; else problem "public $PUBLIC_URL/healthz fails"; fi
+	api=$(curl -fsS -m 10 -- "$PUBLIC_URL$API_SERVICE_PATH/health" 2>/dev/null || true)
+	case $api in
+	*'"status":"healthy"'*) pass "public API health" ;;
+	*) problem "public API $PUBLIC_URL$API_SERVICE_PATH/health not healthy" ;;
+	esac
+fi
 
 # disk
 for path in $DISK_PATHS; do

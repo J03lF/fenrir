@@ -19,8 +19,12 @@
 #             journald (7 days), logrotate (7 days); enables the timers and
 #             athenos.service (started by the first deploy)
 #   cloudflare  fetch the Cloudflare ranges (Caddy trusted proxies, firewall)
-#   caddy     /etc/caddy/Caddyfile, validate, reload; needs the Cloudflare
-#             Origin CA certificate in /etc/caddy/origin first (RUNBOOK 2.3)
+#   maintenance  the maintenance page to /usr/local/share/athenos/maintenance,
+#             the switch /usr/local/sbin/athenos-wartung, its state directory
+#             /var/lib/athenos-maintenance (Caddy reads it; RUNBOOK 5.3)
+#   caddy     the maintenance step, then /etc/caddy/Caddyfile, validate (as
+#             the caddy user), reload; needs the Cloudflare Origin CA
+#             certificate in /etc/caddy/origin first (RUNBOOK 2.3)
 #   updates   unattended security upgrades with automatic reboot at night
 #   firewall  ufw: 22 (limited, key-only), 443/tcp from Cloudflare only
 #   ssh       sshd: keys only, no root, AllowUsers <admin> (refuses without a key)
@@ -190,6 +194,7 @@ step_units() {
 	for f in "$BASE"/server/*.sh; do
 		install -m 0755 -o root -g root "$f" /usr/local/lib/athenos/
 	done
+	ln -sfn /usr/local/lib/athenos/athenos-wartung.sh /usr/local/sbin/athenos-wartung
 	for f in "$BASE"/systemd/*.service "$BASE"/systemd/*.timer; do
 		install -m 0644 -o root -g root "$f" /etc/systemd/system/
 	done
@@ -219,7 +224,34 @@ step_cloudflare() {
 	"$BASE/server/cloudflare-ips.sh" update
 }
 
+MAINTENANCE_WWW=/usr/local/share/athenos/maintenance
+MAINTENANCE_STATE=/var/lib/athenos-maintenance
+
+step_maintenance() {
+	# The page: replaced as a whole (a new directory, then a rename), so
+	# Caddy never serves half of an old and half of a new version.
+	install -d -m 0755 -o root -g root /usr/local/share/athenos
+	local new="$MAINTENANCE_WWW.new.$$" f
+	rm -rf -- "$new"
+	install -d -m 0755 -o root -g root "$new"
+	for f in "$BASE"/maintenance/www/*; do
+		install -m 0644 -o root -g root "$f" "$new/"
+	done
+	rm -rf -- "$MAINTENANCE_WWW.old"
+	[ ! -e "$MAINTENANCE_WWW" ] || mv -T -- "$MAINTENANCE_WWW" "$MAINTENANCE_WWW.old"
+	mv -T -- "$new" "$MAINTENANCE_WWW"
+	rm -rf -- "$MAINTENANCE_WWW.old"
+	# The flag: root writes it (athenos-wartung), Caddy only reads it.
+	install -d -m 0755 -o root -g root "$MAINTENANCE_STATE"
+	install -d -m 0755 -o root -g root /usr/local/lib/athenos
+	install -m 0755 -o root -g root "$BASE/server/athenos-wartung.sh" "$BASE/server/common.sh" /usr/local/lib/athenos/
+	ln -sfn /usr/local/lib/athenos/athenos-wartung.sh /usr/local/sbin/athenos-wartung
+	log "maintenance page in $MAINTENANCE_WWW; switch: sudo athenos-wartung an|aus|status"
+	/usr/local/lib/athenos/athenos-wartung.sh status || true
+}
+
 step_caddy() {
+	step_maintenance
 	install -d -m 0750 -o caddy -g caddy /var/log/caddy
 	install -d -m 0750 -o root -g caddy /etc/caddy/origin
 	local cert=/etc/caddy/origin/app.athenos.dev.pem key=/etc/caddy/origin/app.athenos.dev.key
@@ -233,7 +265,10 @@ step_caddy() {
 	chmod 0640 "$key"
 	[ -s /etc/caddy/cloudflare-trusted-proxies.caddy ] || "$BASE/server/cloudflare-ips.sh" update
 	[ -e /etc/caddy/Caddyfile.orig ] || [ ! -e /etc/caddy/Caddyfile ] || cp -p /etc/caddy/Caddyfile /etc/caddy/Caddyfile.orig
-	install -m 0644 -o root -g root "$BASE/caddy/Caddyfile" /etc/caddy/Caddyfile
+	# Validated before it replaces the running one: a Caddyfile that does not
+	# validate never lands in /etc/caddy/Caddyfile (a later restart would
+	# fail on it).
+	install -m 0644 -o root -g root "$BASE/caddy/Caddyfile" /etc/caddy/Caddyfile.new
 	# `caddy validate` opens the log files. Run as root it created the access
 	# log root:root, and the caddy service could not open it on the reload
 	# (permission denied). So: the log belongs to caddy (an earlier run's
@@ -242,7 +277,11 @@ step_caddy() {
 	local access_log=/var/log/caddy/app.athenos.dev.access.log
 	[ -e "$access_log" ] || install -m 0640 -o caddy -g caddy /dev/null "$access_log"
 	find /var/log/caddy -maxdepth 1 -type f -name 'app.athenos.dev.access*' ! -user caddy -exec chown caddy:caddy {} +
-	runuser -u caddy -- caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+	if ! runuser -u caddy -- caddy validate --config /etc/caddy/Caddyfile.new --adapter caddyfile; then
+		rm -f /etc/caddy/Caddyfile.new
+		die "the new Caddyfile does not validate; /etc/caddy/Caddyfile is unchanged"
+	fi
+	mv -f /etc/caddy/Caddyfile.new /etc/caddy/Caddyfile
 	systemctl enable caddy
 	systemctl reload-or-restart caddy
 }
@@ -283,14 +322,14 @@ step_ssh() {
 
 case $step in
 all)
-	for s in packages user dirs postgres config units cloudflare caddy updates firewall ssh; do
+	for s in packages user dirs postgres config units cloudflare maintenance caddy updates firewall ssh; do
 		log "=== $s"
 		"step_$s"
 	done
 	;;
-packages | user | dirs | postgres | config | units | cloudflare | caddy | updates | firewall | ssh) "step_$step" ;;
+packages | user | dirs | postgres | config | units | cloudflare | maintenance | caddy | updates | firewall | ssh) "step_$step" ;;
 *)
-	sed -n '2,26p' "$0"
+	sed -n '2,30p' "$0"
 	exit 1
 	;;
 esac

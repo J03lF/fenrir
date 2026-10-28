@@ -78,5 +78,23 @@ bash "$here/tests/bootstrap-admin-test.sh" >"${TMPDIR:-/tmp}/bootstrap-admin-tes
 tail -n 1 "${TMPDIR:-/tmp}/bootstrap-admin-test.$$.log"
 rm -f "${TMPDIR:-/tmp}/bootstrap-admin-test.$$.log"
 
+# The maintenance switch, the release script's and deploy.sh's handling of it.
+bash "$here/tests/maintenance-test.sh" >"${TMPDIR:-/tmp}/maintenance-test.$$.log" 2>&1 ||
+	err "maintenance: $(grep FAIL "${TMPDIR:-/tmp}/maintenance-test.$$.log" | head -n 5)"
+tail -n 1 "${TMPDIR:-/tmp}/maintenance-test.$$.log"
+rm -f "${TMPDIR:-/tmp}/maintenance-test.$$.log"
+
+# The maintenance page: no request to another origin, nothing inline that
+# the page's CSP (script-src/style-src 'self') would block.
+www="$here/maintenance/www"
+if grep -nE '(src|href)="(https?:)?//' "$www"/*.html; then err "maintenance page loads from another origin"; fi
+if grep -nE '<script>|<script [^>]*>[^<]|<style|style="| on[a-z]+="' "$www"/*.html; then err "maintenance page has inline script or style"; fi
+if grep -nE 'https?://' "$www"/*.css "$www"/*.js | grep -v '^\s*\*'; then err "maintenance css/js references another origin"; fi
+for f in index.html impressum.html maintenance.css maintenance.js geist.woff2 favicon.svg favicon.ico apple-touch-icon.png; do
+	[ -s "$www/$f" ] || err "maintenance page file $f missing"
+done
+grep -q '8259 Kaltenbach' "$www/impressum.html" || err "maintenance Impressum lacks the address"
+echo "maintenance page: self-contained, CSP-clean, Impressum present"
+
 [ "$fail" = 0 ] && echo "all checks passed"
 exit "$fail"

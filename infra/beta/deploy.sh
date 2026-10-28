@@ -9,6 +9,11 @@
 #   <artifact-dir>   use local artifacts: the six tarballs with their
 #                    SHA256SUMS files (flat, or one sub-directory per component)
 #   --host HOST      SSH destination (default DEPLOY_HOST from deploy.env)
+#   --no-maintenance do not show the maintenance page during the restart
+#                    (default: "Athenos bekommt ein Update", ETA now + 5 min,
+#                    on before the dump and the restart, off once the new
+#                    release - or the rollback - is healthy; stays on if
+#                    nothing healthy runs in the end)
 #   --restore-db-on-failure
 #                    if the new release is unhealthy, also restore the database
 #                    from the pre-deploy dump (DISCARDS writes after the dump).
@@ -41,6 +46,7 @@ load_env_file "${DEPLOY_ENV_FILE:-$HOME/.config/athenos/deploy.env}"
 COMPONENTS="fenrir athenos athenos-api auth-service notification-service athenos-web"
 
 restore_flag=""
+maintenance_flag="--maintenance update"
 dry_run=0
 source_arg=""
 while [ $# -gt 0 ]; do
@@ -53,12 +59,16 @@ while [ $# -gt 0 ]; do
 		restore_flag=--restore-db-on-failure
 		shift
 		;;
+	--no-maintenance)
+		maintenance_flag=""
+		shift
+		;;
 	--dry-run)
 		dry_run=1
 		shift
 		;;
 	-h | --help)
-		sed -n '2,28p' "$0"
+		sed -n '2,29p' "$0"
 		exit 0
 		;;
 	-*) die "unknown option: $1" ;;
@@ -122,7 +132,7 @@ for comp in $COMPONENTS; do
 done
 
 # Server tools from this checkout (the same revision as this script).
-cp -- "$here/server/athenos-release.sh" "$here/server/common.sh" "$stage/"
+cp -- "$here/server/athenos-release.sh" "$here/server/common.sh" "$here/server/athenos-wartung.sh" "$stage/"
 (
 	cd -- "$stage"
 	for f in *; do printf '%s  %s\n' "$(sha256_of "$f")" "$f"; done >"$work/SHA256SUMS"
@@ -159,11 +169,30 @@ ssh -o BatchMode=yes -- "$DEPLOY_HOST" "find '$remote' -type d -exec chmod 0700 
 log "deploying on $DEPLOY_HOST (sudo may ask for your password)"
 rc=0
 # shellcheck disable=SC2029 # the arguments are meant to expand here
-ssh -t -- "$DEPLOY_HOST" "sudo bash '$remote/athenos-release.sh' deploy '$remote' '$id' $restore_flag" || rc=$?
+[ -z "$maintenance_flag" ] || log "the maintenance page (\"Athenos bekommt ein Update\") shows during the restart"
+ssh -t -- "$DEPLOY_HOST" "sudo bash '$remote/athenos-release.sh' deploy '$remote' '$id' $restore_flag $maintenance_flag" || rc=$?
 if [ "$rc" = 0 ]; then
 	ssh -o BatchMode=yes -- "$DEPLOY_HOST" "rm -rf -- '$remote'" || true
 	log "release $id is live"
-else
-	log "deploy failed (exit $rc); upload kept at $DEPLOY_HOST:$remote for inspection"
+	exit 0
+fi
+log "deploy failed (exit $rc); upload kept at $DEPLOY_HOST:$remote for inspection"
+if [ -n "$maintenance_flag" ]; then
+	# The server switched the page off again if the rollback came up
+	# healthy; ask what it is now (read-only, no sudo needed).
+	state=$(ssh -o BatchMode=yes -- "$DEPLOY_HOST" "bash '$remote/athenos-wartung.sh' status --json" 2>/dev/null || true)
+	case $state in
+	*'"active": true'* | *'"active":true'*)
+		cat >&2 <<EOF
+
+  The maintenance page is STILL ON: nothing healthy runs on the server.
+  Visitors see "Athenos bekommt ein Update". Fix it, then:
+    ssh $DEPLOY_HOST sudo athenos-wartung aus
+
+EOF
+		;;
+	*'"active":false'*) log "maintenance page is off (the rollback is healthy)" ;;
+	*) log "could not read the maintenance state: ssh $DEPLOY_HOST athenos-wartung status" ;;
+	esac
 fi
 exit "$rc"

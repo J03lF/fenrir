@@ -11,6 +11,17 @@
 # both in sync) and hands the result on as X-Real-IP, which the host believes
 # only from loopback (SPEC §2).
 #
+# Maintenance is switched here, independent of Fenrir: while
+# /var/lib/athenos-maintenance/status.json exists (`sudo athenos-wartung an
+# …`, server/athenos-wartung.sh), every request gets the static page from
+# /usr/local/share/athenos/maintenance (infra/beta/maintenance/www) with 503
+# and Retry-After, API paths a 503 JSON envelope (ATH-SYS-004, the code the
+# web app already reads as maintenance). The file matcher looks at the flag
+# on every request: switching needs no reload. When the app does not answer
+# (502/503/504 from the upstream, e.g. during a restart), the same page
+# appears as the "unplanned" variant. /_maintenance/* (the page's files and
+# status.json) is always served by Caddy itself.
+#
 # Validate: caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 {
 	# The certificate is the Cloudflare Origin CA one (below): no ACME, and
@@ -66,6 +77,41 @@
 	}
 }
 
+(maintenance_headers) {
+	# The maintenance page and its files: only this origin, no inline code,
+	# never cached (Cloudflare and the browser ask again every time).
+	header {
+		Content-Security-Policy "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self'; connect-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		X-Frame-Options DENY
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), interest-cohort=()"
+		Cache-Control "no-store"
+	}
+}
+
+(maintenance_response) {
+	# The answer while maintenance is on or the app is away: the API gets
+	# the JSON envelope given as the argument, the browser's icons their
+	# files, everything else the page with 503.
+	import maintenance_headers
+	handle @maintenance_api {
+		header Content-Type "application/json; charset=utf-8"
+		respond `{args[0]}` 503
+	}
+	handle @maintenance_icons {
+		root * /usr/local/share/athenos/maintenance
+		file_server
+	}
+	handle {
+		root * /usr/local/share/athenos/maintenance
+		rewrite * /index.html
+		file_server {
+			status 503
+		}
+	}
+}
+
 https://app.athenos.dev {
 	# Cloudflare Origin CA certificate for app.athenos.dev (RUNBOOK 2.3).
 	tls /etc/caddy/origin/app.athenos.dev.pem /etc/caddy/origin/app.athenos.dev.key {
@@ -81,37 +127,107 @@ https://app.athenos.dev {
 	import security_headers
 	import access_log
 
-	# Only the API gateway is reachable through /gateway. The edge would
-	# forward any /gateway/services/<id>/... to the control plane; everything
-	# but the api-gateway service is refused here already (both the encoded
-	# and the decoded spelling of the service id). Cloudflare never caches
-	# /gateway/* (cache rule, RUNBOOK 2.4).
-	@api path /gateway/services/module%3Aathenos-api%3A%3Aapi-gateway/* /gateway/services/module:athenos-api::api-gateway/*
-	@gateway_other path /gateway /gateway/*
-	@internal path /.fenrir /.fenrir/*
+	# --- Maintenance (athenos-wartung an/aus) ------------------------------
+	# The three matchers below are disjoint, and the app's own routes sit in
+	# the last, matcher-less handle: whatever the Caddyfile's sorting of
+	# handle blocks, maintenance always comes first and nothing of the app
+	# (not even /gateway) slips past it.
+	@maintenance_status path /_maintenance/status.json
+	@maintenance_files {
+		path /_maintenance/*
+		not path /_maintenance/status.json
+	}
+	@maintenance {
+		file {
+			root /var/lib/athenos-maintenance
+			try_files /status.json
+		}
+		not path /_maintenance/*
+	}
+	@maintenance_on file {
+		root /var/lib/athenos-maintenance
+		try_files /status.json
+	}
+	@maintenance_api path /gateway /gateway/* /api /api/*
+	@maintenance_icons path /favicon.svg /favicon.ico /apple-touch-icon.png
 
-	handle @api {
-		# No `encode` here: the edge skips compression of secret-bearing
-		# responses on purpose (BREACH); compressing again would undo that.
-		reverse_proxy 127.0.0.1:41002 {
-			header_up X-Real-IP {client_ip}
-			# Event streams (ticket live updates) must not be buffered.
-			flush_interval -1
+	# What the page polls: the status file, or "off".
+	handle @maintenance_status {
+		import maintenance_headers
+		handle @maintenance_on {
+			root * /var/lib/athenos-maintenance
+			rewrite * /status.json
+			file_server
+		}
+		handle {
+			header Content-Type "application/json; charset=utf-8"
+			respond `{"active":false}` 200
 		}
 	}
 
-	handle @gateway_other {
-		respond 404
+	# The page's own files (also while the app is up: the Impressum copy).
+	handle @maintenance_files {
+		import maintenance_headers
+		root * /usr/local/share/athenos/maintenance
+		uri strip_prefix /_maintenance
+		file_server
 	}
 
-	handle @internal {
-		respond 404
+	# Planned maintenance: the app is not asked at all.
+	handle @maintenance {
+		header Retry-After 120
+		header X-Athenos-Maintenance planned
+		import maintenance_response `{"error":{"code":"ATH-SYS-004","message":"System is under maintenance","message_key":"errors.maintenance"}}`
+	}
+
+	# The app does not answer (restart, crash): the same page, "unplanned".
+	handle_errors 502 503 504 {
+		import security_headers
+		header Retry-After 30
+		header X-Athenos-Maintenance unplanned
+		import maintenance_response `{"error":{"code":"ATH-API-GW-001","message":"Upstream service unavailable","retryable":true}}`
 	}
 
 	handle {
-		encode zstd gzip
-		reverse_proxy 127.0.0.1:41002 {
-			header_up X-Real-IP {client_ip}
+		# Only the API gateway is reachable through /gateway. The edge would
+		# forward any /gateway/services/<id>/... to the control plane;
+		# everything but the api-gateway service is refused here already
+		# (both the encoded and the decoded spelling of the service id).
+		# Cloudflare never caches /gateway/* (cache rule, RUNBOOK 2.4).
+		@api path /gateway/services/module%3Aathenos-api%3A%3Aapi-gateway/* /gateway/services/module:athenos-api::api-gateway/*
+		@gateway_other path /gateway /gateway/*
+		@internal path /.fenrir /.fenrir/*
+
+		handle @api {
+			# No `encode` here: the edge skips compression of secret-bearing
+			# responses on purpose (BREACH); compressing again would undo that.
+			reverse_proxy 127.0.0.1:41002 {
+				header_up X-Real-IP {client_ip}
+				# Event streams (ticket live updates) must not be buffered.
+				flush_interval -1
+			}
+		}
+
+		handle @gateway_other {
+			respond 404
+		}
+
+		handle @internal {
+			respond 404
+		}
+
+		handle {
+			encode zstd gzip
+			reverse_proxy 127.0.0.1:41002 {
+				header_up X-Real-IP {client_ip}
+				# The edge itself answers 502/503/504 (a module still
+				# starting): the page instead of a bare error. API answers
+				# keep their own 503s (handle @api), the web app reads those.
+				@upstream_down status 502 503 504
+				handle_response @upstream_down {
+					error 503
+				}
+			}
 		}
 	}
 }

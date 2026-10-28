@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Server side of deploy.sh / rollback.sh (run as root on the server).
 #
-#   athenos-release.sh deploy <upload-dir> <release-id> [--restore-db-on-failure]
+#   athenos-release.sh deploy <upload-dir> <release-id> [--restore-db-on-failure] [--maintenance <reason>]
 #   athenos-release.sh install <upload-dir> <release-id>
-#   athenos-release.sh activate <release-id> [--restore-db-on-failure]
+#   athenos-release.sh activate <release-id> [--restore-db-on-failure] [--maintenance <reason>]
 #   athenos-release.sh rollback [<release-id>] [--with-db <dump>] [--yes]
 #   athenos-release.sh list | current | prune
 #
@@ -17,6 +17,13 @@
 #           restarts it. The database is only restored from the pre-deploy
 #           dump with --restore-db-on-failure (that discards what was written
 #           after the dump; it asks no question, the flag is the consent).
+# --maintenance <reason>
+#           (deploy.sh passes `update`): the maintenance page goes on
+#           (athenos-wartung.sh, ETA now + MAINTENANCE_MINUTES) before the
+#           dump and the restart, and off once the new release is healthy -
+#           or once the rollback is. Unhealthy in the end: it stays on, and
+#           the output says so. Was it on already (switched on by hand), it
+#           is left exactly as it was.
 # rollback  switches to the previous (or the given) release; the database
 #           stays as it is unless --with-db <dump> (restore.sh --swap --force).
 # prune     keeps the newest $KEEP_RELEASES releases, never current/previous.
@@ -38,6 +45,8 @@ LIB=${ATHENOS_LIB_DIR:-/usr/local/lib/athenos}
 : "${API_SERVICE_PATH:=/gateway/services/module%3Aathenos-api%3A%3Aapi-gateway}"
 : "${MODULES_RUNTIME:=/var/lib/athenos/modules-runtime}"
 : "${DEPLOY_LOG:=/var/log/athenos-deploy.log}"
+: "${TOOLS_DIR:=/usr/local/lib/athenos}"
+: "${MAINTENANCE_MINUTES:=5}"
 RELEASES="$ATHENOS_ROOT/releases"
 CURRENT="$ATHENOS_ROOT/current"
 PREVIOUS_FILE="$ATHENOS_ROOT/.previous-release"
@@ -45,7 +54,22 @@ PREVIOUS_FILE="$ATHENOS_ROOT/.previous-release"
 RUST_MODULES="athenos athenos-api auth-service notification-service"
 COMPONENTS="fenrir $RUST_MODULES athenos-web"
 
-[ "$(id -u)" = 0 ] || die "run as root (sudo)"
+# ATHENOS_RELEASE_TEST: tests/deploy-maintenance-test.sh runs this script
+# without root against a temp tree and stubbed systemctl/curl.
+[ "$(id -u)" = 0 ] || [ -n "${ATHENOS_RELEASE_TEST:-}" ] || die "run as root (sudo)"
+
+# The maintenance switch of this upload (same revision), else the installed one.
+wartung() {
+	local tool="$here/athenos-wartung.sh"
+	[ -r "$tool" ] || tool="$TOOLS_DIR/athenos-wartung.sh"
+	[ -r "$tool" ] || {
+		warn "no athenos-wartung.sh: maintenance page not switched ($*)"
+		return 1
+	}
+	bash "$tool" "$@"
+}
+
+maintenance_is_on() { wartung status --json 2>/dev/null | grep -q '"active": *true'; }
 
 record() {
 	mkdir -p -- "$(dirname -- "$DEPLOY_LOG")"
@@ -175,15 +199,21 @@ switch_to() { # release id
 	local id=$1
 	[ -d "$RELEASES/$id" ] || die "no release $id"
 	ln -sfn -- "releases/$id" "$ATHENOS_ROOT/.current.new"
-	mv -T -- "$ATHENOS_ROOT/.current.new" "$CURRENT"
+	# rename(2) over the old link: atomic. -T (GNU) / -h (BSD, the tests on
+	# macOS): replace the link itself, never move into the directory.
+	if mv --version >/dev/null 2>&1; then
+		mv -T -- "$ATHENOS_ROOT/.current.new" "$CURRENT"
+	else
+		mv -fh "$ATHENOS_ROOT/.current.new" "$CURRENT"
+	fi
 }
 
 sync_tools() { # release id: server scripts of that release -> /usr/local/lib/athenos
 	local src="$RELEASES/$1/infra/beta/server" f
 	[ -d "$src" ] || return 0
-	install -d -m 0755 -- /usr/local/lib/athenos
+	install -d -m 0755 -- "$TOOLS_DIR"
 	for f in "$src"/*.sh; do
-		install -m 0755 -o root -g root -- "$f" /usr/local/lib/athenos/
+		install -m 0755 -- "$f" "$TOOLS_DIR/"
 	done
 	local unit changed=""
 	for unit in "$RELEASES/$1"/infra/beta/systemd/*; do
@@ -227,14 +257,36 @@ predeploy_dump() { # id -> path of the dump on stdout
 }
 
 cmd_activate() {
-	local id=$1 restore_on_failure=$2
+	local id=$1 restore_on_failure=$2 maintenance=${3:-}
 	[ -d "$RELEASES/$id" ] || die "no release $id"
 	local prev
 	prev=$(current_id || true)
 	[ "$prev" != "$id" ] || die "release $id is already current"
 
+	# The maintenance page: on before the dump (nothing is written after
+	# it), off once a release is healthy again. `mine`: this run switched
+	# it on, so this run switches it off.
+	local mine=0
+	if [ -n "$maintenance" ]; then
+		if maintenance_is_on; then
+			record "maintenance page already on: left as it is"
+		elif wartung an "$maintenance" --minuten "$MAINTENANCE_MINUTES"; then
+			mine=1
+			record "maintenance page on ($maintenance)"
+		else
+			warn "could not switch the maintenance page on; deploying without it"
+		fi
+	fi
+	maintenance_off() {
+		[ "$mine" = 1 ] || return 0
+		if wartung aus; then record "maintenance page off ($1)"; else warn "could not switch the maintenance page off: sudo athenos-wartung aus"; fi
+	}
+
 	local dump
-	dump=$(predeploy_dump "$id" | tail -n 1)
+	if ! dump=$(predeploy_dump "$id" | tail -n 1); then
+		maintenance_off "nothing changed"
+		die "pre-deploy dump failed: nothing changed"
+	fi
 	[ -z "$dump" ] || record "pre-deploy dump $dump"
 
 	[ -z "$prev" ] || printf '%s\n' "$prev" >"$PREVIOUS_FILE"
@@ -243,6 +295,7 @@ cmd_activate() {
 	record "switched current to $id (previous: ${prev:-none}); restarting"
 	if restart_and_wait; then
 		record "deploy of $id healthy"
+		maintenance_off "release $id healthy"
 		cmd_prune
 		return 0
 	fi
@@ -250,6 +303,7 @@ cmd_activate() {
 	record "deploy of $id NOT healthy after ${HEALTH_TIMEOUT_SECONDS}s"
 	journalctl --no-pager --lines=60 --unit="$ATHENOS_UNIT" >&2 || true
 	if [ -z "$prev" ]; then
+		[ "$mine" = 0 ] || record "maintenance page stays ON: nothing healthy is running (sudo athenos-wartung aus when fixed)"
 		die "first deploy failed and there is no previous release; current stays at $id"
 	fi
 	switch_to "$prev"
@@ -263,8 +317,10 @@ cmd_activate() {
 	fi
 	if restart_and_wait; then
 		record "rolled back to $prev (healthy)"
+		maintenance_off "rolled back to $prev, healthy"
 	else
 		record "rolled back to $prev but it is NOT healthy either"
+		[ "$mine" = 0 ] || record "maintenance page stays ON: nothing healthy is running (sudo athenos-wartung aus when fixed)"
 	fi
 	die "deploy of $id failed"
 }
@@ -337,22 +393,45 @@ cmd_prune() {
 	done
 }
 
+# [--restore-db-on-failure] [--maintenance <update|fix|wartung>] -> $flag $maintenance
+parse_activate_flags() {
+	flag=0
+	maintenance=""
+	while [ $# -gt 0 ]; do
+		case $1 in
+		--restore-db-on-failure)
+			flag=1
+			shift
+			;;
+		--maintenance)
+			case ${2:-} in
+			update | fix | wartung) maintenance=$2 ;;
+			*) die "--maintenance needs update, fix or wartung" ;;
+			esac
+			shift 2
+			;;
+		*) die "unknown option $1" ;;
+		esac
+	done
+}
+
 sub=${1:-}
 shift || true
 case $sub in
 deploy)
 	upload=${1:?upload dir}
 	id=${2:?release id}
-	flag=0
-	[ "${3:-}" != --restore-db-on-failure ] || flag=1
+	shift 2
+	parse_activate_flags "$@"
 	with_lock release cmd_install "$upload" "$id"
-	with_lock release cmd_activate "$id" "$flag"
+	with_lock release cmd_activate "$id" "$flag" "$maintenance"
 	;;
 install) with_lock release cmd_install "${1:?upload dir}" "${2:?release id}" ;;
 activate)
-	flag=0
-	[ "${2:-}" != --restore-db-on-failure ] || flag=1
-	with_lock release cmd_activate "${1:?release id}" "$flag"
+	id=${1:?release id}
+	shift
+	parse_activate_flags "$@"
+	with_lock release cmd_activate "$id" "$flag" "$maintenance"
 	;;
 rollback)
 	target=""
@@ -381,7 +460,7 @@ list) cmd_list ;;
 current) current_id || echo "none" ;;
 prune) with_lock release cmd_prune ;;
 *)
-	sed -n '2,24p' "$0"
+	sed -n '2,29p' "$0"
 	exit 1
 	;;
 esac

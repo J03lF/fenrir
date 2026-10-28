@@ -194,7 +194,8 @@ Das Skript arbeitet diese Schritte ab. Jeder einzelne lässt sich mit `install.s
 | `config` | `/etc/athenos/{fenrir,backup,monitor}.env` aus den Vorlagen; Tokens erzeugen; `ports.json` vorbelegen (die Edge muss 41002 sein) |
 | `units` | Skripte nach `/usr/local/lib/athenos`, systemd-Units, Journal und logrotate auf 7 Tage, Timer an |
 | `cloudflare` | Cloudflare-Bereiche holen (für Caddy und die Firewall, siehe 2.5) |
-| `caddy` | Caddyfile, `caddy validate`, neu laden. Fehlt das Origin-Zertifikat (2.3), überspringt der Schritt das Caddyfile und sagt, was zu tun ist |
+| `maintenance` | Wartungsseite nach `/usr/local/share/athenos/maintenance`, Schalter `athenos-wartung`, Ordner `/var/lib/athenos-maintenance` (5.3) |
+| `caddy` | erst `maintenance`, dann Caddyfile, `caddy validate` (als Benutzer `caddy`, damit das Access-Log `caddy` gehört), neu laden. Fehlt das Origin-Zertifikat (2.3), überspringt der Schritt das Caddyfile und sagt, was zu tun ist |
 | `updates` | nächtliche Sicherheitsupdates, Neustart bei Bedarf um 03:30 UTC |
 | `firewall` | ufw: 22 begrenzt (nur Schlüssel), 443/tcp nur aus den Cloudflare-Bereichen; alles andere zu, auch 80. Mit `SSH_SOURCES="<cidr> …"` nur von deinen Adressen |
 | `ssh` | nur Schlüssel, kein root, `AllowUsers joel`. **Die offene Sitzung erst schliessen, wenn ein neuer Login klappt** |
@@ -207,6 +208,7 @@ Bestehende Dateien in `/etc/athenos` überschreibt das Skript nicht.
    sudo /usr/local/lib/athenos/secret.sh set smtp-password
    ```
 2. **`/etc/athenos/fenrir.env` prüfen:**
+   - `FENRIR_REGISTRY_TOKEN_FILE=/etc/athenos/secrets/registry.token` (wie in der Vorlage). **Steht vom ersten Deploy noch `FENRIR_REGISTRY_TOKEN=offline-registry-not-used` drin, diese Zeile löschen** und die `_FILE`-Zeile wieder aktiv machen: Seit W11 liest auch die Registry-Initialisierung `<VAR>_FILE` (vorher nur der Config-Loader). Beides zugleich lehnt der Host ab. Danach `sudo systemctl restart athenos`.
    - `SMTP_USER` ist der SMTP-Login von `mail.athenos.dev`.
    - `ATHENOS_QUALITY_MODEL` ist das Modell, das du hochlädst.
    - Für einen geschlossenen Test vorerst `NOTIFY_RECIPIENT_ALLOWLIST`.
@@ -347,6 +349,51 @@ Es bleiben 5 Releases liegen, nie das aktuelle und das vorige. Das Log liegt in 
 sudo /opt/athenos/current/infra/beta/server/install.sh units
 ```
 Danach `sudo systemctl restart athenos`.
+
+### 5.2 Zwei Wartungsmodi: in der App und am Server
+
+| | **In der App** (Admin → Einstellungen → Wartung) | **Am Server** (`athenos-wartung`, Caddy) |
+|---|---|---|
+| Wofür | angekündigte Pausen, solange Athenos läuft: Hinweis vorab, dann nur Admins | Deploys, Neustarts, Arbeiten an Fenrir, an Postgres oder am Server |
+| Braucht | laufendes Athenos (Gateway, Core) | nur Caddy |
+| Wer sieht was | vorab (die eingestellten Minuten vor dem Beginn) ein ruhiger Hinweis „🛠️ Heute um 20:00 kurzes Update (ca. 10 Minuten). Bitte speichere deine Arbeit.“; ab dem Beginn sehen Nicht-Admins eine Vollbild-Wartungsansicht, Admins die App mit dem schmalen Streifen „Wartungsmodus aktiv – nur Admins sehen die App“ und „Wartung beenden“ | alle sehen die Wartungsseite (503); niemand, auch kein Admin, erreicht die App über `app.athenos.dev`. Du kommst über den Tunnel hinein (5.4) |
+| Danach | die Ansicht lädt neu; ein kleiner Hinweis „Alles wieder da. Danke für deine Geduld!“ (bzw. „Willkommen zurück! Athenos 0.x ist da“ nach einem Update) | die Seite merkt es selbst (alle 5 s) und lädt die App, mit demselben Hinweis |
+
+Beide sehen gleich aus (dieselbe Gestaltung). Sie sind unabhängig: Der Schalter am Server funktioniert auch, wenn Fenrir, die Module oder die Datenbank nicht laufen. Fällt die App ohne Ankündigung aus (Absturz, Neustart), zeigt Caddy dieselbe Seite als „Athenos ist gleich wieder da“, bis die App wieder antwortet.
+
+### 5.3 Wartungsseite schalten (`athenos-wartung`)
+Auf dem Server:
+```bash
+sudo athenos-wartung an update --minuten 10          # „Athenos bekommt ein Update ✨“, zurück in 10 Minuten
+sudo athenos-wartung an fix --bis 20:15              # „Kurze Pause für Feinschliff 🔧“, zurück um 20:15
+sudo athenos-wartung an wartung "Wir ziehen auf einen grösseren Server um."   # „Wir pflegen gerade die Technik 🛠️“ + eigene Zeile
+sudo athenos-wartung status
+sudo athenos-wartung aus
+```
+- **Grund** (`update`, `fix`, `wartung`) wählt den Text. `--bis HH:MM` ist Schweizer Zeit (eine Zeit, die heute schon vorbei ist, heisst morgen); jeder Besucher sieht sie in seiner Ortszeit. Ist die Zeit um, sagt die Seite „Es dauert etwas länger als geplant – gleich geschafft.“
+- **Eigener Text:** höchstens 280 Zeichen, nur Text (kein HTML). Ein zweites `an` ersetzt Grund, Zeit und Text; „seit“ bleibt.
+- **Wirkung sofort, ohne Reload:** Das Skript schreibt `/var/lib/athenos-maintenance/status.json` atomar; Caddy prüft die Datei bei jeder Anfrage. Seiten antworten mit 503 und `Retry-After`, die API mit `503 {"error":{"code":"ATH-SYS-004",…}}`. Die Web-App kennt diesen Code: Wer sie offen hat, sieht keinen Fehlerschwall.
+- **`aus`:** Die offenen Wartungsseiten merken es innerhalb von 5 s und laden die App, sobald ihre API gesund antwortet.
+- **`deploy.sh` schaltet selbst** (`update`, zurück in 5 Minuten): an vor dem Dump und dem Neustart, aus, sobald das neue Release gesund ist, oder nach einem gesunden Rollback. Endet der Deploy ohne gesundes Release, **bleibt die Seite an**, und `deploy.sh` sagt es. War sie vorher schon von Hand an, lässt der Deploy sie, wie sie ist. `--no-maintenance` schaltet nichts.
+- **Überwachung:** Der Healthcheck erwartet während der Wartung die Wartungsseite statt der App und meldet einen Alarm, wenn sie länger als 2 Stunden an ist (`MAINTENANCE_MAX_HOURS` in `monitor.env`).
+- **Die Seite selbst** liegt in `/usr/local/share/athenos/maintenance` (aus `infra/beta/maintenance/www`: HTML, CSS, JS, Geist, Favicon, Impressum, ohne fremde Anfragen, mit strenger CSP). Sie kommt nicht mit dem Release, sondern mit `sudo ~/athenos-beta/server/install.sh maintenance` (auch Teil von `install.sh caddy`). Das Impressum ist während der Wartung unter `/_maintenance/impressum.html` erreichbar.
+- **Vorschau ohne Schalter:** `https://app.athenos.dev/_maintenance/#preview=update&eta=20:15` (auch `fix`, `wartung`, `unplanned`, `&message=…`, `&lang=en`) zeigt eine Variante, ohne zu pollen.
+
+### 5.4 Admin-Zugang am Wartungsmodus vorbei (`frprodapp`)
+Während die Wartungsseite an ist, kommst du über SSH direkt an die Edge des Hosts (`127.0.0.1:41002` auf dem Server, dieselbe, an die Caddy weiterleitet). Es gibt dafür keine Hintertür im Internet: der Weg ist dein SSH-Schlüssel.
+
+In deine `~/.zshrc` (einmal):
+```bash
+frprodapp() { /opt/fenrir/development/fenrir/infra/beta/admin-tunnel.sh "$@"; }
+```
+Dann:
+```bash
+frprodapp                 # öffnet den Tunnel und zeigt http://localhost:41902/
+frprodapp --port 41903    # anderer Port; --host <ssh-ziel> statt DEPLOY_HOST (Standard: athenos)
+```
+- Die App läuft dort unter `http://localhost:41902` vollständig: gleiche CSP (`'self'`), die API über `/gateway/…` derselben Adresse, `localhost` gilt im Browser als sicherer Kontext.
+- **Eigene Anmeldung:** Die Sitzung liegt im Speicher des Browsers je Adresse; die von `app.athenos.dev` gilt hier nicht (und bleibt unberührt). Der PIN kommt wie immer per Mail.
+- **Grenzen:** Links in Mails zeigen weiter auf `https://app.athenos.dev`. Die Rate-Limits sehen dich als `127.0.0.1` (die Verbindung kommt vom SSH-Dienst). Die In-App-Wartung gilt auch hier (dort bist du als Admin ohnehin drin). Nicht gegen den laufenden Server getestet (W11 hat den Server nicht angefasst): Beim ersten Mal prüfen, dass Anmeldung, Board und Live-Updates gehen.
 
 ---
 

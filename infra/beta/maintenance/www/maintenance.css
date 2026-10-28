@@ -1,0 +1,595 @@
+/*
+ * The Athenos maintenance page. The values are the app's design tokens
+ * (athenos-webcomponents _tokens.scss: neutral canvas, white hairline
+ * panel, the black Λ tile, Geist), copied because nothing of the app may
+ * be needed while it is away. Light and dark follow the system.
+ */
+
+@font-face {
+  font-family: 'Geist';
+  src: url('/_maintenance/geist.woff2') format('woff2');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  color-scheme: light dark;
+  --bg-0: #f4f4f6;
+  --bg-2: #efeff2;
+  --surface: #ffffff;
+  --surface-2: #f9f9fb;
+  --border: #e2e2e6;
+  --border-strong: #ccccd0;
+  --fg: #1a1a1e;
+  --fg-2: #3c3c44;
+  --fg-3: #5c5c65;
+  --fg-label: #6e6e73;
+  --brand-mark-bg: #0a0a0b;
+  --brand-mark-fg: #ffffff;
+  --green: #16a34a;
+  --focus: #4f46e5;
+  --shadow:
+    0 1px 2px rgba(15, 23, 42, 0.04), 0 8px 24px -8px rgba(15, 23, 42, 0.1),
+    0 32px 64px -32px rgba(15, 23, 42, 0.12);
+  --glow-strength: 14%;
+  --grid: rgba(15, 23, 42, 0.055);
+  /* The reason's tone: the accent for an update, amber for a fix, a quiet
+     blue for planned maintenance, the neutral grey when nobody planned it. */
+  --tone: #4f46e5;
+  --font: 'Geist', -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', system-ui, sans-serif;
+}
+
+:root[data-variant='fix'] {
+  --tone: #cc7c2e;
+}
+:root[data-variant='wartung'] {
+  --tone: #2563eb;
+}
+:root[data-variant='unplanned'] {
+  --tone: #6e6e73;
+  --glow-strength: 8%;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg-0: #111113;
+    --bg-2: #222228;
+    --surface: #1c1c21;
+    --surface-2: #17171b;
+    --border: #2c2c34;
+    --border-strong: #3c3c46;
+    --fg: #e6e6eb;
+    --fg-2: #b0b0bc;
+    --fg-3: #9a9aa6;
+    --fg-label: #85858f;
+    --brand-mark-bg: #e6e6eb;
+    --brand-mark-fg: #111113;
+    --green: #46a86e;
+    --focus: #8280e8;
+    --shadow:
+      0 1px 2px rgba(0, 0, 0, 0.4), 0 12px 32px -12px rgba(0, 0, 0, 0.6),
+      inset 0 1px 0 rgba(255, 255, 255, 0.03);
+    --glow-strength: 18%;
+    --grid: rgba(255, 255, 255, 0.045);
+    --tone: #8280e8;
+  }
+  :root[data-variant='fix'] {
+    --tone: #c4884e;
+  }
+  :root[data-variant='wartung'] {
+    --tone: #5b80d4;
+  }
+  :root[data-variant='unplanned'] {
+    --tone: #85858f;
+    --glow-strength: 10%;
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  min-height: 100dvh;
+  background: var(--bg-0);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* A soft light from above in the reason's tone, over a faint dot grid that
+   fades out towards the edges. */
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(
+      60rem 32rem at 50% -8rem,
+      color-mix(in srgb, var(--tone) var(--glow-strength), transparent),
+      transparent 70%
+    ),
+    radial-gradient(circle at center, var(--grid) 1px, transparent 1.4px) 0 0 / 22px 22px;
+  -webkit-mask-image: radial-gradient(ellipse 70% 60% at 50% 30%, #000 30%, transparent 100%);
+  mask-image: radial-gradient(ellipse 70% 60% at 50% 30%, #000 30%, transparent 100%);
+  transition: background 600ms ease;
+}
+
+.stage {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 22px;
+  padding: max(40px, env(safe-area-inset-top)) 16px 24px;
+}
+
+/* Brand: the same tile and word as the app's sign-in page. */
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.brand__mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  background: var(--brand-mark-bg);
+  color: var(--brand-mark-fg);
+}
+
+.brand__glyph {
+  display: block;
+  width: 24px;
+  height: 24px;
+  fill: currentColor;
+}
+
+.brand__name {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1;
+}
+
+.card {
+  width: 100%;
+  max-width: 452px;
+  padding: 36px 36px 28px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+  text-align: center;
+  animation: rise 520ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+[data-boot] .card {
+  visibility: hidden;
+}
+
+/* The calm indicator: a tile with the reason's icon and two rings that
+   breathe out of it, one after the other. */
+.badge {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  margin: 0 auto 22px;
+}
+
+.badge__tile {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 18px;
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--tone) 10%, var(--surface)),
+      color-mix(in srgb, var(--tone) 4%, var(--surface))
+    );
+  border: 1px solid color-mix(in srgb, var(--tone) 22%, var(--border));
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.5) inset,
+    0 6px 16px -8px color-mix(in srgb, var(--tone) 45%, transparent);
+  color: var(--tone);
+}
+
+.badge__ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 18px;
+  border: 1px solid color-mix(in srgb, var(--tone) 40%, transparent);
+  opacity: 0;
+  animation: breathe 3.6s cubic-bezier(0.22, 0.61, 0.36, 1) infinite;
+}
+
+.badge__ring--late {
+  animation-delay: 1.8s;
+}
+
+.badge__icon {
+  display: none;
+  width: 26px;
+  height: 26px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+[data-variant='update'] .badge__icon--update,
+[data-variant='fix'] .badge__icon--fix,
+[data-variant='wartung'] .badge__icon--wartung,
+[data-variant='unplanned'] .badge__icon--unplanned {
+  display: block;
+}
+
+.badge__icon--update {
+  animation: twinkle 3.6s ease-in-out infinite;
+}
+
+.badge__icon--fix {
+  transform-origin: 70% 30%;
+  animation: tune 3.6s ease-in-out infinite;
+}
+
+.badge__icon--wartung {
+  animation: turn 12s linear infinite;
+}
+
+.badge__icon--unplanned {
+  stroke-dasharray: 64;
+  animation: pulse-line 2.4s ease-in-out infinite;
+}
+
+.title {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.25;
+  text-wrap: balance;
+}
+
+.title__emoji {
+  display: inline-block;
+  margin-left: 2px;
+  font-weight: 400;
+}
+
+.title__emoji:empty {
+  display: none;
+}
+
+.lead {
+  max-width: 34ch;
+  margin: 10px auto 0;
+  font-size: 14.5px;
+  line-height: 1.6;
+  color: var(--fg-3);
+  text-wrap: pretty;
+}
+
+.note {
+  margin: 16px 0 0;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--fg-2);
+  text-align: left;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+/* An indeterminate hairline: something is happening, no promise of a percentage. */
+.meter {
+  position: relative;
+  height: 2px;
+  margin: 26px auto 18px;
+  max-width: 240px;
+  border-radius: 2px;
+  background: var(--bg-2);
+  overflow: hidden;
+}
+
+.meter__bar {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 38%;
+  border-radius: 2px;
+  background: linear-gradient(90deg, transparent, var(--tone), transparent);
+  animation: glide 2.6s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+
+.facts {
+  display: grid;
+  gap: 8px;
+  justify-content: center;
+  margin: 0;
+}
+
+.facts__row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--fg-3);
+}
+
+.facts__row[hidden] {
+  display: none;
+}
+
+.facts dd {
+  margin: 0;
+}
+
+.facts strong {
+  color: var(--fg);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.facts__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  color: var(--fg-label);
+}
+
+.facts__icon svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.live {
+  position: relative;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--green);
+}
+
+.live::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: var(--green);
+  animation: ping 2.4s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+[data-state='checking'] .live {
+  background: var(--tone);
+}
+
+.foot {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 12px 16px max(18px, env(safe-area-inset-bottom));
+  font-size: 12px;
+  color: var(--fg-label);
+}
+
+.foot a,
+.doc a {
+  color: var(--fg-3);
+  text-decoration: none;
+  border-radius: 4px;
+}
+
+.foot a:hover,
+.doc a:hover {
+  color: var(--fg);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+a:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* The static Impressum (impressum.html). */
+.doc {
+  width: 100%;
+  max-width: 560px;
+  padding: 32px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+}
+
+.doc h1 {
+  margin: 0 0 14px;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+
+.doc p {
+  margin: 0 0 12px;
+  color: var(--fg-2);
+  line-height: 1.65;
+}
+
+.doc address {
+  margin: 0 0 12px;
+  font-style: normal;
+  color: var(--fg);
+  line-height: 1.65;
+}
+
+.doc__back {
+  display: inline-block;
+  margin-top: 8px;
+  font-size: 13px;
+}
+
+[data-lang][hidden] {
+  display: none;
+}
+
+@media (max-width: 480px) {
+  .stage {
+    gap: 18px;
+    padding-top: max(24px, env(safe-area-inset-top));
+    padding-bottom: 8vh;
+  }
+  .card,
+  .doc {
+    padding: 28px 22px 22px;
+    border-radius: 14px;
+  }
+  .title {
+    font-size: 20px;
+  }
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes breathe {
+  0% {
+    opacity: 0.55;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.55);
+  }
+}
+
+@keyframes glide {
+  0% {
+    transform: translateX(-110%);
+  }
+  100% {
+    transform: translateX(290%);
+  }
+}
+
+@keyframes ping {
+  0% {
+    opacity: 0.6;
+    transform: scale(1);
+  }
+  80%,
+  100% {
+    opacity: 0;
+    transform: scale(2.6);
+  }
+}
+
+@keyframes twinkle {
+  0%,
+  100% {
+    transform: scale(1) rotate(0deg);
+  }
+  50% {
+    transform: scale(1.08) rotate(8deg);
+  }
+}
+
+@keyframes tune {
+  0%,
+  60%,
+  100% {
+    transform: rotate(0deg);
+  }
+  70% {
+    transform: rotate(-14deg);
+  }
+  82% {
+    transform: rotate(6deg);
+  }
+}
+
+@keyframes turn {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes pulse-line {
+  0% {
+    stroke-dashoffset: 64;
+  }
+  60%,
+  100% {
+    stroke-dashoffset: 0;
+  }
+}
+
+/* Reduced motion: the same page, standing still. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+  .badge__ring {
+    opacity: 0.35;
+    transform: scale(1.18);
+  }
+  .badge__ring--late {
+    display: none;
+  }
+  .meter__bar {
+    left: 31%;
+  }
+}

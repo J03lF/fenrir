@@ -20,3 +20,5 @@ static/control-plane/
 db-test/.env
 # SSH host key, generated on first start (server.ssh.host_key_path)
 keys/
+# Host logs (logs/app.log, logs/db.log, logs/archive/), created at runtime
+/logs/

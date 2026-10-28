@@ -1214,19 +1214,71 @@ fn parse_fenrir_version_req(min: Option<&str>, max: Option<&str>) -> Option<Vers
     }
 }
 
+/// `modules.registry.auth_token`: a literal, or `env:<VAR>`. A referenced
+/// variable may also come as `<VAR>_FILE` (a path to a file holding the
+/// value), like the secrets of the config loader (`config/model.rs`
+/// `resolve_secret_from_env`): the server keeps every secret in a file.
 fn resolve_secret(raw: &str) -> Result<String, ModuleRegistryInitError> {
+    resolve_reference(raw, true, |name| std::env::var(name).ok())
+}
+
+/// A path setting: a literal, or `env:<VAR>` (no `_FILE` indirection: the
+/// value is a path already).
+fn resolve_path_reference(raw: &str) -> Result<String, ModuleRegistryInitError> {
+    resolve_reference(raw, false, |name| std::env::var(name).ok())
+}
+
+fn resolve_reference(
+    raw: &str,
+    allow_file: bool,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<String, ModuleRegistryInitError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Ok(String::new());
     }
-    if let Some(env) = trimmed.strip_prefix("env:") {
-        std::env::var(env.trim()).map_err(|_| {
-            ModuleRegistryInitError::InvalidConfig(
-                messages::infra::modules::registry::auth_token_env_missing(env.trim()),
-            )
-        })
+    let Some(env) = trimmed.strip_prefix("env:") else {
+        return Ok(trimmed.to_string());
+    };
+    let var = env.trim();
+    let invalid = |message: String| ModuleRegistryInitError::InvalidConfig(message);
+    let direct = lookup(var);
+    let file_var = format!("{var}_FILE");
+    let file_ref = if allow_file {
+        lookup(&file_var)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
     } else {
-        Ok(trimmed.to_string())
+        None
+    };
+    let direct_non_empty = direct
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match (direct_non_empty, file_ref) {
+        (Some(_), Some(_)) => Err(invalid(
+            messages::infra::modules::registry::auth_token_env_ambiguous(var, &file_var),
+        )),
+        (Some(value), None) => Ok(value.to_string()),
+        (None, Some(path)) => {
+            let content = fs::read_to_string(&path).map_err(|err| {
+                invalid(
+                    messages::infra::modules::registry::auth_token_file_read_failed(&file_var, err),
+                )
+            })?;
+            let secret = content.trim();
+            if secret.is_empty() {
+                return Err(invalid(
+                    messages::infra::modules::registry::auth_token_file_empty(&file_var),
+                ));
+            }
+            Ok(secret.to_string())
+        }
+        // Set but empty: the same as before, an empty value (no header).
+        (None, None) if direct.is_some() => Ok(String::new()),
+        (None, None) => Err(invalid(
+            messages::infra::modules::registry::auth_token_env_missing(var),
+        )),
     }
 }
 
@@ -1235,7 +1287,7 @@ fn resolve_optional_path(
     field: &str,
 ) -> Result<Option<String>, ModuleRegistryInitError> {
     if let Some(value) = raw {
-        let resolved = resolve_secret(value)?;
+        let resolved = resolve_path_reference(value)?;
         let trimmed = resolved.trim();
         if trimmed.is_empty() {
             return Err(ModuleRegistryInitError::InvalidConfig(
@@ -1245,5 +1297,95 @@ fn resolve_optional_path(
         Ok(Some(trimmed.to_string()))
     } else {
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod secret_reference_tests {
+    use super::resolve_reference;
+    use std::collections::HashMap;
+
+    fn lookup(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: HashMap<String, String> = vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |name| map.get(name).cloned()
+    }
+
+    fn secret_file(content: &str) -> std::path::PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("fenrir-registry-token-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, content).expect("write secret file");
+        path
+    }
+
+    #[test]
+    fn a_literal_and_a_direct_variable_resolve_as_before() {
+        assert_eq!(
+            resolve_reference(" abc ", true, lookup(&[])).unwrap(),
+            "abc"
+        );
+        assert_eq!(
+            resolve_reference("env:TOKEN", true, lookup(&[("TOKEN", " t0k ")])).unwrap(),
+            "t0k"
+        );
+        assert_eq!(resolve_reference("", true, lookup(&[])).unwrap(), "");
+    }
+
+    #[test]
+    fn the_file_variant_is_read_and_trimmed() {
+        let file = secret_file("s3cret-from-file\n");
+        let path = file.display().to_string();
+        let resolved =
+            resolve_reference("env:TOKEN", true, lookup(&[("TOKEN_FILE", path.as_str())]));
+        std::fs::remove_file(&file).ok();
+        assert_eq!(resolved.unwrap(), "s3cret-from-file");
+    }
+
+    #[test]
+    fn both_variants_at_once_are_refused() {
+        let err = resolve_reference(
+            "env:TOKEN",
+            true,
+            lookup(&[("TOKEN", "a"), ("TOKEN_FILE", "/nonexistent")]),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("TOKEN_FILE"), "{err}");
+    }
+
+    #[test]
+    fn a_missing_or_empty_file_is_an_error_that_names_the_variable() {
+        let err = resolve_reference(
+            "env:TOKEN",
+            true,
+            lookup(&[("TOKEN_FILE", "/nonexistent/fenrir-registry-token")]),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("TOKEN_FILE"), "{err}");
+
+        let file = secret_file("  \n");
+        let path = file.display().to_string();
+        let err = resolve_reference("env:TOKEN", true, lookup(&[("TOKEN_FILE", path.as_str())]))
+            .unwrap_err();
+        std::fs::remove_file(&file).ok();
+        assert!(err.to_string().contains("TOKEN_FILE"), "{err}");
+    }
+
+    #[test]
+    fn nothing_set_is_still_the_missing_variable_error() {
+        let err = resolve_reference("env:TOKEN", true, lookup(&[])).unwrap_err();
+        assert!(err.to_string().contains("TOKEN"), "{err}");
+    }
+
+    #[test]
+    fn paths_never_follow_a_file_variable() {
+        let err = resolve_reference(
+            "env:CA_PATH",
+            false,
+            lookup(&[("CA_PATH_FILE", "/etc/ca.pem")]),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("CA_PATH"), "{err}");
     }
 }

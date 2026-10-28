@@ -160,6 +160,18 @@ pub fn auth_token_env_missing(var: impl fmt::Display) -> String {
     )
 }
 
+pub fn auth_token_env_ambiguous(var: impl fmt::Display, file_var: impl fmt::Display) -> String {
+    format!("modules.registry.auth_token: set either {var} or {file_var}, not both")
+}
+
+pub fn auth_token_file_read_failed(file_var: impl fmt::Display, err: impl fmt::Display) -> String {
+    format!("modules.registry.auth_token: failed to read the file named by {file_var}: {err}")
+}
+
+pub fn auth_token_file_empty(file_var: impl fmt::Display) -> String {
+    format!("modules.registry.auth_token: the file named by {file_var} is empty")
+}
+
 pub fn resolved_empty(field: impl fmt::Display) -> String {
     format!("{} must not resolve to an empty value", field)
 }

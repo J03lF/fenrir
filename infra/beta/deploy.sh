@@ -151,7 +151,10 @@ EOF
 fi
 log "uploading to $DEPLOY_HOST:$remote"
 ssh -o BatchMode=yes -- "$DEPLOY_HOST" "mkdir -p -m 0700 -- '$DEPLOY_UPLOAD_ROOT' '$remote'"
-rsync -a --partial --chmod=D700,F600 -e "ssh -o BatchMode=yes" -- "$stage"/ "$DEPLOY_HOST:$remote/"
+# No --chmod: macOS ships openrsync, which does not support it; the modes
+# are set on the server right after the upload instead.
+rsync -a --partial -e "ssh -o BatchMode=yes" -- "$stage"/ "$DEPLOY_HOST:$remote/"
+ssh -o BatchMode=yes -- "$DEPLOY_HOST" "find '$remote' -type d -exec chmod 0700 {} + && find '$remote' -type f -exec chmod 0600 {} +"
 
 log "deploying on $DEPLOY_HOST (sudo may ask for your password)"
 rc=0

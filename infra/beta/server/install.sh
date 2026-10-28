@@ -234,7 +234,15 @@ step_caddy() {
 	[ -s /etc/caddy/cloudflare-trusted-proxies.caddy ] || "$BASE/server/cloudflare-ips.sh" update
 	[ -e /etc/caddy/Caddyfile.orig ] || [ ! -e /etc/caddy/Caddyfile ] || cp -p /etc/caddy/Caddyfile /etc/caddy/Caddyfile.orig
 	install -m 0644 -o root -g root "$BASE/caddy/Caddyfile" /etc/caddy/Caddyfile
-	caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+	# `caddy validate` opens the log files. Run as root it created the access
+	# log root:root, and the caddy service could not open it on the reload
+	# (permission denied). So: the log belongs to caddy (an earlier run's
+	# root-owned file too), and the validation runs as the caddy user, with
+	# the same rights as the service.
+	local access_log=/var/log/caddy/app.athenos.dev.access.log
+	[ -e "$access_log" ] || install -m 0640 -o caddy -g caddy /dev/null "$access_log"
+	find /var/log/caddy -maxdepth 1 -type f -name 'app.athenos.dev.access*' ! -user caddy -exec chown caddy:caddy {} +
+	runuser -u caddy -- caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 	systemctl enable caddy
 	systemctl reload-or-restart caddy
 }

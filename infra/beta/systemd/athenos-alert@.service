@@ -1,0 +1,29 @@
+# OnFailure= target of athenos.service and athenos-backup.service:
+# mails the failed unit's status and last log lines to the admin.
+[Unit]
+Description=Athenos alert for %i
+
+[Service]
+Type=oneshot
+User=athenos
+Group=athenos
+SupplementaryGroups=systemd-journal
+EnvironmentFile=-/etc/athenos/monitor.env
+ExecStart=/usr/local/lib/athenos/alert.sh unit %i
+TimeoutStartSec=2min
+
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service

@@ -1,0 +1,121 @@
+# Fenrir host configuration for the Athenos beta server (app.athenos.dev).
+#
+# Loaded instead of config/prod.toml: the unit sets FENRIR_ENV=prod (operating
+# mode, SPEC §1) and FENRIR_CONFIG_ENV=beta (this file, copied to
+# config/beta.toml in the release). Layering: config/default.toml, then this
+# file, then the FENRIR_* environment from /etc/athenos/fenrir.env.
+#
+# Every path is absolute: the release directory (/opt/athenos/releases/<id>)
+# is read-only for the service, state lives under /var/lib/athenos.
+# No secrets in this file; they come from *_FILE variables.
+
+[runtime]
+base_path = "/var/lib/athenos/runtime"
+
+[server]
+enable_http = true
+enable_grpc = true
+
+# The SSH shell stays on loopback (reach it with `ssh -L 2222:127.0.0.1:2222`).
+# The firewall closes 2222 as well.
+[server.ssh]
+host = "127.0.0.1"
+port = 2222
+server_name = "athenos-beta"
+host_key_path = "/var/lib/athenos/keys/ssh/host_ed25519"
+idle_close_seconds = 900
+
+# Control plane on loopback only. TLS ends at Caddy; the hop
+# Caddy -> static edge (127.0.0.1:41002) -> control plane never leaves the host.
+[server.http]
+host = "127.0.0.1"
+port = 8080
+
+[server.http.tls]
+enabled = false
+
+[server.grpc]
+host = "127.0.0.1"
+port = 50051
+
+[server.grpc.tls]
+enabled = false
+
+[security.http]
+control_tokens = [
+    "admin:env:FENRIR_HTTP_TOKEN_ADMIN",
+    "operator:env:FENRIR_HTTP_TOKEN_OPERATOR",
+    "viewer:env:FENRIR_HTTP_TOKEN_VIEWER",
+]
+
+# Embedded identity provider with the users in Postgres (no identity-service
+# on the beta server). The password policy is the strict one of default.toml.
+[security.identity]
+provider = "embedded"
+environment = "prod"
+instance_id = "athenos-beta"
+
+[security.identity.embedded]
+storage = "db"
+store_path = "/var/lib/athenos/runtime/identity/store.json"
+
+# Distro PostgreSQL 16 on the same host, Unix socket only, peer
+# authentication as the OS user `athenos`: no database password exists.
+[db]
+default_engine = "postgres"
+
+[db.runtime]
+mode = "external"
+
+[db.connections.postgres]
+uri = "postgres://athenos@/athenos?host=/var/run/postgresql"
+
+[db.connections.postgres.pool]
+max = 16
+timeout_ms = 5000
+
+# The host's own embedded-Postgres backup only works in embedded mode; the
+# nightly pg_dump runs from athenos-backup.timer instead.
+[db.backup]
+enabled = false
+
+[db.schema]
+export_dir = "/var/lib/athenos/runtime/schemas"
+import_dir = "/var/lib/athenos/runtime/schemas"
+auto_backup = false
+
+[telemetry.tracing]
+level = "info"
+
+[audit.storage]
+path = "/var/lib/athenos/runtime/audit/fenrir-audit-history.json"
+retention_days = 2
+
+# Nothing is installed from a registry at boot; releases come from deploy.sh.
+# (default.toml's registry auth_token = "env:FENRIR_REGISTRY_TOKEN" must still
+# resolve at config load: fenrir.env points FENRIR_REGISTRY_TOKEN_FILE at a
+# generated placeholder; no registry is contacted.)
+[modules]
+bootstrap = []
+
+# install_dir is overridden at start by start-host.sh with the resolved
+# release path (FENRIR_MODULE_INSTALL_DIR=/opt/athenos/releases/<id>/modules),
+# so a symlink switch never changes the modules of a running host.
+# <release>/modules/runtime is a symlink to /var/lib/athenos/modules-runtime
+# (ports, module logs, module secrets, runtime state survive releases).
+[modules.storage]
+install_dir = "/opt/athenos/current/modules"
+cache_dir = "/var/lib/athenos/modules-cache"
+
+# Never scan or build dev sources on the server.
+[modules.dev_sources]
+base_path = ""
+
+# NOTIFY_* and SMTP_* reach notification-service only through this list (the
+# host derives ATHENOS_/AUTH_/NOTIFICATION_ prefixes itself). Keep it short:
+# every module receives what matches.
+[modules.runtime]
+env_passthrough_prefixes = ["NOTIFY_", "SMTP_"]
+
+[modules.trust]
+require_signature = false

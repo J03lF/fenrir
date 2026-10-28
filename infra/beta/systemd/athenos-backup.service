@@ -1,0 +1,42 @@
+# Nightly pg_dump of the Athenos database (see server/backup.sh).
+[Unit]
+Description=Athenos database backup
+After=postgresql@16-main.service
+Requires=postgresql@16-main.service
+OnFailure=athenos-alert@%n.service
+
+[Service]
+Type=oneshot
+User=athenos
+Group=athenos
+EnvironmentFile=/etc/athenos/backup.env
+# rclone/ssh want a writable cache; the home directory is read-only here.
+Environment=XDG_CACHE_HOME=/var/backups/athenos/.cache
+ExecStart=/usr/local/lib/athenos/backup.sh
+Nice=10
+IOSchedulingClass=idle
+UMask=0077
+TimeoutStartSec=2h
+
+ProtectSystem=strict
+ReadWritePaths=/var/backups/athenos /run/lock
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged

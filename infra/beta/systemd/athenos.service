@@ -1,0 +1,86 @@
+# Athenos beta: the Fenrir host and the modules it spawns (athenos,
+# athenos-api, auth-service, notification-service, athenos-web edge).
+# Install: /etc/systemd/system/athenos.service (install.sh does it).
+#
+# Postgres is the distro unit postgresql@16-main; the host connects through
+# the Unix socket with peer authentication (no password).
+# The modules are children of the host, inside this unit's cgroup: the
+# limits and the hardening below apply to them too.
+
+[Unit]
+Description=Athenos beta (Fenrir host and modules)
+Documentation=file:/opt/athenos/current/infra/beta/RUNBOOK.md
+After=network-online.target postgresql@16-main.service
+Wants=network-online.target
+Requires=postgresql@16-main.service
+# Five crashes in ten minutes: stop trying and alert.
+StartLimitIntervalSec=600
+StartLimitBurst=5
+OnFailure=athenos-alert@%n.service
+
+[Service]
+Type=simple
+User=athenos
+Group=athenos
+# start-host.sh resolves /opt/athenos/current once, cds into the release and
+# execs the host with FENRIR_MODULE_INSTALL_DIR=<release>/modules, so a later
+# symlink switch never changes a running host.
+ExecStart=/usr/local/lib/athenos/start-host.sh
+EnvironmentFile=/etc/athenos/fenrir.env
+Restart=on-failure
+RestartSec=5s
+# 78 = start-host.sh found no usable release: restarting would not help.
+RestartPreventExitStatus=78
+# SIGTERM to the host only; it stops its modules. Whatever is left after the
+# timeout gets SIGKILL.
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=60s
+UMask=0077
+
+# Resources (sized for 8 GB RAM; Postgres has its own unit). The core loads
+# the Athenos AI model (about 1.1 GB on disk).
+MemoryHigh=5G
+MemoryMax=6G
+TasksMax=2048
+LimitNOFILE=65536
+Nice=0
+
+# Filesystem: everything read-only except state, logs and the module
+# metadata directories inside the releases (the host writes
+# <module>/.fenrir/runtime.json before each module start; the release files
+# themselves belong to root and stay unwritable).
+ProtectSystem=strict
+ReadWritePaths=/var/lib/athenos /var/log/athenos /opt/athenos/releases
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+DevicePolicy=closed
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+KeyringMode=private
+
+# Privileges: none.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=yes
+RemoveIPC=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+# AF_NETLINK: interface statistics of the system sampler.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

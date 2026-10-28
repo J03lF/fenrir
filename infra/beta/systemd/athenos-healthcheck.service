@@ -1,0 +1,32 @@
+# Health check with mail alerts (see server/healthcheck.sh). Exit code 1
+# means "a check failed" and is expected: the script alerts by itself.
+[Unit]
+Description=Athenos health check
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=athenos
+Group=athenos
+SupplementaryGroups=systemd-journal
+EnvironmentFile=-/etc/athenos/monitor.env
+ExecStart=/usr/local/lib/athenos/healthcheck.sh --quiet
+SuccessExitStatus=1
+TimeoutStartSec=5min
+
+ProtectSystem=strict
+ReadWritePaths=/var/lib/athenos/monitor
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service

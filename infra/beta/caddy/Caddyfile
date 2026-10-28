@@ -1,0 +1,94 @@
+# /etc/caddy/Caddyfile - public entry of the Athenos beta.
+#
+# Caddy terminates TLS (automatic HTTPS via ACME, HTTP/3 on 443/udp) and
+# proxies to exactly one upstream: the host's static-site edge on
+# 127.0.0.1:41002. The edge serves the web app and forwards /gateway/* to the
+# control plane, which routes to the API gateway module.
+#
+# Validate: caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+{
+	# ACME account contact (expiry warnings from the CA).
+	email admin@athenos.dev
+	servers {
+		# Never add `log_credentials`: without it Caddy redacts Authorization,
+		# Cookie and Set-Cookie in the logs (the filter below drops them too).
+		# No client-supplied address header is believed: {client_ip} is the
+		# TCP peer. With Cloudflare proxying on, list its ranges here and add
+		# `client_ip_headers CF-Connecting-IP` (SPEC §2).
+		protocols h1 h2 h3
+	}
+}
+
+(security_headers) {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+		-Via
+	}
+}
+
+(access_log) {
+	# 7 days (privacy policy: server logs 7 days). Secrets in URLs are
+	# replaced before the line is written: stream tickets (?token=),
+	# invitation, challenge and code parameters, /invite/<token> paths; the
+	# legacy user-token header is dropped.
+	log {
+		output file /var/log/caddy/app.athenos.dev.access.log {
+			mode 0640
+			roll_size 50MiB
+			roll_keep 14
+			roll_keep_for 168h
+			roll_local_time
+		}
+		format filter {
+			wrap json
+			fields {
+				request>uri regexp "((?:[?&](?:token|ticket|invite|challenge|code|key)=)|/invite/)[^&/?#]*" "${1}REDACTED"
+				request>headers>X-Athenos-User-Token delete
+				request>headers>Cookie delete
+				request>headers>Authorization delete
+				resp_headers>Set-Cookie delete
+			}
+		}
+	}
+}
+
+app.athenos.dev {
+	import security_headers
+	import access_log
+
+	# Only the API gateway is reachable through /gateway. The edge would
+	# forward any /gateway/services/<id>/... to the control plane; everything
+	# but the api-gateway service is refused here already (both the encoded
+	# and the decoded spelling of the service id).
+	@api path /gateway/services/module%3Aathenos-api%3A%3Aapi-gateway/* /gateway/services/module:athenos-api::api-gateway/*
+	@gateway_other path /gateway /gateway/*
+	@internal path /.fenrir /.fenrir/*
+
+	handle @api {
+		# No `encode` here: the edge skips compression of secret-bearing
+		# responses on purpose (BREACH); compressing again would undo that.
+		reverse_proxy 127.0.0.1:41002 {
+			header_up X-Real-IP {client_ip}
+			# Event streams (ticket live updates) must not be buffered.
+			flush_interval -1
+		}
+	}
+
+	handle @gateway_other {
+		respond 404
+	}
+
+	handle @internal {
+		respond 404
+	}
+
+	handle {
+		encode zstd gzip
+		reverse_proxy 127.0.0.1:41002 {
+			header_up X-Real-IP {client_ip}
+		}
+	}
+}
+
+# www and the bare IP get nothing; HTTP is redirected to HTTPS by Caddy.

@@ -1,13 +1,23 @@
 # Fenrir host configuration for the Athenos beta server (app.athenos.dev).
 #
-# Loaded instead of config/prod.toml: the unit sets FENRIR_ENV=prod (operating
-# mode, SPEC §1) and FENRIR_CONFIG_ENV=beta (this file, copied to
-# config/beta.toml in the release). Layering: config/default.toml, then this
-# file, then the FENRIR_* environment from /etc/athenos/fenrir.env.
+# Selection: the unit sets FENRIR_ENV=prod (operating mode, SPEC §1: all
+# production checks of src/config/mode.rs apply) and FENRIR_CONFIG_ENV=beta,
+# which picks this file (copied to config/beta.toml in the release) instead
+# of config/prod.toml. Layering: config/default.toml, this file, then the
+# FENRIR_* environment from /etc/athenos/fenrir.env. config/local.toml is
+# ignored in production; a server-only override would go into
+# FENRIR_CONFIG_FILE.
 #
-# Every path is absolute: the release directory (/opt/athenos/releases/<id>)
-# is read-only for the service, state lives under /var/lib/athenos.
-# No secrets in this file; they come from *_FILE variables.
+# Why not prod.toml: it describes a host with an external identity-service
+# (https://127.0.0.1:8081 with client TLS), gRPC with TLS certificates, a
+# module registry with TLS and the fenrir-api bootstrap. The beta server has
+# none of these: embedded identity in Postgres, plain listeners on loopback
+# only behind Caddy, releases from deploy.sh.
+#
+# Every path is absolute (default.toml carries the paths of the dev Mac):
+# the release directory (/opt/athenos/releases/<id>) is read-only for the
+# service, state lives under /var/lib/athenos. No secrets in this file; they
+# come from *_FILE variables.
 
 [runtime]
 base_path = "/var/lib/athenos/runtime"
@@ -78,6 +88,16 @@ timeout_ms = 5000
 # nightly pg_dump runs from athenos-backup.timer instead.
 [db.backup]
 enabled = false
+path = "/var/lib/athenos/runtime/backups"
+pg_basebackup_path = "/usr/lib/postgresql/16/bin/pg_basebackup"
+
+# Not used in external mode; only so no path of the dev Mac stays in effect.
+[db.runtime.embedded.sqlite]
+file_path = "/var/lib/athenos/runtime/db/fenrir.db"
+
+[db.runtime.embedded.postgres]
+data_dir = "/var/lib/athenos/runtime/db/postgres"
+binary_path = "/usr/lib/postgresql/16/bin/postgres"
 
 [db.schema]
 export_dir = "/var/lib/athenos/runtime/schemas"

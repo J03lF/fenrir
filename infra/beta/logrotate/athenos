@@ -1,15 +1,14 @@
-# /etc/logrotate.d/athenos - files next to the journal: the host's DB log,
-# the module logs (the host opens them with O_APPEND, so copytruncate is
-# safe) and the deploy log. 7 days, at most 100 MB per file before that.
-/var/log/athenos/*.log /var/lib/athenos/modules-runtime/logs/*.log {
+# /etc/logrotate.d/athenos - the deploy log (written by root). The host rotates its own logs
+# (app/db log and every module log: daily or 50 MB, archives deleted after
+# 7 days, [telemetry.logs]); journald keeps 7 days.
+/var/log/athenos-deploy.log {
 	daily
-	maxsize 100M
+	maxsize 10M
 	rotate 7
 	maxage 7
 	missingok
 	notifempty
 	compress
 	delaycompress
-	copytruncate
-	su athenos athenos
+	create 0640 root root
 }

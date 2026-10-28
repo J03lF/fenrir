@@ -183,6 +183,9 @@ pub struct ServerSection {
     pub http: HttpConfig,
     #[serde(default)]
     pub grpc: Option<GrpcConfig>,
+    /// Client address behind a reverse proxy (W9A-01), see `config::edge`.
+    #[serde(default)]
+    pub edge: super::edge::EdgeSection,
 }
 
 #[derive(Debug, Deserialize, Clone)]

@@ -74,9 +74,7 @@ use fenrir_module_kit::{ModuleTokenExchangeRequest, ModuleTokenExchangeResponse}
 
 use super::gateway::{HTTP_GATEWAY_CLIENT, HTTP_GATEWAY_STREAMING_CLIENT, SERVICE_RATE_LIMITER};
 use super::proxy_headers::HopByHop;
-use super::proxy_headers::{
-    forwarded_for, is_edge_hop, CLIENT_ADDRESS_HEADERS, EDGE_HOP_HEADER, FORWARDED_FOR,
-};
+use super::proxy_headers::{gateway_forwarded_for, is_edge_hop, EDGE_HOP_HEADER, FORWARDED_FOR};
 use super::server::HTTP_SERVICE_ID;
 use super::state::{HttpInfo, HttpState};
 
@@ -2786,17 +2784,13 @@ async fn gateway_proxy(
         // `X-Forwarded-For` (5.6): kept and extended with the TCP peer only
         // when the caller is a trusted hop, i.e. the host's own static edge
         // (edge-hop secret) or a module with a valid service token. Anyone
-        // else is the client: its claim is replaced by its peer address.
+        // else is the client: its claim is replaced by its address, which
+        // is the TCP peer or, behind a trusted proxy, the `[server.edge]`
+        // header (W9A-01).
         let trusted_hop = claims.is_some()
             || is_edge_hop(headers.get(EDGE_HOP_HEADER).map(HeaderValue::as_bytes));
-        let forwarded = forwarded_for(
-            headers
-                .get_all(FORWARDED_FOR)
-                .iter()
-                .map(HeaderValue::as_bytes),
-            peer,
-            trusted_hop,
-        );
+        let forwarded = gateway_forwarded_for(&headers, peer, trusted_hop, &state.client_ip);
+        let client_ip = Arc::clone(&state.client_ip);
 
         let send = |target: &ModuleIngressTarget| {
             let target_url = build_target_url(target, &path);
@@ -2829,7 +2823,7 @@ async fn gateway_proxy(
                 if name == HOST
                     || name.as_str() == EDGE_HOP_HEADER
                     || name.as_str() == FORWARDED_FOR
-                    || (!trusted_hop && CLIENT_ADDRESS_HEADERS.contains(&name.as_str()))
+                    || (!trusted_hop && client_ip.is_address_header(name.as_str()))
                 {
                     continue;
                 }
@@ -2992,6 +2986,7 @@ pub fn router_with_dependencies(
         registry,
         services,
         auth,
+        client_ip: Arc::new(crate::config::ClientIpPolicy::default()),
         info: HttpInfo {
             app_name: app_name.into(),
             app_version: app_version.into(),

@@ -30,6 +30,20 @@ allowed_ciphers = []
 host = "127.0.0.1"
 port = 8080
 
+# Real client address behind a reverse proxy (W9A-01). Off by default: every
+# client is its TCP peer. With both keys set, the static-site edge and the
+# control-plane gateway believe `client_ip_header` only from a TCP peer in
+# `trusted_proxies`, and only when it holds exactly one IP address; otherwise
+# the peer is the client. Client-sent address headers (X-Forwarded-For,
+# X-Real-IP, Forwarded, CF-Connecting-IP, True-Client-IP and the configured
+# one) are always stripped; modules receive `X-Forwarded-For: <client>`.
+# Invalid CIDRs or a header without trusted proxies stop the host at startup.
+# Env: FENRIR_SERVER__EDGE__CLIENT_IP_HEADER=x-real-ip
+#      FENRIR_SERVER__EDGE__TRUSTED_PROXIES=127.0.0.1/32,::1/128
+[server.edge]
+# client_ip_header = "x-real-ip"
+# trusted_proxies = ["127.0.0.1/32", "::1/128"]
+
 [server.http.tls]
 enabled = false
 cert_path = "config/certs/server.crt"

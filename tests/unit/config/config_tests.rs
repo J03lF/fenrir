@@ -135,3 +135,93 @@ FENRIR_REGISTRY_TOKEN=registry-token-example-123
         env::remove_var(key);
     }
 }
+
+const BASE_SECRETS: &[(&str, &str)] = &[
+    (
+        "FENRIR_DB_POSTGRES_URI",
+        "postgresql://localhost:5432/fenrir",
+    ),
+    ("FENRIR_HTTP_TOKEN_ADMIN", "admin-token-example"),
+    ("FENRIR_HTTP_TOKEN_OPERATOR", "operator-token-example"),
+    ("FENRIR_HTTP_TOKEN_VIEWER", "viewer-token-example"),
+    ("FENRIR_REGISTRY_TOKEN", "registry-token-example-123"),
+];
+
+/// Runs `body` with the base secrets and `extra` set, then removes them.
+fn with_env<T>(extra: &[(&str, &str)], body: impl FnOnce() -> T) -> T {
+    env::remove_var(ENV_CONFIG_FILE);
+    env::remove_var(ENV_CONFIG_ENV);
+    for (key, value) in BASE_SECRETS.iter().chain(extra) {
+        env::set_var(key, value);
+    }
+    let result = body();
+    for (key, _) in BASE_SECRETS.iter().chain(extra) {
+        env::remove_var(key);
+    }
+    result
+}
+
+#[test]
+fn edge_settings_come_from_the_documented_env_names() {
+    let _lock = test_mutex().lock().unwrap();
+    let cfg = with_env(
+        &[
+            ("FENRIR_SERVER__EDGE__CLIENT_IP_HEADER", "X-Real-IP"),
+            (
+                "FENRIR_SERVER__EDGE__TRUSTED_PROXIES",
+                "127.0.0.1/32, ::1/128",
+            ),
+        ],
+        || load().expect("edge env should load"),
+    );
+    let policy = cfg.server.edge.policy().unwrap();
+    assert_eq!(policy.header(), Some("x-real-ip"));
+    assert_eq!(policy.trusted_proxies().len(), 2);
+    assert!(policy.is_trusted_peer("::1".parse().unwrap()));
+}
+
+#[test]
+fn edge_settings_also_work_through_the_generic_env_source() {
+    let _lock = test_mutex().lock().unwrap();
+    let cfg = with_env(
+        &[
+            ("FENRIR__SERVER__EDGE__CLIENT_IP_HEADER", "cf-connecting-ip"),
+            (
+                "FENRIR__SERVER__EDGE__TRUSTED_PROXIES",
+                "127.0.0.1,10.0.0.0/8",
+            ),
+        ],
+        || load().expect("generic edge env should load"),
+    );
+    let policy = cfg.server.edge.policy().unwrap();
+    assert_eq!(policy.header(), Some("cf-connecting-ip"));
+    assert!(policy.is_trusted_peer("10.1.2.3".parse().unwrap()));
+}
+
+#[test]
+fn edge_garbage_fails_at_load() {
+    let _lock = test_mutex().lock().unwrap();
+    let err = with_env(
+        &[
+            ("FENRIR_SERVER__EDGE__CLIENT_IP_HEADER", "x-real-ip"),
+            (
+                "FENRIR_SERVER__EDGE__TRUSTED_PROXIES",
+                "127.0.0.1/32,banana",
+            ),
+        ],
+        || load().expect_err("garbage CIDR must fail"),
+    );
+    assert!(err.to_string().contains("banana"), "{err}");
+    let err = with_env(
+        &[("FENRIR_SERVER__EDGE__CLIENT_IP_HEADER", "x-real-ip")],
+        || load().expect_err("a header without proxies must fail"),
+    );
+    assert!(err.to_string().contains("trusted_proxies"), "{err}");
+}
+
+#[test]
+fn edge_is_off_by_default() {
+    let _lock = test_mutex().lock().unwrap();
+    let cfg = with_env(&[], || load().expect("config should load"));
+    assert_eq!(cfg.server.edge.policy().unwrap().header(), None);
+}

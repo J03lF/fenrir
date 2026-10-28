@@ -45,8 +45,9 @@ impl HopByHop {
     }
 }
 
-/// Client-address headers a proxy must not take from an untrusted client.
-pub(crate) const CLIENT_ADDRESS_HEADERS: &[&str] = &["x-forwarded-for", "x-real-ip", "forwarded"];
+// The client-address headers a proxy must not take from an untrusted
+// client are `config::CLIENT_ADDRESS_HEADERS` (owned by `[server.edge]`,
+// checked through `ClientIpPolicy::is_address_header`).
 
 pub(crate) const FORWARDED_FOR: &str = "x-forwarded-for";
 
@@ -114,6 +115,41 @@ pub(crate) fn forwarded_for<'a>(
     }
 }
 
+/// The `X-Forwarded-For` the control-plane gateway sends to a module.
+///
+/// A trusted hop (the host's own edge, a module with a service token) keeps
+/// its chain and gets its peer appended. For anyone else the chain is the
+/// client alone: the TCP peer, or the `[server.edge]` header when the peer
+/// is a trusted proxy (W9A-01).
+pub(crate) fn gateway_forwarded_for(
+    headers: &axum::http::HeaderMap,
+    peer: Option<std::net::IpAddr>,
+    trusted_hop: bool,
+    policy: &crate::config::ClientIpPolicy,
+) -> Option<String> {
+    use axum::http::HeaderValue;
+    let hop = if trusted_hop {
+        peer
+    } else {
+        policy.resolve(
+            peer,
+            policy
+                .header()
+                .into_iter()
+                .flat_map(|name| headers.get_all(name).iter())
+                .map(HeaderValue::as_bytes),
+        )
+    };
+    forwarded_for(
+        headers
+            .get_all(FORWARDED_FOR)
+            .iter()
+            .map(HeaderValue::as_bytes),
+        hop,
+        trusted_hop,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,6 +211,51 @@ mod tests {
                 true
             ),
             Some("10.1.2.3".to_string())
+        );
+    }
+
+    #[test]
+    fn the_gateway_resolves_external_clients_through_the_edge_policy() {
+        use crate::config::{ClientIpPolicy, EdgeSection};
+        use axum::http::{HeaderMap, HeaderValue};
+        let policy = EdgeSection {
+            client_ip_header: Some("x-real-ip".into()),
+            trusted_proxies: vec!["127.0.0.1/32".into(), "::1/128".into()],
+        }
+        .policy()
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-real-ip", HeaderValue::from_static("203.0.113.7"));
+        headers.insert("x-forwarded-for", HeaderValue::from_static("1.2.3.4"));
+        let loopback = Some("127.0.0.1".parse().unwrap());
+        // External caller behind the trusted proxy: the header wins, the
+        // spoofed chain is gone.
+        assert_eq!(
+            gateway_forwarded_for(&headers, loopback, false, &policy),
+            Some("203.0.113.7".to_string())
+        );
+        // Untrusted peer: its own address.
+        let stranger = Some("192.0.2.1".parse().unwrap());
+        assert_eq!(
+            gateway_forwarded_for(&headers, stranger, false, &policy),
+            Some("192.0.2.1".to_string())
+        );
+        // Trusted hop: chain plus peer, the edge header plays no role.
+        assert_eq!(
+            gateway_forwarded_for(&headers, loopback, true, &policy),
+            Some("1.2.3.4, 127.0.0.1".to_string())
+        );
+        // Feature off: the peer, as before.
+        assert_eq!(
+            gateway_forwarded_for(&headers, loopback, false, &ClientIpPolicy::default()),
+            Some("127.0.0.1".to_string())
+        );
+        // IPv6 proxy and client.
+        let mut v6 = HeaderMap::new();
+        v6.insert("x-real-ip", HeaderValue::from_static("2001:db8::9"));
+        assert_eq!(
+            gateway_forwarded_for(&v6, Some("::1".parse().unwrap()), false, &policy),
+            Some("2001:db8::9".to_string())
         );
     }
 

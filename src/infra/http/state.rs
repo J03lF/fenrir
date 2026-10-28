@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::config::ClientIpPolicy;
 use crate::security::auth::ControlPlaneAuthorizer;
 use crate::services::{AppServices, ServiceRegistry};
 
@@ -16,5 +17,7 @@ pub(super) struct HttpState {
     pub(super) registry: Arc<ServiceRegistry>,
     pub(super) services: Arc<AppServices>,
     pub(super) auth: Arc<ControlPlaneAuthorizer>,
+    /// `[server.edge]` (W9A-01): the client address of external callers.
+    pub(super) client_ip: Arc<ClientIpPolicy>,
     pub(super) info: HttpInfo,
 }

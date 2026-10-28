@@ -30,13 +30,14 @@ use tokio::sync::{oneshot, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
+use crate::config::ClientIpPolicy;
 use crate::domain::module::{
     ModuleId, ModuleRuntimeError, ModuleRuntimeInfo, ModuleRuntimeInstanceInfo, ModuleRuntimeKind,
     ModuleRuntimePort, ModuleRuntimeStatus, ModuleStartConfig, ModuleStoragePort, ModuleVersion,
 };
 use crate::infra::http::compression::{self, Encoding};
 use crate::infra::http::proxy_headers::{
-    edge_hop_secret, HopByHop, CLIENT_ADDRESS_HEADERS, EDGE_HOP_HEADER, FORWARDED_FOR,
+    edge_hop_secret, HopByHop, EDGE_HOP_HEADER, FORWARDED_FOR,
 };
 use crate::services::ServiceDiagnostics;
 use crate::utils::messages;
@@ -353,6 +354,8 @@ pub struct ProcessModuleRuntime {
     diagnostics: Arc<ServiceDiagnostics>,
     running_modules: Arc<RwLock<HashMap<String, RunningModuleState>>>,
     control_plane_base: String,
+    /// `[server.edge]`: which client address the static edge forwards.
+    client_ip: Arc<ClientIpPolicy>,
 }
 
 #[derive(Debug)]
@@ -512,7 +515,16 @@ impl ProcessModuleRuntime {
             diagnostics,
             running_modules: Arc::new(RwLock::new(HashMap::new())),
             control_plane_base,
+            client_ip: Arc::new(ClientIpPolicy::default()),
         }
+    }
+
+    /// The `[server.edge]` policy of the static-site edge (W9A-01). Without
+    /// it, the client is always the TCP peer.
+    #[must_use]
+    pub fn with_client_ip_policy(mut self, policy: ClientIpPolicy) -> Self {
+        self.client_ip = Arc::new(policy);
+        self
     }
 
     fn reset_log_file(path: &Path) -> Result<(), ModuleRuntimeError> {
@@ -1085,7 +1097,8 @@ impl ProcessModuleRuntime {
             diagnostics,
             self.control_plane_base.clone(),
             log_file,
-        );
+        )
+        .with_client_ip_policy(Arc::clone(&self.client_ip));
         // Brotli at its best level takes about a second for a 500 KB chunk:
         // compress the site once in the background instead of on the first
         // request for each file.
@@ -2079,6 +2092,7 @@ struct StaticRouterState {
     proxy: StaticGatewayProxy,
     compressed: Arc<StaticVariantCache>,
     log_file: Arc<PathBuf>,
+    client_ip: Arc<ClientIpPolicy>,
 }
 
 impl StaticRouterState {
@@ -2103,7 +2117,13 @@ impl StaticRouterState {
             proxy: StaticGatewayProxy::new(),
             compressed: Arc::new(StaticVariantCache::new(STATIC_VARIANT_CACHE_BYTES)),
             log_file: Arc::new(log_file),
+            client_ip: Arc::new(ClientIpPolicy::default()),
         }
+    }
+
+    fn with_client_ip_policy(mut self, policy: Arc<ClientIpPolicy>) -> Self {
+        self.client_ip = policy;
+        self
     }
 
     /// Append a log line to the module's log file
@@ -2346,13 +2366,24 @@ async fn static_gateway_proxy_handler(
             .map(HeaderValue::as_bytes),
     );
     // This is the browser's edge: whatever address headers the client sent
-    // are dropped, `X-Forwarded-For` is the TCP peer, and the edge-hop
-    // secret tells the control plane to keep it (5.6). `Accept-Encoding`
-    // stays here too: the edge compresses, the upstream answers identity.
+    // are dropped and `X-Forwarded-For` is the resolved client: the TCP
+    // peer, or the `[server.edge]` header when the peer is a trusted proxy
+    // (W9A-01). The edge-hop secret tells the control plane to keep it
+    // (5.6). `Accept-Encoding` stays here too: the edge compresses, the
+    // upstream answers identity.
     let peer = parts
         .extensions
         .get::<ConnectInfo<SocketAddr>>()
-        .map(|info| info.0.ip().to_canonical());
+        .map(|info| info.0.ip());
+    let client = state.client_ip.resolve(
+        peer,
+        state
+            .client_ip
+            .header()
+            .into_iter()
+            .flat_map(|name| parts.headers.get_all(name).iter())
+            .map(HeaderValue::as_bytes),
+    );
     let encoding = compression::negotiate(&parts.headers);
     let secret_path = compression::is_secret_bearing_path(parts.uri.path());
     let is_head = parts.method == axum::http::Method::HEAD;
@@ -2361,15 +2392,15 @@ async fn static_gateway_proxy_handler(
         if name == header::HOST
             || name == header::ACCEPT_ENCODING
             || name.as_str() == EDGE_HOP_HEADER
-            || CLIENT_ADDRESS_HEADERS.contains(&name.as_str())
+            || state.client_ip.is_address_header(name.as_str())
             || hop.contains(name.as_str())
         {
             continue;
         }
         upstream = upstream.header(name.as_str(), value.as_bytes());
     }
-    if let Some(peer) = peer {
-        upstream = upstream.header(FORWARDED_FOR, peer.to_string());
+    if let Some(client) = client {
+        upstream = upstream.header(FORWARDED_FOR, client.to_string());
     }
     upstream = upstream.header(EDGE_HOP_HEADER, edge_hop_secret());
     if body.size_hint().exact() != Some(0) {

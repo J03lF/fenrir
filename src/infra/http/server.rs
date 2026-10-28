@@ -80,6 +80,7 @@ pub struct HttpServer {
     registry: Arc<ServiceRegistry>,
     services: Weak<AppServices>,
     auth: Arc<ControlPlaneAuthorizer>,
+    client_ip: Arc<crate::config::ClientIpPolicy>,
     handle: Mutex<Option<ServerHandle>>,
     tls_provider: RwLock<Option<Arc<HttpTlsProvider>>>,
 }
@@ -137,6 +138,7 @@ impl HttpServer {
             info!("HTTP control-plane authentication via static token fallback");
             Arc::new(ControlPlaneAuthorizer::with_tokens(entries))
         };
+        let client_ip = Arc::new(cfg.server.edge.policy().map_err(|err| anyhow!(err))?);
         let runtime = HttpTlsRuntime::from(&cfg.server.http.tls);
         let tls_provider = if runtime.enabled {
             let provider = Arc::new(HttpTlsProvider::new(runtime.clone())?);
@@ -152,6 +154,7 @@ impl HttpServer {
             registry,
             services,
             auth,
+            client_ip,
             handle: Mutex::new(None),
             tls_provider: RwLock::new(tls_provider.clone()),
         };
@@ -288,6 +291,7 @@ impl HttpServer {
             registry: Arc::clone(&self.registry),
             services: Arc::clone(&services),
             auth: Arc::clone(&self.auth),
+            client_ip: Arc::clone(&self.client_ip),
             info: HttpInfo {
                 app_name: self.config.app_name.clone(),
                 app_version: self.config.app_version.clone(),

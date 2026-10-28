@@ -101,6 +101,7 @@ fn test_config() -> Arc<AppConfig> {
                 tls: HttpTlsConfig::default(),
             },
             grpc: None,
+            edge: Default::default(),
         },
         security: SecuritySection {
             kdf: KdfConfig {

@@ -1239,6 +1239,131 @@ mod gateway_proxy {
         );
     }
 
+    /// The static router with a `[server.edge]` policy, on `bind`.
+    async fn edge_proxy(upstream: &str, bind: &str, header: &str, trusted: &[&str]) -> String {
+        let dir = std::env::temp_dir().join(format!("fenrir-proxy-{}", Uuid::new_v4()));
+        let profile = StaticSiteProfile::new(dir.join("browser"), dir.join("browser/index.html"));
+        let policy = crate::config::EdgeSection {
+            client_ip_header: Some(header.to_string()),
+            trusted_proxies: trusted.iter().map(|s| (*s).to_string()).collect(),
+        }
+        .policy()
+        .unwrap();
+        let state = StaticRouterState::new(
+            &ModuleId::new("athenos-web").unwrap(),
+            profile,
+            Arc::new(ServiceDiagnostics::new()),
+            upstream.to_string(),
+            dir.join("web.log"),
+        )
+        .with_client_ip_policy(Arc::new(policy));
+        let listener = TcpListener::bind(bind).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(
+                listener,
+                static_router(state).into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await;
+        });
+        format!("http://{addr}")
+    }
+
+    /// Sends one request with `extra` header lines through `proxy` and
+    /// returns the headers the upstream saw.
+    async fn upstream_view(
+        proxy: &str,
+        heads: &mut mpsc::UnboundedReceiver<String>,
+        extra: &str,
+    ) -> Vec<(String, String)> {
+        let (_headers, body) = raw_exchange(
+            proxy,
+            &format!(
+                "GET /gateway/services/x/api/v1/auth/login/request HTTP/1.1\r\n\
+                 host: app.example\r\n{extra}\r\n"
+            ),
+        )
+        .await;
+        assert_eq!(body, b"{}");
+        let head = timeout(WAIT, heads.recv()).await.unwrap().unwrap();
+        head.lines()
+            .skip(1)
+            .filter_map(|line| line.split_once(':'))
+            .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_string()))
+            .collect()
+    }
+
+    const SPOOFED: &str = "x-forwarded-for: 1.2.3.4\r\n\
+                           x-real-ip: 5.6.7.8\r\n\
+                           forwarded: for=1.2.3.4\r\n\
+                           cf-connecting-ip: 9.9.9.9\r\n\
+                           true-client-ip: 8.8.8.8\r\n";
+
+    fn assert_only_forwarded_for(headers: &[(String, String)], expected: &str) {
+        assert_eq!(values(headers, "x-forwarded-for"), vec![expected]);
+        for name in [
+            "x-real-ip",
+            "forwarded",
+            "cf-connecting-ip",
+            "true-client-ip",
+            "x-client-ip",
+        ] {
+            assert!(values(headers, name).is_empty(), "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_trusted_proxy_header_becomes_the_forwarded_client() {
+        let (upstream, mut heads) = fixed_upstream(b"{}".to_vec(), "application/json", "").await;
+        let proxy = edge_proxy(&upstream, "127.0.0.1:0", "x-client-ip", &["127.0.0.1/32"]).await;
+        let seen = upstream_view(
+            &proxy,
+            &mut heads,
+            &format!("{SPOOFED}x-client-ip: 203.0.113.7\r\n"),
+        )
+        .await;
+        assert_only_forwarded_for(&seen, "203.0.113.7");
+    }
+
+    #[tokio::test]
+    async fn an_untrusted_peer_cannot_set_the_client() {
+        let (upstream, mut heads) = fixed_upstream(b"{}".to_vec(), "application/json", "").await;
+        let proxy = edge_proxy(&upstream, "127.0.0.1:0", "x-real-ip", &["10.0.0.0/8"]).await;
+        let seen = upstream_view(&proxy, &mut heads, SPOOFED).await;
+        assert_only_forwarded_for(&seen, "127.0.0.1");
+    }
+
+    #[tokio::test]
+    async fn garbage_or_repeated_proxy_headers_fall_back_to_the_peer() {
+        let (upstream, mut heads) = fixed_upstream(b"{}".to_vec(), "application/json", "").await;
+        let proxy = edge_proxy(&upstream, "127.0.0.1:0", "x-real-ip", &["127.0.0.1/32"]).await;
+        for extra in [
+            "x-real-ip: not-an-ip\r\n",
+            "x-real-ip: 203.0.113.7, 198.51.100.1\r\n",
+            "x-real-ip: 203.0.113.7\r\nx-real-ip: 198.51.100.1\r\n",
+            "",
+        ] {
+            let seen = upstream_view(&proxy, &mut heads, extra).await;
+            assert_only_forwarded_for(&seen, "127.0.0.1");
+        }
+    }
+
+    #[tokio::test]
+    async fn ipv6_proxies_and_clients_work() {
+        let Ok(probe) = TcpListener::bind("[::1]:0").await else {
+            eprintln!("skipped: no IPv6 loopback");
+            return;
+        };
+        drop(probe);
+        let (upstream, mut heads) = fixed_upstream(b"{}".to_vec(), "application/json", "").await;
+        let proxy = edge_proxy(&upstream, "[::1]:0", "x-real-ip", &["::1/128"]).await;
+        let seen = upstream_view(&proxy, &mut heads, "x-real-ip: 2001:db8::7\r\n").await;
+        assert_only_forwarded_for(&seen, "2001:db8::7");
+        let open = edge_proxy(&upstream, "[::1]:0", "x-real-ip", &["127.0.0.1/32"]).await;
+        let seen = upstream_view(&open, &mut heads, "x-real-ip: 2001:db8::7\r\n").await;
+        assert_only_forwarded_for(&seen, "::1");
+    }
+
     #[tokio::test]
     async fn proxied_json_is_compressed_by_negotiation() {
         let original = json_body(40_000);

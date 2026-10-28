@@ -164,3 +164,11 @@ DB Connector & Scoped Tokens
 - Requests now support prepared statements: set `"command": "prepared"`, provide `"params": [{"name": "p1", "value": 42}, ...]` and optionally `"tenant": {"param": "tenant_id", "mode": "inject|require_match"}` to bind the caller tenant.
 - Use the bundled `fenrir-module-kit` crate for a ready-made connector client; it reads all `FENRIR_*` env vars, automatically exchanges `db:write` tokens via `POST /modules/runtime/tokens`, and exposes high-level helpers for simple/prepared statements. Eine leere Scope-Liste beim Token-Endpoint bedeutet „Standard-Scopes auffrischen“ und liefert eine neue Basisauthentifizierung für das Modul.
 - The control plane exposes lifecycle hooks at `/modules/runtime/:id/{start,stop,restart}` (role `operator`) and quarantines modules after repeated start failures. Quarantine windows and status notes are visible via the Service Registry.
+
+Client IP behind a reverse proxy (`[server.edge]`, W9A-01)
+- Default: off. Every client is the TCP peer of the host (as before).
+- `client_ip_header` (e.g. `x-real-ip`) plus `trusted_proxies` (CIDRs or single addresses, IPv4/IPv6) switch it on. The header counts only when the TCP peer is inside `trusted_proxies` and the value is exactly one IP address; otherwise the peer is the client.
+- The static-site edge and the control-plane gateway strip every client-sent address header (`X-Forwarded-For`, `X-Real-IP`, `Forwarded`, `CF-Connecting-IP`, `True-Client-IP`, the configured header) and send `X-Forwarded-For: <client>` to the modules.
+- Env: `FENRIR_SERVER__EDGE__CLIENT_IP_HEADER=x-real-ip`, `FENRIR_SERVER__EDGE__TRUSTED_PROXIES=127.0.0.1/32,::1/128` (comma-separated). The generic `FENRIR__SERVER__EDGE__…` form works too.
+- Invalid entries, or a header without trusted proxies, stop the host at startup with a clear error.
+- Caddy example: `reverse_proxy 127.0.0.1:41002 { header_up X-Real-IP {client_ip} }` (Caddy replaces any client value).

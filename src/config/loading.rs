@@ -3,6 +3,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
+use super::edge::split_list;
 use super::error::ConfigError;
 use super::model::{AppConfig, DbRuntimeMode};
 use super::validation::{
@@ -16,6 +17,8 @@ pub(super) const ENV_FILE: &str = "secrets/.env";
 pub(super) const ENV_FILE_OVERRIDE: &str = "FENRIR_ENV_FILE";
 pub(super) const LOCAL_OVERRIDE_FILE: &str = "config/local.toml";
 pub(super) const PROFILE_FILE: &str = "bin/.fenrir-profile";
+pub(super) const ENV_EDGE_CLIENT_IP_HEADER: &str = "FENRIR_SERVER__EDGE__CLIENT_IP_HEADER";
+pub(super) const ENV_EDGE_TRUSTED_PROXIES: &str = "FENRIR_SERVER__EDGE__TRUSTED_PROXIES";
 
 pub fn load() -> Result<AppConfig, ConfigError> {
     load_env_file_overrides()?;
@@ -90,9 +93,21 @@ fn apply_profile_overrides(cfg: &mut AppConfig) {
             cfg.modules.storage.install_dir = value;
         }
     }
+
+    // `[server.edge]` (W9A-01). The generic source above only matches
+    // `FENRIR__SERVER__EDGE__…`; these are the documented single-underscore
+    // names. Empty values switch the feature off.
+    if let Ok(value) = env::var(ENV_EDGE_CLIENT_IP_HEADER) {
+        let value = value.trim();
+        cfg.server.edge.client_ip_header = (!value.is_empty()).then(|| value.to_string());
+    }
+    if let Ok(value) = env::var(ENV_EDGE_TRUSTED_PROXIES) {
+        cfg.server.edge.trusted_proxies = split_list(&value);
+    }
 }
 
 pub fn validate(cfg: &AppConfig) -> Result<(), ConfigError> {
+    cfg.server.edge.validate()?;
     cfg.security.validate()?;
     cfg.telemetry.validate()?;
     cfg.modules.registry.validate()?;

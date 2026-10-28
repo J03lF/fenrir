@@ -485,12 +485,16 @@ pub fn boot() -> Result<BootContext, BootError> {
         match cfg.modules.runtime.engine {
             ModuleRuntimeEngine::Process => {
                 let control_plane_base = control_plane_base_url(&cfg.server.http);
-                let runtime = Arc::new(ProcessModuleRuntime::new(
-                    Arc::clone(&module_storage),
-                    runtime_state_dir.clone(),
-                    Arc::clone(&diagnostics),
-                    control_plane_base,
-                ));
+                let client_ip = cfg.server.edge.policy().map_err(BootError::from_config)?;
+                let runtime = Arc::new(
+                    ProcessModuleRuntime::new(
+                        Arc::clone(&module_storage),
+                        runtime_state_dir.clone(),
+                        Arc::clone(&diagnostics),
+                        control_plane_base,
+                    )
+                    .with_client_ip_policy(client_ip),
+                );
 
                 if let Ok(handle) = Handle::try_current() {
                     let handle_clone = handle.clone();

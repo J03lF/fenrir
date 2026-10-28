@@ -1436,14 +1436,14 @@ mod service_route_path_tests {
     #[test]
     fn parses_structured_module_log_lines() {
         let event = parse_module_analytics_line(
-            "athene-api",
-            "2026-03-18T11:21:19.141177Z  WARN tokio-runtime-worker ThreadId(09) athene_api::gateway: upstream request failed target=auth-service",
+            "athenos-api",
+            "2026-03-18T11:21:19.141177Z  WARN tokio-runtime-worker ThreadId(09) athenos_api::gateway: upstream request failed target=auth-service",
             0,
         )
         .expect("line parsed");
-        assert_eq!(event.view.module_id, "athene-api");
+        assert_eq!(event.view.module_id, "athenos-api");
         assert_eq!(event.view.level, "warn");
-        assert_eq!(event.view.target.as_deref(), Some("athene_api::gateway"));
+        assert_eq!(event.view.target.as_deref(), Some("athenos_api::gateway"));
         assert_eq!(
             event.view.message,
             "upstream request failed target=auth-service"
@@ -4664,8 +4664,8 @@ mod upstream_response_tests {
             (
                 "buffered",
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
-                 set-cookie: athene_refresh=r1; Path=/; HttpOnly\r\n\
-                 set-cookie: athene_csrf=c1; Path=/\r\n\
+                 set-cookie: athenos_refresh=r1; Path=/; HttpOnly\r\n\
+                 set-cookie: athenos_csrf=c1; Path=/\r\n\
                  connection: close, x-hop\r\nkeep-alive: timeout=5\r\nx-hop: 1\r\n\
                  proxy-authenticate: Basic\r\nx-request-id: abc\r\n\
                  content-length: 2\r\n\r\n{}",
@@ -4673,8 +4673,8 @@ mod upstream_response_tests {
             (
                 "event stream",
                 "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\n\
-                 set-cookie: athene_refresh=r1; Path=/; HttpOnly\r\n\
-                 set-cookie: athene_csrf=c1; Path=/\r\n\
+                 set-cookie: athenos_refresh=r1; Path=/; HttpOnly\r\n\
+                 set-cookie: athenos_csrf=c1; Path=/\r\n\
                  connection: close, x-hop\r\nkeep-alive: timeout=5\r\nx-hop: 1\r\n\
                  proxy-authenticate: Basic\r\nx-request-id: abc\r\n\
                  transfer-encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n",
@@ -4693,8 +4693,8 @@ mod upstream_response_tests {
             assert_eq!(
                 cookies,
                 vec![
-                    "athene_refresh=r1; Path=/; HttpOnly",
-                    "athene_csrf=c1; Path=/"
+                    "athenos_refresh=r1; Path=/; HttpOnly",
+                    "athenos_csrf=c1; Path=/"
                 ],
                 "{label}"
             );
@@ -4829,7 +4829,7 @@ mod failover_tests {
 #[cfg(test)]
 mod stream_disconnect_tests {
     //! A proxied event stream must end upstream as soon as the client that
-    //! asked for it is gone, however it leaves: athene-api holds one of its
+    //! asked for it is gone, however it leaves: athenos-api holds one of its
     //! per-caller stream slots for every open upstream stream (SSE_LEAK).
     use super::event_stream_hop;
     use std::time::Duration;
@@ -4910,7 +4910,7 @@ mod stream_disconnect_tests {
 
     /// Sends a request on `socket` and reads its head.
     async fn request(socket: &mut TcpStream, path: &str, accept: &str) -> String {
-        let request = format!("GET {path} HTTP/1.1\r\nhost: athene\r\naccept: {accept}\r\n\r\n");
+        let request = format!("GET {path} HTTP/1.1\r\nhost: athenos\r\naccept: {accept}\r\n\r\n");
         socket.write_all(request.as_bytes()).await.unwrap();
         timeout(WAIT, read_head(socket)).await.unwrap()
     }

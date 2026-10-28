@@ -201,7 +201,7 @@ accept_invalid_certs = false
 engine = "process"
 default_service_scopes = ["db:read"]
 # Optional global passthrough prefixes for module env injection.
-# Fenrir also derives module-local prefixes automatically (e.g. `ATHENE_`, `AUTH_`).
+# Fenrir also derives module-local prefixes automatically (e.g. `ATHENOS_`, `AUTH_`).
 env_passthrough_prefixes = []
 
 [modules.runtime.ports]
@@ -252,20 +252,20 @@ FENRIR_CONTROL_PLANE_POOL_IDLE_TIMEOUT_MS = "90000"
 FENRIR_CONTROL_PLANE_POOL_MAX_IDLE_PER_HOST = "32"
 
 [modules.service_profiles.notification_delivery_standard.env]
-ATHENE_NOTIFICATION_DELIVERY_CONCURRENCY = "4"
-ATHENE_NOTIFICATION_QUEUE_CAPACITY = "512"
-ATHENE_NOTIFICATION_DELIVERY_RETRIES = "3"
-ATHENE_NOTIFICATION_DELIVERY_RETRY_BACKOFF_MS = "500"
+ATHENOS_NOTIFICATION_DELIVERY_CONCURRENCY = "4"
+ATHENOS_NOTIFICATION_QUEUE_CAPACITY = "512"
+ATHENOS_NOTIFICATION_DELIVERY_RETRIES = "3"
+ATHENOS_NOTIFICATION_DELIVERY_RETRY_BACKOFF_MS = "500"
 
 [modules.service_profiles.notification_worker_standard.env]
-ATHENE_NOTIFICATION_DELIVERY_CONCURRENCY = "8"
-ATHENE_NOTIFICATION_QUEUE_BATCH_SIZE = "32"
-ATHENE_NOTIFICATION_QUEUE_POLL_INTERVAL_SECONDS = "5"
+ATHENOS_NOTIFICATION_DELIVERY_CONCURRENCY = "8"
+ATHENOS_NOTIFICATION_QUEUE_BATCH_SIZE = "32"
+ATHENOS_NOTIFICATION_QUEUE_POLL_INTERVAL_SECONDS = "5"
 
-[modules.services."module:athene-api"]
+[modules.services."module:athenos-api"]
 profile = "control_plane_standard"
 # replicas = 2
-# [modules.services."module:athene-api".rollout]
+# [modules.services."module:athenos-api".rollout]
 # strategy = "canary_replace"
 # max_surge = 1
 # max_unavailable = 0
@@ -275,15 +275,15 @@ profile = "control_plane_standard"
 # promotion_interval_ms = 30000
 # rollback_on_regression = true
 # stickiness = false
-# [modules.services."module:athene-api".rollout.success_criteria]
+# [modules.services."module:athenos-api".rollout.success_criteria]
 # max_error_rate_percent = 1.0
 # max_p95_latency_ms = 500
 # max_retry_rate_percent = 2.0
 
-[modules.services."module:athene"]
+[modules.services."module:athenos"]
 profile = "control_plane_standard"
 # replicas = 2
-# [modules.services."module:athene".rollout]
+# [modules.services."module:athenos".rollout]
 # strategy = "rolling_replace"
 
 [modules.services."module:auth-service"]

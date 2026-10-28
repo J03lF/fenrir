@@ -424,7 +424,7 @@ pub struct ModuleServiceJsonEntry {
     /// Supported protocols (e.g., ["http", "grpc"])
     #[serde(default)]
     pub protocols: Vec<String>,
-    /// Required scopes for access (e.g., ["athene:read", "athene:write"])
+    /// Required scopes for access (e.g., ["athenos:read", "athenos:write"])
     #[serde(default)]
     pub required_scopes: Vec<String>,
     /// Allowed roles for access (e.g., ["admin", "operator"])

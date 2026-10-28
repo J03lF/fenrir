@@ -400,8 +400,8 @@ mod tests {
     #[test]
     fn secret_bearing_paths() {
         for path in [
-            "/gateway/services/module%3Aathene-api%3A%3Aapi-gateway/api/v1/auth/login/confirm",
-            "/gateway/services/module%3Aathene-api%3A%3Aapi-gateway/auth/refresh",
+            "/gateway/services/module%3Aathenos-api%3A%3Aapi-gateway/api/v1/auth/login/confirm",
+            "/gateway/services/module%3Aathenos-api%3A%3Aapi-gateway/auth/refresh",
             "/gateway/services/x/api/v1/AUTH/password/reset",
             "/gateway/services/x/api/v1/admin/api-keys",
             "/gateway/services/x/api/v1/workspaces/1/invites",

@@ -66,8 +66,8 @@ fn masks_invite_tokens_in_paths_and_queries() {
     for (raw, logged) in [
         ("/invite/AbCdEf123", "/invite/<redacted>"),
         (
-            "/gateway/services/module%3Aathene-api%3A%3Aapi-gateway/api/v1/invite/AbCdEf123/join",
-            "/gateway/services/module%3Aathene-api%3A%3Aapi-gateway/api/v1/invite/<redacted>/join",
+            "/gateway/services/module%3Aathenos-api%3A%3Aapi-gateway/api/v1/invite/AbCdEf123/join",
+            "/gateway/services/module%3Aathenos-api%3A%3Aapi-gateway/api/v1/invite/<redacted>/join",
         ),
         (
             "/api/v1/workspaces/w1/invites/AbCdEf123/revoke",

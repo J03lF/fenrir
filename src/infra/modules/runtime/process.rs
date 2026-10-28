@@ -159,7 +159,7 @@ const STATIC_PROXY_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Until the response head arrives. Above the control plane's own 30 s
 /// upstream timeout, so its 502/504 reaches the browser first.
 const STATIC_PROXY_FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(40);
-/// Longest silence inside a response body. athene-api's event streams send a
+/// Longest silence inside a response body. athenos-api's event streams send a
 /// keep-alive comment every 15 s, so this is three missed heartbeats.
 const STATIC_PROXY_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 const STATIC_PROXY_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(30);

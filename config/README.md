@@ -128,7 +128,7 @@ Secret-Resolution für `modules.services.<service>.secrets = "env:VAR"`:
 - Sind beide gesetzt, wird der Start mit Konfigurationsfehler abgebrochen.
 - Leere Werte oder nicht lesbare Secret-Dateien werden als harte Fehler behandelt (fail-closed).
 
-`modules.runtime.env_passthrough_prefixes` erlaubt zusätzlich globales Prefix-Passthrough aus Fenrirs Prozess-Umgebung (z. B. `["ATHENE_", "AUTH_"]`). Unabhängig davon leitet Fenrir pro Modul automatisch abgeleitete Prefixes weiter (z. B. für `athene-api`: `ATHENE_API_` und `ATHENE_`; für `auth-service`: `AUTH_SERVICE_` und `AUTH_`), damit neue Modulvariablen ohne Fenrir-Codeänderung verfügbar sind.
+`modules.runtime.env_passthrough_prefixes` erlaubt zusätzlich globales Prefix-Passthrough aus Fenrirs Prozess-Umgebung (z. B. `["ATHENOS_", "AUTH_"]`). Unabhängig davon leitet Fenrir pro Modul automatisch abgeleitete Prefixes weiter (z. B. für `athenos-api`: `ATHENOS_API_` und `ATHENOS_`; für `auth-service`: `AUTH_SERVICE_` und `AUTH_`), damit neue Modulvariablen ohne Fenrir-Codeänderung verfügbar sind.
 
 Runtime Env Injection
 - Every managed module process receives:

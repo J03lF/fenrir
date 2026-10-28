@@ -102,7 +102,7 @@ The minimum policy contract should include:
 
 ## Request-serving Modules
 
-### `athene-web`
+### `athenos-web`
 
 Best rollout style: `canary_replace`
 
@@ -118,7 +118,7 @@ Suggested defaults:
 - `traffic_steps = [10, 25, 50, 100]`
 - small warmup window
 
-### `athene-api`
+### `athenos-api`
 
 Best rollout style: `canary_replace`
 
@@ -134,7 +134,7 @@ Suggested defaults:
 - strict error-rate and latency thresholds
 - canary promotion only with stable upstream gateway metrics
 
-### `athene`
+### `athenos`
 
 Best rollout style: `rolling_replace`
 
@@ -235,7 +235,7 @@ Old and new versions may coexist during replacement. This requires:
 - event compatibility
 - no shared exclusive port assumptions
 
-This is especially important for `athene`, `auth-service` and `notification-service`.
+This is especially important for `athenos`, `auth-service` and `notification-service`.
 
 ## Configuration Model
 
@@ -250,10 +250,10 @@ default_max_unavailable = 0
 default_warmup_timeout_ms = 30000
 default_promotion_interval_ms = 30000
 
-[modules.services."module:athene-api"]
+[modules.services."module:athenos-api"]
 replicas = 2
 
-[modules.services."module:athene-api".rollout]
+[modules.services."module:athenos-api".rollout]
 strategy = "canary_replace"
 max_surge = 1
 max_unavailable = 0
@@ -264,7 +264,7 @@ promotion_interval_ms = 30000
 rollback_on_regression = true
 stickiness = false
 
-[modules.services."module:athene-api".rollout.success_criteria]
+[modules.services."module:athenos-api".rollout.success_criteria]
 max_error_rate_percent = 1.0
 max_p95_latency_ms = 500
 max_retry_rate_percent = 2.0

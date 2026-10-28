@@ -236,10 +236,10 @@ impl PublicStatusTracker {
 }
 
 pub fn map_service_to_public_component(id: &str) -> Option<PublicComponentKey> {
-    if id == "module:athene-web::static" || id.starts_with("module:athene-web::") {
+    if id == "module:athenos-web::static" || id.starts_with("module:athenos-web::") {
         return Some(PublicComponentKey::Website);
     }
-    if id == "module:athene-api::api-gateway" || id.starts_with("module:athene-api::") {
+    if id == "module:athenos-api::api-gateway" || id.starts_with("module:athenos-api::") {
         return Some(PublicComponentKey::Api);
     }
     if id.starts_with("module:auth-service::") || id == "identity-service" {

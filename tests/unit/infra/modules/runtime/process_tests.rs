@@ -266,7 +266,7 @@ fn only_content_hashed_files_are_immutable() {
         "assets/i18n/en.json",
         "assets/i18n/de.json",
         "favicon.ico",
-        "assets/logo/athene.svg",
+        "assets/logo/athenos.svg",
         "icon-192x192.png",
         "chunk-ABAH6MG5.js.map",
         "chunk-abah6mg5.js",
@@ -388,7 +388,7 @@ fn manifest_response_headers_are_parsed_and_host_owned_ones_dropped() {
     let dir = static_site_fixture();
     let manifest: RuntimeManifest =
         toml::from_str(&std::fs::read_to_string(dir.join(RUNTIME_MANIFEST_PATH)).unwrap()).unwrap();
-    let module_id = ModuleId::new("athene-web").unwrap();
+    let module_id = ModuleId::new("athenos-web").unwrap();
     let profile = ProcessModuleRuntime::static_profile_from_manifest(&module_id, &dir, &manifest)
         .unwrap()
         .expect("static profile");
@@ -414,7 +414,7 @@ async fn static_router_sets_headers_on_static_routes_only() {
     let dir = static_site_fixture();
     let manifest: RuntimeManifest =
         toml::from_str(&std::fs::read_to_string(dir.join(RUNTIME_MANIFEST_PATH)).unwrap()).unwrap();
-    let module_id = ModuleId::new("athene-web").unwrap();
+    let module_id = ModuleId::new("athenos-web").unwrap();
     let profile = ProcessModuleRuntime::static_profile_from_manifest(&module_id, &dir, &manifest)
         .unwrap()
         .unwrap();
@@ -572,7 +572,7 @@ mod gateway_proxy {
         let dir = std::env::temp_dir().join(format!("fenrir-proxy-{}", Uuid::new_v4()));
         let profile = StaticSiteProfile::new(dir.join("browser"), dir.join("browser/index.html"));
         let mut state = StaticRouterState::new(
-            &ModuleId::new("athene-web").unwrap(),
+            &ModuleId::new("athenos-web").unwrap(),
             profile,
             Arc::new(ServiceDiagnostics::new()),
             upstream.to_string(),
@@ -781,8 +781,8 @@ mod gateway_proxy {
     }
 
     /// The live path, both hops: browser → static edge (41002) → control
-    /// plane (8080, its event-stream hop) → athene-api. However the browser
-    /// leaves, the stream upstream ends promptly, so athene-api frees the
+    /// plane (8080, its event-stream hop) → athenos-api. However the browser
+    /// leaves, the stream upstream ends promptly, so athenos-api frees the
     /// stream slot it holds for it (SSE_LEAK).
     #[tokio::test]
     async fn a_stream_through_both_hops_ends_upstream_when_the_browser_leaves() {
@@ -819,7 +819,7 @@ mod gateway_proxy {
             socket
                 .write_all(
                     b"GET /gateway/services/x/api/v1/maintenance/stream HTTP/1.1\r\n\
-                      host: athene\r\naccept: text/event-stream\r\n\r\n",
+                      host: athenos\r\naccept: text/event-stream\r\n\r\n",
                 )
                 .await
                 .unwrap();
@@ -863,8 +863,8 @@ mod gateway_proxy {
         let (upstream, mut heads) = fake_upstream(|mut socket, _head| async move {
             let response = "HTTP/1.1 200 OK\r\n\
                 content-type: text/plain\r\n\
-                set-cookie: athene_refresh=r1; Path=/; HttpOnly; SameSite=Strict\r\n\
-                set-cookie: athene_csrf=c1; Path=/\r\n\
+                set-cookie: athenos_refresh=r1; Path=/; HttpOnly; SameSite=Strict\r\n\
+                set-cookie: athenos_csrf=c1; Path=/\r\n\
                 connection: keep-alive, x-upstream-hop\r\n\
                 keep-alive: timeout=5\r\n\
                 x-upstream-hop: 1\r\n\
@@ -889,7 +889,7 @@ mod gateway_proxy {
              te: trailers\r\n\
              proxy-authorization: Basic eDp5\r\n\
              upgrade: websocket\r\n\
-             cookie: athene_refresh=r0\r\n\
+             cookie: athenos_refresh=r0\r\n\
              x-end-to-end: kept\r\n\r\n",
         )
         .await;
@@ -897,8 +897,8 @@ mod gateway_proxy {
         assert_eq!(
             values(&headers, "set-cookie"),
             vec![
-                "athene_refresh=r1; Path=/; HttpOnly; SameSite=Strict",
-                "athene_csrf=c1; Path=/"
+                "athenos_refresh=r1; Path=/; HttpOnly; SameSite=Strict",
+                "athenos_csrf=c1; Path=/"
             ]
         );
         assert_eq!(values(&headers, "x-end-to-end"), vec!["kept"]);
@@ -930,7 +930,7 @@ mod gateway_proxy {
         );
         assert_eq!(
             values(&upstream_headers, "cookie"),
-            vec!["athene_refresh=r0"]
+            vec!["athenos_refresh=r0"]
         );
         assert_eq!(values(&upstream_headers, "x-end-to-end"), vec!["kept"]);
         assert_eq!(
@@ -1301,7 +1301,7 @@ mod gateway_proxy {
             (
                 big.clone(),
                 "application/json",
-                "set-cookie: athene_refresh=r1; HttpOnly\r\n",
+                "set-cookie: athenos_refresh=r1; HttpOnly\r\n",
                 "/api/v1/work/tickets",
             ),
             // Small bodies and types that do not compress.
@@ -1458,7 +1458,7 @@ mod static_compression {
         std::fs::write(browser.join("main-ABCD1234.js"), &script).unwrap();
         let html = format!(
             "<!doctype html><html><body>{}</body></html>",
-            "<p>athene</p>".repeat(200)
+            "<p>athenos</p>".repeat(200)
         );
         std::fs::write(browser.join("index.html"), html).unwrap();
         std::fs::write(browser.join("en.json"), "{\"a\":1}").unwrap();
@@ -1473,7 +1473,7 @@ mod static_compression {
             HeaderValue::from_static(TEST_CSP),
         )];
         let state = StaticRouterState::new(
-            &ModuleId::new("athene-web").unwrap(),
+            &ModuleId::new("athenos-web").unwrap(),
             profile,
             Arc::new(ServiceDiagnostics::new()),
             "http://127.0.0.1:9".to_string(),
@@ -1643,7 +1643,7 @@ mod access_log {
         std::fs::write(browser.join("index.html"), "<!doctype html>").unwrap();
         let log = dir.join("web.log");
         let state = StaticRouterState::new(
-            &ModuleId::new("athene-web").unwrap(),
+            &ModuleId::new("athenos-web").unwrap(),
             StaticSiteProfile::new(browser.clone(), browser.join("index.html")),
             Arc::new(ServiceDiagnostics::new()),
             // Closed port: the gateway proxy fails and logs that too.
@@ -1653,7 +1653,7 @@ mod access_log {
         let router = static_router(state);
         for path in [
             "/invite/SECRET-INVITE-ONE",
-            "/gateway/services/module%3Aathene-api%3A%3Aapi-gateway/api/v1/invite/SECRET-INVITE-TWO/join?token=SECRET-QUERY-THREE",
+            "/gateway/services/module%3Aathenos-api%3A%3Aapi-gateway/api/v1/invite/SECRET-INVITE-TWO/join?token=SECRET-QUERY-THREE",
             "/gateway/services/x/api/v1/workspaces/w1/invites/SECRET-INVITE-FOUR/revoke",
         ] {
             let response = router

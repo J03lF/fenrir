@@ -21,7 +21,7 @@ Fenrir is a **security-first application server** written in Rust. It provides i
 
 Operators connect via SSH and manage the system through a custom CLI. Modules (microservices) are installed from a registry, verified with Ed25519 signatures, and orchestrated by Fenrir's runtime — including health monitoring, automatic token rotation, and inter-module communication through a built-in gateway.
 
-The project serves as the backend platform for [Athene](#module-ecosystem--athene), a ticket and project management system built as a suite of independently deployable modules.
+The project serves as the backend platform for [Athenos](#module-ecosystem--athenos), a ticket and project management system built as a suite of independently deployable modules.
 
 > **Solo project** — designed, architected, and implemented independently as a learning exercise in systems programming. The full ecosystem spans **~68,000 lines of Rust** in Fenrir alone, **1,500+ source files** across 10+ repositories (Rust, TypeScript, Angular), and covers everything from cryptographic primitives to Angular component libraries.
 
@@ -95,7 +95,7 @@ A custom terminal emulator built on [russh](https://github.com/warp-tech/russh).
 An [Axum](https://github.com/tokio-rs/axum)-based HTTP server with 40+ endpoints for module management, service lifecycle, metrics, audit history, and real-time SSE event streams. The built-in gateway proxies requests to module services with automatic token injection, RBAC enforcement, rate limiting, and route-prefix deduplication.
 
 ### Dynamic CLI with 27+ Commands
-A verb-first command system with tab completion, contextual subcommands, and alias support. Commands like `start module athene`, `status service db-shell`, or `log job token-lease-monitor --tail 50` work naturally. New commands register as folders under `cli/commands/builtins/`.
+A verb-first command system with tab completion, contextual subcommands, and alias support. Commands like `start module athenos`, `status service db-shell`, or `log job token-lease-monitor --tail 50` work naturally. New commands register as folders under `cli/commands/builtins/`.
 
 ### Integrated Database Shell
 A dedicated `db:` subshell with SQL auto-completion (tables, columns, keywords), multi-engine switching (`\c postgres`, `\c sqlite`), schema introspection (`\d`, `\d users`), and destructive command guards — `DROP`, `DELETE`, `ALTER`, and `TRUNCATE` require an explicit `--force` suffix.
@@ -333,7 +333,7 @@ Enter with `db-shell`. The prompt changes to reflect the active mode:
 
 ---
 
-## Module Ecosystem & Athene
+## Module Ecosystem & Athenos
 
 Fenrir manages modules through a full lifecycle: discovery, installation, signature verification, process management, health monitoring, and inter-module communication.
 
@@ -370,17 +370,17 @@ flowchart LR
   Start --> GW
 ```
 
-### Athene — Ticket & Project Management
+### Athenos — Ticket & Project Management
 
-The primary application built on Fenrir is **Athene**, a modular ticket and project management platform:
+The primary application built on Fenrir is **Athenos**, a modular ticket and project management platform:
 
 | Module | Stack | Role |
 |--------|-------|------|
-| **athene** | Rust / Axum | Core domain — tickets, projects, workspaces, sprints, labels, custom fields, SLAs, activity feeds, admin |
-| **athene-api** | Rust / Axum | Public API gateway (BFF) — typed proxy with rate limiting, circuit breaker, OpenAPI/Swagger |
-| **athene-web** | Angular 18 | SPA frontend — standalone components, signals, i18n, gridster dashboards, command palette |
-| **athene-webcomponents** | Angular 18 | Shared design system (`@athene/webcomponents`) — 40+ components, Storybook, npm-published |
-| **athene-contracts** | Rust + TypeScript | Shared API contracts — dual-stack DTOs with validation, typed HTTP clients |
+| **athenos** | Rust / Axum | Core domain — tickets, projects, workspaces, sprints, labels, custom fields, SLAs, activity feeds, admin |
+| **athenos-api** | Rust / Axum | Public API gateway (BFF) — typed proxy with rate limiting, circuit breaker, OpenAPI/Swagger |
+| **athenos-web** | Angular 18 | SPA frontend — standalone components, signals, i18n, gridster dashboards, command palette |
+| **athenos-webcomponents** | Angular 18 | Shared design system (`@athenos/webcomponents`) — 40+ components, Storybook, npm-published |
+| **athenos-contracts** | Rust + TypeScript | Shared API contracts — dual-stack DTOs with validation, typed HTTP clients |
 | **auth-service** | Rust / Axum | Authentication — challenge/PIN login, sessions, password reset, optional OIDC, Argon2 |
 | **notification-service** | Rust / Axum | Email delivery — Tera templates, SMTP via Lettre, queue management |
 
@@ -404,14 +404,14 @@ Modules never hold database credentials or call each other directly. All communi
 sequenceDiagram
   participant B as Browser
   participant GW as Gateway
-  participant API as athene-api
-  participant Core as athene
+  participant API as athenos-api
+  participant Core as athenos
   participant Auth as auth-service
   participant DB as DB Connector
 
   B->>GW: GET /api/v1/tickets
   GW->>API: + service token
-  API->>GW: call athene core
+  API->>GW: call athenos core
   GW->>Core: + token
   Core->>Auth: validate session
   Core->>DB: query (db:read)
@@ -440,14 +440,14 @@ Every module process receives a curated set of `FENRIR_*` variables — never ra
 Fenrir supports a seamless local development loop. Instead of publishing module artifacts to a registry during development, you work directly from your local source tree:
 
 ```
-[Admin::local] admin@hostname fenrir » synchronize module athene
+[Admin::local] admin@hostname fenrir » synchronize module athenos
   ▸ Backing up current distribution artifact...
-  ▸ Packaging dev build from /opt/fenrir/development/modules/athene
-  ▸ Registering dev services: module:athene::core
+  ▸ Packaging dev build from /opt/fenrir/development/modules/athenos
+  ▸ Registering dev services: module:athenos::core
   ▸ Injecting service tokens + gateway endpoint
   ▸ Module synchronized (dev override active)
 
-[Admin::local] admin@hostname fenrir » release module athene
+[Admin::local] admin@hostname fenrir » release module athenos
   ▸ Restoring distribution artifact from backup
   ▸ Dev override released
 ```
@@ -721,7 +721,7 @@ Fenrir is designed to run as a long-lived process managing other processes. Thes
 
 **Rolling restarts** — `POST /modules/runtime/:id/rolling-restart` or CLI `modules rolling-restart <id>` performs health-gated instance restarts with surge replacement. New instances must pass health probes before old ones are drained. See [Scaling & Traffic Management](#scaling--traffic-management) for details on replicas, canary deployments, and rollout strategies.
 
-**"Did you mean?" corrections** — Typos in the CLI trigger Levenshtein-distance suggestions: `strt module athene` → "Did you mean: start?" Up to 3 suggestions, computed across all registered commands and aliases.
+**"Did you mean?" corrections** — Typos in the CLI trigger Levenshtein-distance suggestions: `strt module athenos` → "Did you mean: start?" Up to 3 suggestions, computed across all registered commands and aliases.
 
 **Graceful shutdown** — `fenrirctl shutdown` executes a clean sequence: release dev overrides → stop all modules → stop non-core services. Also available via SSH: `stop module --all` followed by `exit`.
 
@@ -755,7 +755,7 @@ Each module can declare a desired replica count in config or via service profile
 
 ```toml
 # config/local.toml
-[modules.services."module:athene::core"]
+[modules.services."module:athenos::core"]
 replicas = 3
 ```
 
@@ -778,13 +778,13 @@ With `replicas >= 2`, this achieves **zero-downtime restarts**. Single-instance 
 Canary routing gradually shifts traffic from stable instances to candidate instances, with automatic promotion or rollback based on real-time health metrics:
 
 ```
-[Admin::local] admin@hostname fenrir » modules canary start athene
+[Admin::local] admin@hostname fenrir » modules canary start athenos
   ▸ Canary routing started: 10% traffic → canary instances
 
-[Admin::local] admin@hostname fenrir » modules canary set athene 50
+[Admin::local] admin@hostname fenrir » modules canary set athenos 50
   ▸ Canary traffic updated: 50%
 
-[Admin::local] admin@hostname fenrir » modules canary clear athene
+[Admin::local] admin@hostname fenrir » modules canary clear athenos
   ▸ Canary routing cleared, all traffic restored to stable instances
 ```
 
@@ -799,13 +799,13 @@ Canary routing gradually shifts traffic from stable instances to candidate insta
 
 ```toml
 # config/local.toml
-[modules.services."module:athene::core".rollout]
+[modules.services."module:athenos::core".rollout]
 strategy = "canary_replace"
 traffic_steps = [10, 25, 50, 100]
 promotion_interval_ms = 30000
 rollback_on_regression = true
 
-[modules.services."module:athene::core".rollout.success_criteria]
+[modules.services."module:athenos::core".rollout.success_criteria]
 max_error_rate_percent = 5
 max_p95_latency_ms = 200
 ```
@@ -873,10 +873,10 @@ flowchart TB
     Reg["registry"]
   end
 
-  subgraph athene [Athene]
-    Core["athene"]
-    API["athene-api"]
-    Web["athene-web"]
+  subgraph athenos [Athenos]
+    Core["athenos"]
+    API["athenos-api"]
+    Web["athenos-web"]
     Auth["auth-service"]
     Notif["notification-service"]
   end
@@ -904,11 +904,11 @@ flowchart TB
 | [fenrir-module-kit](../module-kit) | Rust | Module SDK — env parsing, DB connector, token provider, gateway client |
 | [fenrir-registry](../fenrir-registry) | Rust | Lightweight module registry with webhook support |
 | [fenrir-registry-service](../fenrir-registry-service) | Rust | Production registry — GitHub App, SQLite cache, SSE, RBAC |
-| [athene](../modules/athene) | Rust / Axum | Core domain — tickets, projects, workspaces, sprints, custom fields |
-| [athene-api](../modules/athene-api) | Rust / Axum | Public API gateway — typed proxy, circuit breaker, OpenAPI |
-| [athene-web](../modules/athene-web) | Angular 18 | SPA frontend — signals, i18n, dashboards, command palette |
-| [athene-webcomponents](../modules/athene-webcomponents) | Angular 18 | Design system — 40+ components, Storybook |
-| [athene-contracts](../athene-contracts) | Rust + TypeScript | Shared API contracts — dual-stack DTOs with validation |
+| [athenos](../modules/athenos) | Rust / Axum | Core domain — tickets, projects, workspaces, sprints, custom fields |
+| [athenos-api](../modules/athenos-api) | Rust / Axum | Public API gateway — typed proxy, circuit breaker, OpenAPI |
+| [athenos-web](../modules/athenos-web) | Angular 18 | SPA frontend — signals, i18n, dashboards, command palette |
+| [athenos-webcomponents](../modules/athenos-webcomponents) | Angular 18 | Design system — 40+ components, Storybook |
+| [athenos-contracts](../athenos-contracts) | Rust + TypeScript | Shared API contracts — dual-stack DTOs with validation |
 | [auth-service](../modules/auth-service) | Rust / Axum | Authentication — PIN login, OIDC, Argon2, sessions |
 | [notification-service](../modules/notification-service) | Rust / Axum | Email delivery — Tera templates, SMTP, queues |
 

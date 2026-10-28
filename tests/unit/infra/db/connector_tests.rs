@@ -209,10 +209,10 @@ async fn a_read_only_module_cannot_write_through_a_cte() {
     let f = fixture();
     let read_token = token(&f.security, "module:reader::core", &["db:read"]);
     for sql in [
-        "WITH x AS (UPDATE athene_tickets SET title = 'x' RETURNING id) SELECT * FROM x",
-        "WITH x AS (INSERT INTO athene_tickets (id) VALUES ($1) RETURNING id) SELECT id FROM x",
-        "WITH x AS (DELETE FROM athene_tickets RETURNING id) SELECT count(*) FROM x",
-        "SELECT * FROM athene_tickets FOR UPDATE",
+        "WITH x AS (UPDATE athenos_tickets SET title = 'x' RETURNING id) SELECT * FROM x",
+        "WITH x AS (INSERT INTO athenos_tickets (id) VALUES ($1) RETURNING id) SELECT id FROM x",
+        "WITH x AS (DELETE FROM athenos_tickets RETURNING id) SELECT count(*) FROM x",
+        "SELECT * FROM athenos_tickets FOR UPDATE",
         "SELECT set_config('search_path', 'evil', false)",
     ] {
         // The intent the client sends is not trusted: Read here.
@@ -242,7 +242,7 @@ async fn a_pure_read_cte_still_works_and_runs_read_only() {
         .service
         .execute(request(
             &read_token,
-            "WITH x AS (SELECT id FROM athene_tickets) SELECT * FROM x",
+            "WITH x AS (SELECT id FROM athenos_tickets) SELECT * FROM x",
             DbConnectorIntent::Read,
         ))
         .await;
@@ -264,7 +264,7 @@ async fn a_write_cte_with_db_write_returns_its_rows() {
         .service
         .execute(request(
             &write_token,
-            "WITH x AS (UPDATE athene_tickets SET title = 'x' RETURNING id) SELECT * FROM x",
+            "WITH x AS (UPDATE athenos_tickets SET title = 'x' RETURNING id) SELECT * FROM x",
             DbConnectorIntent::Read,
         ))
         .await;
@@ -280,7 +280,7 @@ async fn a_write_cte_with_db_write_returns_its_rows() {
         .service
         .execute(request(
             &write_token,
-            "WITH y AS (SELECT 1) UPDATE athene_tickets SET title = 'x' RETURNING id",
+            "WITH y AS (SELECT 1) UPDATE athenos_tickets SET title = 'x' RETURNING id",
             DbConnectorIntent::Write,
         ))
         .await;

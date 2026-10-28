@@ -87,7 +87,7 @@ fn redact_password_params(uri: &str) -> String {
 }
 
 /// Stand-in for a secret path segment or query value. The same text as the
-/// services' `athene_service_kit::observability::redact::path` (3.8a), so a
+/// services' `athenos_service_kit::observability::redact::path` (3.8a), so a
 /// masked invite reads the same in the host, gateway and core logs.
 pub const REDACTED_SEGMENT: &str = "<redacted>";
 

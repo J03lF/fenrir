@@ -3111,7 +3111,7 @@ mod tests {
 
     #[test]
     fn rotates_runtime_candidates_from_requested_start() {
-        let module_id = module("athene-api");
+        let module_id = module("athenos-api");
         let instance = |id: &str, port: u16| ModuleRuntimeInstanceInfo {
             instance_id: id.to_string(),
             primary: id == "inst-1",

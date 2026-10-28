@@ -2,7 +2,7 @@
 -- Run this in db-shell to clean up placeholder flags
 
 -- Remove old placeholder flags that have no backend logic
-DELETE FROM athene_feature_flags WHERE key IN (
+DELETE FROM athenos_feature_flags WHERE key IN (
     'registration_enabled',
     'beta_features',
     'public_projects',
@@ -11,7 +11,7 @@ DELETE FROM athene_feature_flags WHERE key IN (
 );
 
 -- Insert meaningful flags (skip if already exist)
-INSERT INTO athene_feature_flags (key, description, enabled, requires_api_key)
+INSERT INTO athenos_feature_flags (key, description, enabled, requires_api_key)
 VALUES 
     ('registration', 'Allow new users to create accounts via self-registration', TRUE, FALSE),
     ('password_reset', 'Allow users to reset their password via email', TRUE, FALSE),

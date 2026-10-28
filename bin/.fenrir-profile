@@ -36,16 +36,16 @@ export AUTH_DEV_PIN_SINK=/Users/jfurocket/Documents/personal/modules/runtime/aut
 # Shared service token auth-service -> notification-service (0600 file outside git).
 export NOTIFY_INTERNAL_SERVICE_AUTH_TOKEN_FILE=/Users/jfurocket/Documents/personal/modules/runtime/secrets/notify-service.token
 export AUTH_NOTIFICATION_SERVICE_TOKEN_FILE=/Users/jfurocket/Documents/personal/modules/runtime/secrets/notify-service.token
-# Step 3.6 (2026-10-24): shared service token athene-api -> athene -> auth-service
+# Step 3.6 (2026-10-24): shared service token athenos-api -> athenos -> auth-service
 # (0600 file outside git). Enforce is the default; *_ENFORCE_INTERNAL_SERVICE_AUTH=false is the rollback.
-export ATHENE_INTERNAL_SERVICE_AUTH_TOKEN_FILE=/Users/jfurocket/Documents/personal/modules/runtime/secrets/athene-internal.token
-export AUTH_INTERNAL_SERVICE_AUTH_TOKEN_FILE=/Users/jfurocket/Documents/personal/modules/runtime/secrets/athene-internal.token
-# athene-api: Swagger, OpenAPI and /metrics/internal for the host scrape (ignored in production).
-export ATHENE_API_DEV_ENDPOINTS=true
-# athene-api: open live streams per caller. Every local client shares the caller
+export ATHENOS_INTERNAL_SERVICE_AUTH_TOKEN_FILE=/Users/jfurocket/Documents/personal/modules/runtime/secrets/athenos-internal.token
+export AUTH_INTERNAL_SERVICE_AUTH_TOKEN_FILE=/Users/jfurocket/Documents/personal/modules/runtime/secrets/athenos-internal.token
+# athenos-api: Swagger, OpenAPI and /metrics/internal for the host scrape (ignored in production).
+export ATHENOS_API_DEV_ENDPOINTS=true
+# athenos-api: open live streams per caller. Every local client shares the caller
 # ip:127.0.0.1 (EventSource sends no bearer), so the default 16 is the whole machine.
 # Dev only, until stream slots are keyed per session (ROADMAP 3.6d).
-export ATHENE_API_RATE_LIMIT_STREAM_CONCURRENT=64
-# athene: active Athene AI quality model (folder under ~/Documents/personal/modules/models).
+export ATHENOS_API_RATE_LIMIT_STREAM_CONCURRENT=64
+# athenos: active Athenos AI quality model (folder under ~/Documents/personal/modules/models).
 # "off" unloads it; older versions stay installed for rollback.
-export ATHENE_QUALITY_MODEL=athene-quality/0.5.0-beta4
+export ATHENOS_QUALITY_MODEL=athenos-quality/0.5.0-beta4

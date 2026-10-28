@@ -1,0 +1,16 @@
+# Refresh the Cloudflare ranges for Caddy (trusted proxies) and the firewall
+# (443 only from Cloudflare). See server/cloudflare-ips.sh. Root: it changes
+# ufw rules and reloads Caddy.
+[Unit]
+Description=Refresh the Cloudflare IP ranges (Caddy, firewall)
+After=network-online.target
+Wants=network-online.target
+OnFailure=athenos-alert@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/athenos/cloudflare-ips.sh update
+TimeoutStartSec=5min
+PrivateTmp=yes
+ProtectHome=yes
+NoNewPrivileges=yes

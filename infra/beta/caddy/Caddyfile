@@ -1,26 +1,38 @@
-# /etc/caddy/Caddyfile - public entry of the Athenos beta.
+# /etc/caddy/Caddyfile - origin of the Athenos beta behind Cloudflare.
 #
-# Caddy terminates TLS (automatic HTTPS via ACME, HTTP/3 on 443/udp) and
-# proxies to exactly one upstream: the host's static-site edge on
-# 127.0.0.1:41002. The edge serves the web app and forwards /gateway/* to the
-# control plane, which routes to the API gateway module.
+# Browser -> Cloudflare (HTTPS, cache for hashed assets) -> this Caddy on
+# 443 (Cloudflare "Full (strict)", Cloudflare Origin CA certificate) ->
+# exactly one upstream: the host's static-site edge on 127.0.0.1:41002. The
+# edge serves the web app and forwards /gateway/* to the control plane,
+# which routes to the API gateway module.
+#
+# The firewall opens 443/tcp only for the Cloudflare ranges; Caddy believes
+# CF-Connecting-IP only from those ranges (server/cloudflare-ips.sh keeps
+# both in sync) and hands the result on as X-Real-IP, which the host believes
+# only from loopback (SPEC §2).
 #
 # Validate: caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 {
-	# ACME account contact (expiry warnings from the CA).
-	email admin@athenos.dev
+	# The certificate is the Cloudflare Origin CA one (below): no ACME, and
+	# no HTTP->HTTPS redirect here (Cloudflare "Always Use HTTPS" does it;
+	# port 80 is closed).
+	auto_https off
 	servers {
 		# Never add `log_credentials`: without it Caddy redacts Authorization,
 		# Cookie and Set-Cookie in the logs (the filter below drops them too).
-		# No client-supplied address header is believed: {client_ip} is the
-		# TCP peer. With Cloudflare proxying on, list its ranges here and add
-		# `client_ip_headers CF-Connecting-IP` (SPEC §2).
-		protocols h1 h2 h3
+		# {client_ip} = CF-Connecting-IP when the TCP peer is a Cloudflare
+		# range, else the peer itself.
+		import /etc/caddy/cloudflare-trusted-proxies.caddy
+		client_ip_headers CF-Connecting-IP
+		# Cloudflare talks HTTP/1.1 or HTTP/2 to the origin.
+		protocols h1 h2
 	}
 }
 
 (security_headers) {
 	header {
+		# HSTS only here (the host's edge leaves it to the TLS terminator,
+		# and the Cloudflare HSTS setting stays off), so it is sent once.
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		-Server
 		-Via
@@ -28,8 +40,9 @@
 }
 
 (access_log) {
-	# 7 days (privacy policy: server logs 7 days). Secrets in URLs are
-	# replaced before the line is written: stream tickets (?token=),
+	# 7 days (privacy policy: server logs 7 days). client_ip is the visitor
+	# (from CF-Connecting-IP), remote_ip the Cloudflare node. Secrets in URLs
+	# are replaced before the line is written: stream tickets (?token=),
 	# invitation, challenge and code parameters, /invite/<token> paths; the
 	# legacy user-token header is dropped.
 	log {
@@ -53,14 +66,26 @@
 	}
 }
 
-app.athenos.dev {
+https://app.athenos.dev {
+	# Cloudflare Origin CA certificate for app.athenos.dev (RUNBOOK 2.3).
+	tls /etc/caddy/origin/app.athenos.dev.pem /etc/caddy/origin/app.athenos.dev.key {
+		# Optional hardening, Cloudflare "Authenticated Origin Pulls": only
+		# Cloudflare's client certificate gets a TLS session. Enable it in
+		# Cloudflare first (SSL/TLS -> Origin Server), then uncomment.
+		# client_auth {
+		# 	mode require_and_verify
+		# 	trust_pool file /etc/caddy/origin/cloudflare-origin-pull-ca.pem
+		# }
+	}
+
 	import security_headers
 	import access_log
 
 	# Only the API gateway is reachable through /gateway. The edge would
 	# forward any /gateway/services/<id>/... to the control plane; everything
 	# but the api-gateway service is refused here already (both the encoded
-	# and the decoded spelling of the service id).
+	# and the decoded spelling of the service id). Cloudflare never caches
+	# /gateway/* (cache rule, RUNBOOK 2.4).
 	@api path /gateway/services/module%3Aathenos-api%3A%3Aapi-gateway/* /gateway/services/module:athenos-api::api-gateway/*
 	@gateway_other path /gateway /gateway/*
 	@internal path /.fenrir /.fenrir/*
@@ -90,5 +115,3 @@ app.athenos.dev {
 		}
 	}
 }
-
-# www and the bare IP get nothing; HTTP is redirected to HTTPS by Caddy.

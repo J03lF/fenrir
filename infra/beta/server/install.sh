@@ -18,9 +18,11 @@
 #   units     scripts to /usr/local/lib/athenos, systemd units and drop-ins,
 #             journald (7 days), logrotate (7 days); enables the timers and
 #             athenos.service (started by the first deploy)
-#   caddy     /etc/caddy/Caddyfile, validate, reload
+#   cloudflare  fetch the Cloudflare ranges (Caddy trusted proxies, firewall)
+#   caddy     /etc/caddy/Caddyfile, validate, reload; needs the Cloudflare
+#             Origin CA certificate in /etc/caddy/origin first (RUNBOOK 2.3)
 #   updates   unattended security upgrades with automatic reboot at night
-#   firewall  ufw: 22 (limited), 80, 443 tcp+udp
+#   firewall  ufw: 22 (limited, key-only), 443/tcp from Cloudflare only
 #   ssh       sshd: keys only, no root, AllowUsers <admin> (refuses without a key)
 #
 # Nothing here starts Athenos or touches application data.
@@ -206,12 +208,27 @@ step_units() {
 	fi
 	systemctl daemon-reload
 	systemctl enable athenos.service
-	systemctl enable --now athenos-backup.timer athenos-healthcheck.timer
+	systemctl enable --now athenos-backup.timer athenos-healthcheck.timer athenos-cloudflare-ips.timer
 	log "units installed; athenos.service starts with the first deploy"
+}
+
+step_cloudflare() {
+	"$BASE/server/cloudflare-ips.sh" update
 }
 
 step_caddy() {
 	install -d -m 0750 -o caddy -g caddy /var/log/caddy
+	install -d -m 0750 -o root -g caddy /etc/caddy/origin
+	local cert=/etc/caddy/origin/app.athenos.dev.pem key=/etc/caddy/origin/app.athenos.dev.key
+	if [ ! -s "$cert" ] || [ ! -s "$key" ]; then
+		warn "no Cloudflare Origin CA certificate yet ($cert, $key): Caddyfile not installed."
+		warn "Create it in Cloudflare (RUNBOOK 2.3), then run: sudo $BASE/server/install.sh caddy"
+		return 0
+	fi
+	chown root:caddy "$cert" "$key"
+	chmod 0644 "$cert"
+	chmod 0640 "$key"
+	[ -s /etc/caddy/cloudflare-trusted-proxies.caddy ] || "$BASE/server/cloudflare-ips.sh" update
 	[ -e /etc/caddy/Caddyfile.orig ] || [ ! -e /etc/caddy/Caddyfile ] || cp -p /etc/caddy/Caddyfile /etc/caddy/Caddyfile.orig
 	install -m 0644 -o root -g root "$BASE/caddy/Caddyfile" /etc/caddy/Caddyfile
 	caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
@@ -255,12 +272,12 @@ step_ssh() {
 
 case $step in
 all)
-	for s in packages user dirs postgres config units caddy updates firewall ssh; do
+	for s in packages user dirs postgres config units cloudflare caddy updates firewall ssh; do
 		log "=== $s"
 		"step_$s"
 	done
 	;;
-packages | user | dirs | postgres | config | units | caddy | updates | firewall | ssh) "step_$step" ;;
+packages | user | dirs | postgres | config | units | cloudflare | caddy | updates | firewall | ssh) "step_$step" ;;
 *)
 	sed -n '2,26p' "$0"
 	exit 1

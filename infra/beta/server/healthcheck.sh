@@ -7,8 +7,9 @@
 # Checks: the units (athenos, postgresql@16-main, caddy), the host
 # (/health/ready, /public/status not major_outage), the static edge
 # (127.0.0.1:41002/healthz), the public site and API through Caddy
-# (https://app.athenos.dev/healthz and the gateway /health), disk usage,
-# age of the newest database backup, TLS certificate validity.
+# (https://app.athenos.dev/healthz and the gateway /health, i.e. through
+# Cloudflare), disk usage, age of the newest database backup, validity of
+# the Cloudflare edge certificate and of the origin certificate.
 #
 # Alerts (alert.sh) on a new problem, every ALERT_REPEAT_HOURS while it
 # lasts, and once when everything is fine again. Exit code 1 if a check
@@ -32,6 +33,7 @@ load_env_file "${BACKUP_ENV_FILE:-/etc/athenos/backup.env}"
 : "${BACKUP_DIR:=/var/backups/athenos}"
 : "${BACKUP_MAX_AGE_HOURS:=26}"
 : "${CERT_MIN_DAYS:=14}"
+: "${ORIGIN_TLS_ADDRESS:=127.0.0.1:443}"
 : "${ALERT_REPEAT_HOURS:=6}"
 : "${MONITOR_STATE_DIR:=/var/lib/athenos/monitor}"
 
@@ -95,18 +97,26 @@ else
 	if [ "$age_h" -le "$BACKUP_MAX_AGE_HOURS" ]; then pass "backup $(basename -- "$newest") (${age_h} h old)"; else problem "newest backup is ${age_h} h old (limit ${BACKUP_MAX_AGE_HOURS} h)"; fi
 fi
 
-# certificate (Caddy renews 30 days before expiry; less than CERT_MIN_DAYS = renewal broken)
+# certificates: the one Cloudflare shows to visitors (renewed by Cloudflare)
+# and the origin certificate of Caddy (Cloudflare Origin CA, long-lived;
+# Cloudflare "Full (strict)" fails when it expires). Fewer than
+# CERT_MIN_DAYS days left = problem.
+check_cert() { # label connect-address servername
+	local cert
+	cert=$(openssl s_client -connect "$2" -servername "$3" </dev/null 2>/dev/null | openssl x509 2>/dev/null || true)
+	if [ -z "$cert" ]; then
+		problem "no TLS certificate readable from $1 ($2)"
+	elif printf '%s\n' "$cert" | openssl x509 -noout -checkend $((CERT_MIN_DAYS * 86400)) >/dev/null; then
+		pass "$1 certificate valid > ${CERT_MIN_DAYS} days ($(printf '%s\n' "$cert" | openssl x509 -noout -enddate | cut -d= -f2))"
+	else
+		problem "$1 certificate of $3 expires within ${CERT_MIN_DAYS} days"
+	fi
+}
 host=${PUBLIC_URL#https://}
 host=${host%%/*}
 if [ "$host" != "$PUBLIC_URL" ] && command -v openssl >/dev/null 2>&1; then
-	cert=$(openssl s_client -connect "$host:443" -servername "$host" </dev/null 2>/dev/null | openssl x509 2>/dev/null || true)
-	if [ -z "$cert" ]; then
-		problem "no TLS certificate readable from $host:443"
-	elif printf '%s\n' "$cert" | openssl x509 -noout -checkend $((CERT_MIN_DAYS * 86400)) >/dev/null; then
-		pass "certificate valid > ${CERT_MIN_DAYS} days ($(printf '%s\n' "$cert" | openssl x509 -noout -enddate | cut -d= -f2))"
-	else
-		problem "certificate of $host expires within ${CERT_MIN_DAYS} days"
-	fi
+	check_cert "public (Cloudflare)" "$host:443" "$host"
+	[ -z "$ORIGIN_TLS_ADDRESS" ] || check_cert "origin (Caddy)" "$ORIGIN_TLS_ADDRESS" "$host"
 fi
 
 # alerting with memory: new problem, repeat, recovery

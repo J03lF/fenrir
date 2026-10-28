@@ -1831,3 +1831,16 @@ fn a_restarting_module_archives_its_previous_log() {
     assert_eq!(archived_mode, 0o600);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn static_site_content_types_cover_the_favicon_set_and_the_manifest() {
+    for (file, expected) in [
+        ("favicon.svg", "image/svg+xml"),
+        ("favicon.ico", "image/x-icon"),
+        ("apple-touch-icon.png", "image/png"),
+        ("site.webmanifest", "application/manifest+json"),
+        ("unknown.bin", "application/octet-stream"),
+    ] {
+        assert_eq!(content_type_for(Path::new(file)), expected, "{file}");
+    }
+}

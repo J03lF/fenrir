@@ -3001,6 +3001,8 @@ fn content_type_for(path: &Path) -> &'static str {
         "jpg" | "jpeg" => "image/jpeg",
         "svg" => "image/svg+xml",
         "ico" => "image/x-icon",
+        // The web app's manifest (site.webmanifest); browsers want this type.
+        "webmanifest" => "application/manifest+json",
         "woff2" => "font/woff2",
         "woff" => "font/woff",
         _ => "application/octet-stream",

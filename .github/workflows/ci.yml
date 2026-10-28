@@ -1,62 +1,149 @@
+# Quality gates of the Fenrir host: fmt, clippy, tests (with the Postgres
+# pool tests against a throwaway server) and cargo-deny (W9A-09).
 name: CI
 
 on:
   push:
-    branches:
-      - main
+    branches: [master]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # Pinned so a new stable release cannot turn master red via `-D warnings`.
+  RUST_TOOLCHAIN: "1.89.0"
+  CARGO_DENY_VERSION: "0.20.2"
+  # module-kit revision CI builds against (Cargo.toml path-patches it to
+  # ../module-kit). Bump together with any change that needs a newer commit.
+  MODULE_KIT_SHA: 67010747576550b51037eb81ad5bc8b775206a28
 
 jobs:
-  lint:
-    runs-on: ubuntu-latest
+  check:
+    name: fmt, clippy, test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: fenrir
+    # Throwaway server for tests/unit/infra/db/postgres_pool_tests.rs
+    # (FENRIR_PG_TEST_URI_FILE). Pinned by digest: postgres 16.14. Trust auth
+    # on a service only this job can reach.
+    services:
+      postgres:
+        image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        env:
+          POSTGRES_USER: fenrir_test
+          POSTGRES_DB: fenrir_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fenrir_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Install toolchain
-        uses: dtolnay/rust-toolchain@stable
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: fenrir
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: J03lF/module-kit
+          ref: ${{ env.MODULE_KIT_SHA }}
+          path: module-kit
+          token: ${{ secrets.SIBLING_REPOS_TOKEN || github.token }}
+          persist-credentials: false
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN }}
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy
+          rustup default "$RUST_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: fenrir
       - name: rustfmt
         run: cargo fmt --all -- --check
-      - name: Clippy
-        run: cargo clippy --workspace --all-features -- -D warnings
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: tests (Postgres pool tests included)
+        run: |
+          uri_file="$RUNNER_TEMP/fenrir-pg-uri"
+          printf 'postgresql://fenrir_test@127.0.0.1:5432/fenrir_test' > "$uri_file"
+          chmod 600 "$uri_file"
+          FENRIR_PG_TEST_URI_FILE="$uri_file" cargo test --workspace --all-features --locked
 
-  test:
-    runs-on: ubuntu-latest
-    needs: lint
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: fenrir
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Install toolchain
-        uses: dtolnay/rust-toolchain@stable
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-      - name: Unit and integration tests
-        run: cargo test --workspace --all-features
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: fenrir
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: J03lF/module-kit
+          ref: ${{ env.MODULE_KIT_SHA }}
+          path: module-kit
+          token: ${{ secrets.SIBLING_REPOS_TOKEN || github.token }}
+          persist-credentials: false
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN }}
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+      - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
+        with:
+          tool: cargo-deny@${{ env.CARGO_DENY_VERSION }}
+      - name: Advisories, bans, licenses, sources
+        run: cargo deny --locked check
 
   package:
-    runs-on: ubuntu-latest
-    needs: test
+    runs-on: ubuntu-24.04
+    needs: [check, deny]
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: fenrir
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Install toolchain
-        uses: dtolnay/rust-toolchain@stable
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: fenrir
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: J03lF/module-kit
+          ref: ${{ env.MODULE_KIT_SHA }}
+          path: module-kit
+          token: ${{ secrets.SIBLING_REPOS_TOKEN || github.token }}
+          persist-credentials: false
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN }}
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: fenrir
       - name: Build release artifacts
-        run: cargo build --workspace --release
+        run: cargo build --workspace --release --locked
       - name: Bundle distribution
         run: |
           mkdir -p dist/config
           cp target/release/fenrir dist/
           cp config/*.toml dist/config/
-          tar -czf fenrir-${{ github.sha }}.tar.gz -C dist .
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+          tar -czf "fenrir-${GITHUB_SHA}.tar.gz" -C dist .
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: fenrir-${{ github.sha }}
-          path: fenrir-${{ github.sha }}.tar.gz
+          path: fenrir/fenrir-${{ github.sha }}.tar.gz

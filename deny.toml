@@ -1,0 +1,86 @@
+# cargo-deny configuration for the Fenrir host (W9A-09).
+# Run: cargo deny --locked check   (CI: .github/workflows/ci.yml)
+# Docs: https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# Every platform we build or might build for; keeps the license/advisory set
+# independent of the machine that runs the check.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
+all-features = true
+
+[advisories]
+version = 2
+# Vulnerability and unsound advisories fail. Unmaintained crates fail when we
+# depend on them directly.
+yanked = "deny"
+unmaintained = "workspace"
+# Each ignore names the advisory, why it cannot be fixed today and when it
+# goes. Fixed releases must be at least two weeks old before they are taken
+# (supply-chain rule S9); remove the entry as soon as the fix is in the lock.
+ignore = [
+    # russh 0.44 (SSH admin shell, bound to 127.0.0.1; production refuses any
+    # other address): pre-auth allocation DoS. Fixed in russh >= 0.60.3, but
+    # every fixed russh needs crypto-bigint 0.7.x, whose only non-yanked
+    # releases (0.7.9/0.7.10) appeared on 2026-10-25/26. Upgrade russh to
+    # 0.64 from 2026-11-09 and drop these four entries.
+    { id = "RUSTSEC-2026-0154", reason = "russh 0.44 DoS; SSH is loopback-only; fixed russh needs crypto-bigint 0.7.10 (2026-10-26), upgrade from 2026-11-09" },
+    { id = "RUSTSEC-2026-0153", reason = "russh-cryptovec 0.7 DoS; same path and plan as RUSTSEC-2026-0154" },
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5 timing (russh ECDH/ECDSA on the loopback SSH listener); fix needs crypto-bigint 0.7.10 (2026-10-26), goes with the russh upgrade" },
+    # rsa (via russh-keys/ssh-key): no fixed release exists. The host never
+    # performs RSA private-key operations: its SSH host key is Ed25519 and
+    # login is by password.
+    { id = "RUSTSEC-2023-0071", reason = "rsa Marvin attack; no fix released; no RSA private-key operation in the host (Ed25519 host key, password login)" },
+    # ctutils (digest 0.11 -> hmac/md-5 in postgres-protocol 0.6.12, the
+    # client side of SCRAM/MD5 auth to the host's own database). Fixed in
+    # 0.4.4 (2026-10-23); take it from 2026-11-06.
+    { id = "RUSTSEC-2026-0385", reason = "ctutils 0.4.3 timing in the Postgres client auth to our own DB; fix 0.4.4 is from 2026-10-23, update from 2026-11-06" },
+]
+
+[licenses]
+version = 2
+# Same base set as the modules; additions below are deliberate.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "MPL-2.0",
+]
+confidence-threshold = 0.93
+
+# Mozilla's root CA list (webpki-roots 1.x, via reqwest `rustls-tls`) is
+# under CDLA-Permissive-2.0, a permissive data license; scoped to that crate.
+[[licenses.exceptions]]
+crate = "webpki-roots"
+allow = ["CDLA-Permissive-2.0"]
+
+# notify 6 (config file watcher) is dedicated to the public domain.
+[[licenses.exceptions]]
+crate = "notify"
+allow = ["CC0-1.0"]
+
+[licenses.private]
+# The host crate is not published and carries no license field.
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# The path patch means the git source only appears when it is removed.
+unused-allowed-source = "allow"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = [
+    "https://github.com/J03lF/module-kit.git",
+]

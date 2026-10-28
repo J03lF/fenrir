@@ -793,6 +793,79 @@ pub struct TelemetrySection {
     pub system: TelemetrySystemSection,
     #[serde(default)]
     pub history: TelemetryHistorySection,
+    /// Rotation and retention of the host and module log files (W9A-13).
+    #[serde(default)]
+    pub logs: TelemetryLogsSection,
+}
+
+/// `[telemetry.logs]`: a log rotates daily (UTC) or at `max_file_mb`;
+/// archives stay `retention_days`, at most `max_archives` per log.
+#[derive(Debug, Deserialize, Clone)]
+pub struct TelemetryLogsSection {
+    #[serde(default = "default_log_retention_days")]
+    pub retention_days: u32,
+    #[serde(default = "default_log_max_file_mb")]
+    pub max_file_mb: u64,
+    #[serde(default = "default_log_max_archives")]
+    pub max_archives: usize,
+    /// How often the host checks the module logs.
+    #[serde(default = "default_log_check_interval_seconds")]
+    pub check_interval_seconds: u64,
+}
+
+impl Default for TelemetryLogsSection {
+    fn default() -> Self {
+        Self {
+            retention_days: default_log_retention_days(),
+            max_file_mb: default_log_max_file_mb(),
+            max_archives: default_log_max_archives(),
+            check_interval_seconds: default_log_check_interval_seconds(),
+        }
+    }
+}
+
+impl TelemetryLogsSection {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if !(1..=365).contains(&self.retention_days) {
+            return Err(ConfigError::Invalid(
+                "telemetry.logs.retention_days must be 1..=365",
+            ));
+        }
+        if !(1..=10_240).contains(&self.max_file_mb) {
+            return Err(ConfigError::Invalid(
+                "telemetry.logs.max_file_mb must be 1..=10240",
+            ));
+        }
+        if self.max_archives == 0 {
+            return Err(ConfigError::Invalid(
+                "telemetry.logs.max_archives must be > 0",
+            ));
+        }
+        if !(1..=3_600).contains(&self.check_interval_seconds) {
+            return Err(ConfigError::Invalid(
+                "telemetry.logs.check_interval_seconds must be 1..=3600",
+            ));
+        }
+        Ok(())
+    }
+}
+
+const fn default_log_retention_days() -> u32 {
+    7
+}
+
+const fn default_log_max_file_mb() -> u64 {
+    50
+}
+
+/// Daily rotation alone needs `retention_days` archives; the rest is room
+/// for size rotations on busy days.
+const fn default_log_max_archives() -> usize {
+    30
+}
+
+const fn default_log_check_interval_seconds() -> u64 {
+    60
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -2156,6 +2229,7 @@ impl AuditStorageSection {
 
 impl TelemetrySection {
     pub fn validate(&self) -> Result<(), ConfigError> {
+        self.logs.validate()?;
         if self.tracing.level.trim().is_empty() {
             return Err(ConfigError::Invalid(
                 "telemetry.tracing.level must not be empty",

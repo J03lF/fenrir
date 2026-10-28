@@ -13,11 +13,13 @@ use crate::utils::messages;
 
 use super::db::prepare_db_log;
 use super::handle::ReloadHandle;
+use super::retention::LogRetention;
 use super::writers::build_app_writer;
 use super::{db_log_file_path, LOG_GUARD, LOG_PATH};
 
 pub fn init_tracing(cfg: &AppConfig) -> Result<ReloadHandle> {
-    prepare_db_log()?;
+    let policy = LogRetention::from(&cfg.telemetry.logs);
+    prepare_db_log(&policy)?;
 
     let filter = EnvFilter::try_from_default_env()
         .or_else(|_| EnvFilter::try_new(cfg.telemetry.tracing.level.clone()))
@@ -26,7 +28,7 @@ pub fn init_tracing(cfg: &AppConfig) -> Result<ReloadHandle> {
 
     let base = tracing_subscriber::registry().with(filter_layer);
 
-    if let Some((file_writer, guard, path)) = build_app_writer()? {
+    if let Some((file_writer, guard, path)) = build_app_writer(&policy)? {
         LOG_GUARD.set(guard).ok();
         LOG_PATH.set(path.clone()).ok();
         let stdout_writer = io::stdout as fn() -> io::Stdout;

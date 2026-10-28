@@ -1802,3 +1802,32 @@ mod access_log {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn a_restarting_module_archives_its_previous_log() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("w9-host-modlog-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = dir.join("athenos.log");
+    std::fs::write(&log, "previous run\n").unwrap();
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    ProcessModuleRuntime::reset_log_file(&log, &LogRetention::default()).unwrap();
+
+    assert_eq!(std::fs::metadata(&log).unwrap().len(), 0);
+    let mode = std::fs::metadata(&log).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+    let archived: Vec<_> = std::fs::read_dir(dir.join("archive"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .collect();
+    assert_eq!(archived.len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(archived[0].path()).unwrap(),
+        "previous run\n"
+    );
+    let archived_mode = archived[0].metadata().unwrap().permissions().mode() & 0o777;
+    assert_eq!(archived_mode, 0o600);
+    let _ = std::fs::remove_dir_all(&dir);
+}

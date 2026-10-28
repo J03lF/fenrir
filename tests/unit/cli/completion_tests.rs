@@ -158,6 +158,7 @@ fn test_config() -> Arc<AppConfig> {
                 interval_ms: Some(5000),
             },
             history: TelemetryHistorySection::default(),
+            logs: Default::default(),
         },
         audit: AuditSection {
             enabled: false,

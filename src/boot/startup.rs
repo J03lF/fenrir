@@ -14,6 +14,7 @@ use crate::config::{self, DbRuntimeMode, ModuleRuntimeEngine};
 use crate::domain::db::DbEngine;
 use crate::infra::db::runtime::DbRuntimeSupervisor;
 use crate::infra::http::{HttpServer, HTTP_SERVICE_ID};
+use crate::infra::logging::LogRetention;
 use crate::infra::modules::{
     CompositeModuleRegistry, Ed25519ModuleVerifier, FilesystemModuleStorage, HttpModuleRegistry,
     InProcessModuleRuntime, LocalModuleRegistry, ProcessModuleRuntime,
@@ -493,8 +494,13 @@ pub fn boot() -> Result<BootContext, BootError> {
                         Arc::clone(&diagnostics),
                         control_plane_base,
                     )
-                    .with_client_ip_policy(client_ip),
+                    .with_client_ip_policy(client_ip)
+                    .with_log_retention(LogRetention::from(&cfg.telemetry.logs)),
                 );
+                // Module logs: daily or at the size cap, 7 days (W9A-13).
+                let _ = runtime.spawn_log_maintenance(Duration::from_secs(
+                    cfg.telemetry.logs.check_interval_seconds,
+                ));
 
                 if let Ok(handle) = Handle::try_current() {
                     let handle_clone = handle.clone();

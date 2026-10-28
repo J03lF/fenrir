@@ -52,4 +52,8 @@ pub mod writers {
     pub fn create_dir_failed(path: impl fmt::Display) -> String {
         format!("failed to create log directory: {}", path)
     }
+
+    pub fn open_failed(path: impl fmt::Display) -> String {
+        format!("failed to open log file: {}", path)
+    }
 }

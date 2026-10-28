@@ -39,6 +39,10 @@ use crate::infra::http::compression::{self, Encoding};
 use crate::infra::http::proxy_headers::{
     edge_hop_secret, HopByHop, EDGE_HOP_HEADER, FORWARDED_FOR,
 };
+use crate::infra::logging::retention::{
+    archive_by_rename, create_private, maintain_log_dir, open_private_append,
+};
+use crate::infra::logging::LogRetention;
 use crate::services::ServiceDiagnostics;
 use crate::utils::messages;
 use time::format_description::well_known::Rfc3339;
@@ -361,6 +365,8 @@ pub struct ProcessModuleRuntime {
     control_plane_base: String,
     /// `[server.edge]`: which client address the static edge forwards.
     client_ip: Arc<ClientIpPolicy>,
+    /// `[telemetry.logs]`: rotation and retention of the module logs.
+    log_retention: LogRetention,
 }
 
 #[derive(Debug)]
@@ -521,7 +527,59 @@ impl ProcessModuleRuntime {
             running_modules: Arc::new(RwLock::new(HashMap::new())),
             control_plane_base,
             client_ip: Arc::new(ClientIpPolicy::default()),
+            log_retention: LogRetention::default(),
         }
+    }
+
+    /// `[telemetry.logs]` for the module logs (W9A-13).
+    #[must_use]
+    pub fn with_log_retention(mut self, policy: LogRetention) -> Self {
+        self.log_retention = policy;
+        self
+    }
+
+    /// Rotates and prunes the module logs every `interval` (daily or at the
+    /// size cap, by copy and truncate: the modules keep their descriptors).
+    /// Needs a Tokio runtime; the task ends with it.
+    pub fn spawn_log_maintenance(&self, interval: Duration) -> Option<JoinHandle<()>> {
+        let handle = tokio::runtime::Handle::try_current().ok()?;
+        let dir = self.state_dir.join("logs");
+        let policy = self.log_retention;
+        Some(handle.spawn(async move {
+            let mut days = HashMap::new();
+            let mut ticker = tokio::time::interval(interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                let pass_dir = dir.clone();
+                let mut pass_days = std::mem::take(&mut days);
+                let result = tokio::task::spawn_blocking(move || {
+                    let outcome = maintain_log_dir(
+                        &pass_dir,
+                        &policy,
+                        &mut pass_days,
+                        OffsetDateTime::now_utc(),
+                    );
+                    (outcome, pass_days)
+                })
+                .await;
+                match result {
+                    Ok((outcome, pass_days)) => {
+                        days = pass_days;
+                        match outcome {
+                            Ok(rotated) if !rotated.is_empty() => {
+                                debug!(count = rotated.len(), "module logs rotated");
+                            }
+                            Ok(_) => {}
+                            Err(err) => {
+                                warn!(error = %err, path = %dir.display(), "module log rotation failed");
+                            }
+                        }
+                    }
+                    Err(err) => warn!(error = %err, "module log rotation task failed"),
+                }
+            }
+        }))
     }
 
     /// The `[server.edge]` policy of the static-site edge (W9A-01). Without
@@ -532,18 +590,21 @@ impl ProcessModuleRuntime {
         self
     }
 
-    fn reset_log_file(path: &Path) -> Result<(), ModuleRuntimeError> {
-        std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(path)
-            .map(|_| ())
-            .map_err(|err| {
-                ModuleRuntimeError::Io(
-                    messages::infra::modules::runtime::process::log_file_reset_failed(err),
-                )
-            })
+    /// A fresh `0600` log for a (re)starting module. The previous run's
+    /// log goes to the archive instead of being truncated (W9A-13).
+    fn reset_log_file(path: &Path, policy: &LogRetention) -> Result<(), ModuleRuntimeError> {
+        if let Err(err) = archive_by_rename(path, policy, OffsetDateTime::now_utc()) {
+            warn!(
+                path = %path.display(),
+                error = %err,
+                "could not archive the previous module log, truncating it"
+            );
+        }
+        create_private(path).map(|_| ()).map_err(|err| {
+            ModuleRuntimeError::Io(
+                messages::infra::modules::runtime::process::log_file_reset_failed(err),
+            )
+        })
     }
 
     fn log_timestamp() -> String {
@@ -559,12 +620,7 @@ impl ProcessModuleRuntime {
             module,
             root.display()
         );
-        match fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(log_file)
-            .await
-        {
+        match open_private_append(log_file).map(fs::File::from_std) {
             Ok(mut file) => {
                 if let Err(err) = file.write_all(line.as_bytes()).await {
                     warn!(
@@ -1262,7 +1318,7 @@ impl ProcessModuleRuntime {
         })?;
 
         let log_file = self.build_log_file_path(&module_id_str, primary, &instance_id);
-        Self::reset_log_file(&log_file)?;
+        Self::reset_log_file(&log_file, &self.log_retention)?;
 
         let runtime_manifest = Self::load_runtime_manifest(&module_path);
         let runtime_mode = runtime_manifest
@@ -1360,15 +1416,11 @@ impl ProcessModuleRuntime {
             ),
         })?;
 
-        let log_file_handle = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_file)
-            .map_err(|e| {
-                ModuleRuntimeError::Io(
-                    messages::infra::modules::runtime::process::log_file_open_failed(e),
-                )
-            })?;
+        let log_file_handle = open_private_append(&log_file).map_err(|e| {
+            ModuleRuntimeError::Io(
+                messages::infra::modules::runtime::process::log_file_open_failed(e),
+            )
+        })?;
 
         self.run_bootstrap_script(module_id, &module_path, &full_env)
             .await?;
@@ -2158,11 +2210,7 @@ impl StaticRouterState {
         };
 
         // Best-effort append to log file
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(self.log_file.as_ref())
-        {
+        if let Ok(mut file) = open_private_append(self.log_file.as_ref()) {
             let _ = file.write_all(line.as_bytes());
         }
     }
@@ -2175,11 +2223,7 @@ impl StaticRouterState {
             .unwrap_or_else(|_| "unknown".to_string());
         let line = format!("{} [ERROR] {}\n", timestamp, message);
 
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(self.log_file.as_ref())
-        {
+        if let Ok(mut file) = open_private_append(self.log_file.as_ref()) {
             let _ = file.write_all(line.as_bytes());
         }
     }

@@ -178,6 +178,19 @@ enabled = true
 enabled = true
 interval_ms = 5000
 
+# Log rotation and retention (W9A-13, C18): the host's app.log/db.log and
+# every module log rotate daily (UTC) or at max_file_mb, archives go to
+# <log dir>/archive/<name>-<timestamp>.log and are deleted after
+# retention_days (at most max_archives per log). Files are 0600. Module logs
+# are checked every check_interval_seconds and rotated by copy + truncate
+# (a module keeps its descriptor); a restarting module's previous log is
+# archived instead of truncated.
+[telemetry.logs]
+retention_days = 7
+max_file_mb = 50
+max_archives = 30
+check_interval_seconds = 60
+
 [telemetry.history]
 retention_days = 1
 persist_interval_seconds = 120

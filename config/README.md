@@ -180,3 +180,8 @@ Client IP behind a reverse proxy (`[server.edge]`, W9A-01)
 - Env: `FENRIR_SERVER__EDGE__CLIENT_IP_HEADER=x-real-ip`, `FENRIR_SERVER__EDGE__TRUSTED_PROXIES=127.0.0.1/32,::1/128` (comma-separated). The generic `FENRIR__SERVER__EDGE__…` form works too.
 - Invalid entries, or a header without trusted proxies, stop the host at startup with a clear error.
 - Caddy example: `reverse_proxy 127.0.0.1:41002 { header_up X-Real-IP {client_ip} }` (Caddy replaces any client value).
+
+Log rotation (`[telemetry.logs]`, W9A-13)
+- Host logs (`logs/app.log`, `logs/db.log`, or `FENRIR_LOG_PATH` / `FENRIR_DB_LOG_PATH`) and module logs (`<install_dir>/runtime/logs/*.log`) rotate daily (UTC) or at `max_file_mb` (default 50). Archives: `<log dir>/archive/<name>-YYYYMMDD_HHMMSS.log`, deleted after `retention_days` (default 7) and capped at `max_archives` per log (default 30). A line lives at most `retention_days` + 1 day.
+- All log and archive files are created 0600; older files are narrowed to 0600 when the host touches them.
+- Module processes keep their log descriptor, so their logs are rotated by copy + truncate every `check_interval_seconds` (default 60); lines written during the copy of a 50 MB file can be lost. A restarting module's previous log is archived instead of truncated.

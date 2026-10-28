@@ -2,6 +2,7 @@ mod archive;
 mod db;
 mod handle;
 mod init;
+pub mod retention;
 mod writers;
 
 use std::path::PathBuf;
@@ -13,11 +14,10 @@ pub use archive::{latest_archive, LogKind};
 pub use db::append_db_log;
 pub use handle::ReloadHandle;
 pub use init::init_tracing;
+pub use retention::{LogRetention, RotatingFile};
 
 const DEFAULT_APP_LOG: &str = "logs/app.log";
 const DEFAULT_DB_LOG: &str = "logs/db.log";
-const ARCHIVE_DIR: &str = "archive";
-const MAX_ARCHIVES: usize = 3;
 
 static LOG_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
 static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();

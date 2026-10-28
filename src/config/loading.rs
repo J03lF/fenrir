@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use super::edge::split_list;
 use super::error::ConfigError;
+use super::mode::{production_violations, OperatingMode};
 use super::model::{AppConfig, DbRuntimeMode};
 use super::validation::{
     validate_grpc_tls, validate_http_tls, validate_module_registry_tls, validate_ssh_tls,
@@ -12,7 +13,7 @@ use super::validation::{
 
 pub(super) const ENV_CONFIG_FILE: &str = "FENRIR_CONFIG_FILE";
 pub(super) const ENV_CONFIG_ENV: &str = "FENRIR_CONFIG_ENV";
-pub(super) const ENV_ENV: &str = "FENRIR_ENV";
+pub(super) const ENV_ENV: &str = super::mode::ENV_OPERATING_MODE;
 pub(super) const ENV_FILE: &str = "secrets/.env";
 pub(super) const ENV_FILE_OVERRIDE: &str = "FENRIR_ENV_FILE";
 pub(super) const LOCAL_OVERRIDE_FILE: &str = "config/local.toml";
@@ -22,6 +23,7 @@ pub(super) const ENV_EDGE_TRUSTED_PROXIES: &str = "FENRIR_SERVER__EDGE__TRUSTED_
 
 pub fn load() -> Result<AppConfig, ConfigError> {
     load_env_file_overrides()?;
+    let mode = OperatingMode::from_env();
     let mut builder =
         config::Config::builder().add_source(config::File::from(Path::new("config/default.toml")));
 
@@ -35,8 +37,13 @@ pub fn load() -> Result<AppConfig, ConfigError> {
         builder = builder.add_source(config::File::from(profile_path));
     }
 
-    if let Some(local) = local_override_path() {
-        builder = builder.add_source(config::File::from(local));
+    // `config/local.toml` is a developer override (relaxed passwords, local
+    // paths); a production host takes its overrides from
+    // `FENRIR_CONFIG_FILE` instead.
+    if !mode.is_production() {
+        if let Some(local) = local_override_path() {
+            builder = builder.add_source(config::File::from(local));
+        }
     }
 
     if let Some(explicit) = explicit_config_path()? {
@@ -53,6 +60,7 @@ pub fn load() -> Result<AppConfig, ConfigError> {
 
     // Apply profile-specific ENV overrides (FENRIR_* without double underscore)
     apply_profile_overrides(&mut cfg);
+    cfg.mode = mode;
 
     validate(&cfg)?;
     Ok(cfg)
@@ -107,6 +115,7 @@ fn apply_profile_overrides(cfg: &mut AppConfig) {
 }
 
 pub fn validate(cfg: &AppConfig) -> Result<(), ConfigError> {
+    validate_mode(cfg)?;
     cfg.server.edge.validate()?;
     cfg.security.validate()?;
     cfg.telemetry.validate()?;
@@ -292,6 +301,23 @@ pub fn validate(cfg: &AppConfig) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// Production refuses dev-only settings (W9A-03).
+fn validate_mode(cfg: &AppConfig) -> Result<(), ConfigError> {
+    if !cfg.mode.is_production() {
+        return Ok(());
+    }
+    let violations = production_violations(cfg);
+    if violations.is_empty() {
+        return Ok(());
+    }
+    Err(ConfigError::InvalidMessage(format!(
+        "{ENV_ENV} is production (it is unset or not one of dev|development|local|test), \
+         but dev-only settings are active: {}. Fix them in the production profile, or set \
+         {ENV_ENV}=dev on a development machine",
+        violations.join("; ")
+    )))
+}
+
 fn load_env_file_overrides() -> Result<(), ConfigError> {
     // 1. Load bin/.fenrir-profile first (if exists)
     let profile_path = PathBuf::from(PROFILE_FILE);
@@ -394,6 +420,12 @@ pub(super) fn detect_config_profile() -> Result<Option<String>, ConfigError> {
                 continue;
             }
             let profile = sanitize_profile(trimmed)?;
+            // The long spellings of the mode use the short profile files.
+            let profile = match (key, profile.as_str()) {
+                (ENV_ENV, "production") => "prod".to_string(),
+                (ENV_ENV, "development") => "dev".to_string(),
+                _ => profile,
+            };
             return Ok(Some(profile));
         }
     }

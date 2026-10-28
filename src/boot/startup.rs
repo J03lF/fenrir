@@ -667,6 +667,7 @@ pub fn boot() -> Result<BootContext, BootError> {
         health_client,
         default_service_scopes,
         env_passthrough_prefixes: cfg.modules.runtime.env_passthrough_prefixes.clone(),
+        operating_mode: cfg.mode,
         control_plane_url,
         service_snapshot_path: Some(runtime_state_dir.join("services.json")),
         diagnostics: services.diagnostics(),

@@ -1,11 +1,23 @@
 app = { name = "fenrir", version = "1.0.0" }
 
+# Production profile, loaded with FENRIR_ENV=prod (or production). In
+# production the host ignores config/local.toml and refuses to start while
+# dev-only settings are active (certificate checks off, dev module sources,
+# relaxed password policy, inline or short control tokens, embedded DB with
+# trust auth, plain-text listeners beyond loopback, non-prod identity
+# environment). Server-specific overrides go into FENRIR_CONFIG_FILE or
+# FENRIR__* environment variables.
+
 [server.ssh]
 server_name = "fenrir-prod"
 idle_close_seconds = 30
 
+# TLS ends at the reverse proxy in front of the host (Caddy). The control
+# plane listens on 127.0.0.1 only, and the static-site edge reaches it over
+# plain HTTP on loopback; the production check refuses plain HTTP on any
+# other address.
 [server.http.tls]
-enabled = true
+enabled = false
 
 [server.grpc.tls]
 enabled = true
@@ -36,4 +48,9 @@ bootstrap = ["fenrir-api"]
 ca_cert_path = "env:FENRIR_IDENTITY_TLS_CA"
 client_cert_path = "env:FENRIR_IDENTITY_TLS_CERT"
 client_key_path = "env:FENRIR_IDENTITY_TLS_KEY"
-accept_invalid_certs = true
+# The CA above is configured, so the chain is checked (W9A-34).
+accept_invalid_certs = false
+
+# No dev checkouts as module sources (default.toml points at one).
+[modules.dev_sources]
+base_path = ""

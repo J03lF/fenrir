@@ -5,6 +5,7 @@ use std::sync::{Arc, RwLock as SyncRwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::audit::AuditOutcome;
+use crate::config::OperatingMode;
 use crate::dev_agent::config::{DevAgentConfig, DevAgentService};
 use crate::domain::module::{
     ChecksumAlgorithm, DistributionTarget, InstalledModule, ModuleBundle, ModuleId,
@@ -68,7 +69,8 @@ const FAILURE_WINDOW_SECS: u64 = 120;
 const FAILURE_THRESHOLD: u32 = 3;
 const QUARANTINE_DURATION_SECS: u64 = 300;
 pub(super) const MODULE_SERVICE_MANIFEST_PATH: &str = "/.fenrir/services";
-pub(super) const RESERVED_ENV_KEYS: [&str; 16] = [
+pub(super) const RESERVED_ENV_KEYS: [&str; 17] = [
+    "FENRIR_ENV",
     "FENRIR_MODULE_ID",
     "FENRIR_SERVICE_ID",
     "FENRIR_SERVICE_URI",
@@ -179,6 +181,8 @@ pub struct ModuleServiceInit {
     pub health_client: ModuleHealthHttpClient,
     pub default_service_scopes: Vec<ServiceScope>,
     pub env_passthrough_prefixes: Vec<String>,
+    /// Handed to every module as `FENRIR_ENV` (W9A-03).
+    pub operating_mode: OperatingMode,
     pub control_plane_url: Option<String>,
     pub service_snapshot_path: Option<PathBuf>,
     pub diagnostics: Arc<ServiceDiagnostics>,
@@ -211,6 +215,7 @@ pub struct ModuleService {
     pub(super) db_connector_endpoint: SyncRwLock<Option<DbConnectorEndpoint>>,
     pub(super) default_service_scopes: Vec<ServiceScope>,
     pub(super) env_passthrough_prefixes: Vec<String>,
+    pub(super) operating_mode: OperatingMode,
     pub(super) control_plane_url: SyncRwLock<Option<String>>,
     pub(super) health: SyncRwLock<HashMap<ModuleId, ModuleHealth>>,
     pub(super) instance_health:
@@ -1203,6 +1208,7 @@ impl ModuleService {
                 health_client,
                 default_service_scopes,
                 env_passthrough_prefixes,
+                operating_mode,
                 control_plane_url,
                 service_snapshot_path,
                 diagnostics,
@@ -1243,6 +1249,7 @@ impl ModuleService {
                 db_connector_endpoint: SyncRwLock::new(None),
                 default_service_scopes,
                 env_passthrough_prefixes,
+                operating_mode,
                 control_plane_url: SyncRwLock::new(control_plane_url),
                 health: SyncRwLock::new(HashMap::new()),
                 instance_health: SyncRwLock::new(HashMap::new()),
@@ -3067,6 +3074,13 @@ mod tests {
 
     fn module(id: &str) -> ModuleId {
         ModuleId::new(id).expect("module id valid")
+    }
+
+    #[test]
+    fn the_operating_mode_cannot_be_overridden_per_service() {
+        // `FENRIR_ENV` comes from the host only (W9A-03): service env
+        // overrides skip reserved keys.
+        assert!(super::RESERVED_ENV_KEYS.contains(&"FENRIR_ENV"));
     }
 
     #[test]

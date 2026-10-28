@@ -225,3 +225,137 @@ fn edge_is_off_by_default() {
     let cfg = with_env(&[], || load().expect("config should load"));
     assert_eq!(cfg.server.edge.policy().unwrap().header(), None);
 }
+
+/// What `FENRIR_ENV=prod` needs from the environment (all dummies). The
+/// empty `FENRIR_DEV_MODULE_PATH` keeps the dev value of the tracked
+/// `bin/.fenrir-profile` out (it only fills unset variables).
+const PROD_ENV: &[(&str, &str)] = &[
+    ("FENRIR_DEV_MODULE_PATH", ""),
+    ("FENRIR_IDENTITY_TOKEN", "identity-token-example"),
+    ("FENRIR_IDENTITY_TLS_CA", "config/certs/ca.pem"),
+    ("FENRIR_IDENTITY_TLS_CERT", "config/certs/client.crt"),
+    ("FENRIR_IDENTITY_TLS_KEY", "config/certs/client.key"),
+];
+
+fn with_mode<T>(mode: &str, extra: &[(&str, &str)], body: impl FnOnce() -> T) -> T {
+    env::set_var(ENV_ENV, mode);
+    let all: Vec<(&str, &str)> = PROD_ENV.iter().chain(extra).copied().collect();
+    let result = with_env(&all, body);
+    env::remove_var(ENV_ENV);
+    result
+}
+
+#[test]
+fn the_prod_profile_passes_the_production_check() {
+    let _lock = test_mutex().lock().unwrap();
+    for mode in ["prod", "production", "PROD"] {
+        let cfg = with_mode(mode, &[], load).unwrap_or_else(|err| panic!("{mode}: {err}"));
+        assert!(cfg.mode.is_production(), "{mode}");
+        assert!(super::production_violations(&cfg).is_empty(), "{mode}");
+        assert!(!cfg.modules.registry.tls.accept_invalid_certs, "{mode}");
+        // config/local.toml (relaxed passwords) is not merged in production.
+        assert_eq!(cfg.security.password_policy.min_length, 12, "{mode}");
+    }
+}
+
+#[test]
+fn production_refuses_dev_only_settings() {
+    let _lock = test_mutex().lock().unwrap();
+    let cases: &[(&str, &str, &str)] = &[
+        (
+            "FENRIR__MODULES__REGISTRY__TLS__ACCEPT_INVALID_CERTS",
+            "true",
+            "modules.registry.tls.accept_invalid_certs",
+        ),
+        (
+            "FENRIR__MODULES__RUNTIME__CLIENTS__TLS__ACCEPT_INVALID_CERTS",
+            "true",
+            "modules.runtime.clients.tls.accept_invalid_certs",
+        ),
+        (
+            "FENRIR__MODULES__DEV_SOURCES__BASE_PATH",
+            "/tmp/w9-host-dev-modules",
+            "modules.dev_sources.base_path",
+        ),
+        (
+            "FENRIR__SECURITY__PASSWORD_POLICY__MIN_LENGTH",
+            "4",
+            "security.password_policy.min_length",
+        ),
+        (
+            "FENRIR__SECURITY__IDENTITY__ENVIRONMENT",
+            "dev",
+            "security.identity.environment",
+        ),
+        (
+            "FENRIR__DB__RUNTIME__EMBEDDED__SECURITY__AUTH_METHOD",
+            "trust",
+            "auth_method",
+        ),
+        ("FENRIR__SERVER__HTTP__HOST", "0.0.0.0", "server.http"),
+    ];
+    for (key, value, expected) in cases {
+        let err =
+            with_mode("prod", &[(key, value)], load).expect_err("dev-only setting must be refused");
+        let text = err.to_string();
+        assert!(text.contains(expected), "{key}: {text}");
+        assert!(text.contains("FENRIR_ENV"), "{key}: {text}");
+    }
+}
+
+#[test]
+fn a_missing_or_unknown_mode_is_production() {
+    let _lock = test_mutex().lock().unwrap();
+    // Empty (set but blank) and unknown values: production, so the dev
+    // defaults of default.toml are refused instead of silently running.
+    for mode in ["", "staging"] {
+        let result = with_mode(mode, &[], || {
+            if mode.is_empty() {
+                load()
+            } else {
+                env::set_var(ENV_CONFIG_ENV, "prod");
+                let result = load();
+                env::remove_var(ENV_CONFIG_ENV);
+                result
+            }
+        });
+        match (mode, result) {
+            ("", Err(err)) => {
+                let text = err.to_string();
+                assert!(text.contains("modules.dev_sources.base_path"), "{text}");
+                assert!(text.contains("security.identity.environment"), "{text}");
+            }
+            ("staging", Ok(cfg)) => assert!(cfg.mode.is_production()),
+            (mode, other) => panic!("{mode}: unexpected {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn dev_mode_keeps_the_local_profile() {
+    let _lock = test_mutex().lock().unwrap();
+    let cfg = with_mode("dev", &[], load).expect("dev profile should load");
+    assert_eq!(cfg.mode, super::OperatingMode::Development);
+    // dev.toml + local.toml as before.
+    assert_eq!(cfg.security.password_policy.min_length, 4);
+    assert_eq!(cfg.security.identity.environment, "development");
+}
+
+#[test]
+fn production_refuses_inline_and_short_control_tokens() {
+    let _lock = test_mutex().lock().unwrap();
+    let mut cfg = with_mode("prod", &[], load).expect("prod profile should load");
+    cfg.security.http.control_tokens = vec!["admin:literal-secret".to_string()];
+    let found = super::production_violations(&cfg).join("; ");
+    assert!(found.contains("inline token"), "{found}");
+
+    env::set_var("FENRIR_W9_SHORT_TOKEN", "short");
+    env::set_var("FENRIR_W9_LONG_TOKEN", "x".repeat(48));
+    cfg.security.http.control_tokens = vec!["operator:env:FENRIR_W9_SHORT_TOKEN".to_string()];
+    let found = super::production_violations(&cfg).join("; ");
+    assert!(found.contains("shorter than 32"), "{found}");
+    cfg.security.http.control_tokens = vec!["operator:env:FENRIR_W9_LONG_TOKEN".to_string()];
+    assert!(super::production_violations(&cfg).is_empty());
+    env::remove_var("FENRIR_W9_SHORT_TOKEN");
+    env::remove_var("FENRIR_W9_LONG_TOKEN");
+}

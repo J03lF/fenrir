@@ -187,6 +187,7 @@ fn test_config() -> Arc<AppConfig> {
             service_profiles: HashMap::new(),
         },
         runtime: RuntimeSection::default(),
+        mode: Default::default(),
     })
 }
 

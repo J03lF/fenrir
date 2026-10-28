@@ -20,6 +20,10 @@ pub struct AppConfig {
     pub modules: ModulesSection,
     #[serde(default)]
     pub runtime: RuntimeSection,
+    /// From `FENRIR_ENV`, set by `config::load` (W9A-03); never read from
+    /// a file. Production unless `load` found an explicit dev value.
+    #[serde(skip)]
+    pub mode: super::mode::OperatingMode,
 }
 
 /// Runtime paths configuration

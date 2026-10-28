@@ -73,6 +73,14 @@ TLS Konfiguration
 export FENRIR_ENV=dev
 export FENRIR_ENV=prod
 
+Operating mode (`FENRIR_ENV`, W9A-03)
+- `prod` | `production` => production; `dev` | `development` | `local` | `test` => development. Missing, empty or unknown => production (fail-safe).
+- The value also picks the profile file: `prod`/`production` -> `config/prod.toml`, `dev`/`development` -> `config/dev.toml`, other names -> `config/<name>.toml` (must exist). `FENRIR_CONFIG_ENV` still overrides the file choice only.
+- Production ignores `config/local.toml`; server overrides go into `FENRIR_CONFIG_FILE` or `FENRIR__*` variables.
+- Production refuses to start (clear error naming every key) while any of these is active: `modules.registry.tls.accept_invalid_certs`, `modules.runtime.clients.tls.accept_invalid_certs`, `security.identity.external.tls.accept_invalid_certs`, a non-empty `modules.dev_sources.base_path` (also via `FENRIR_DEV_MODULE_PATH`), `security.identity.environment` other than prod, an external identity `base_url` without https, `security.password_policy.min_length` < 12 or `check_common_passwords = false`, an inline control token or one shorter than 32 characters, embedded DB with `auth_method = "trust"`, HTTP/gRPC without TLS on a non-loopback address, a plain `http://` registry URL to a remote host.
+- Every module process receives the normalised mode as `FENRIR_ENV=prod` or `FENRIR_ENV=dev` (reserved: a service env override cannot change it).
+- The tracked `bin/.fenrir-profile` is a dev profile (it sets `FENRIR_ENV=dev` and `FENRIR_DEV_MODULE_PATH` when they are unset). A server sets `FENRIR_ENV=prod` explicitly in its own environment.
+
 6) Module Runtime Ports
    - Configure `[modules.runtime.ports]` to control how Fenrir assigns module ports.
    - `strategy = "dynamic"` lets Fenrir pick a free port from `[modules.runtime.ports.range]` and persist it.

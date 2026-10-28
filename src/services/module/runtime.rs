@@ -1620,6 +1620,12 @@ impl ModuleService {
         let module_id_str = module_id.to_string();
         let service_id = Self::module_service_id(module_id);
 
+        // The host's operating mode, normalised (W9A-03): modules apply
+        // the same production rules as the host.
+        env.push((
+            "FENRIR_ENV".to_string(),
+            self.operating_mode.as_env_value().to_string(),
+        ));
         env.push(("FENRIR_MODULE_ID".to_string(), module_id_str));
         env.push(("FENRIR_SERVICE_ID".to_string(), service_id.clone()));
         env.push((

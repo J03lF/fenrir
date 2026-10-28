@@ -97,6 +97,9 @@ step_user() {
 		log "created system user $SERVICE_USER"
 	fi
 	usermod --shell /usr/sbin/nologin "$SERVICE_USER"
+	# The Postgres socket is 0770 postgres:postgres (postgres/athenos.conf);
+	# peer auth still decides which role the user may be.
+	usermod -aG postgres "$SERVICE_USER"
 	passwd --lock "$SERVICE_USER" >/dev/null
 }
 

@@ -606,6 +606,9 @@ impl BackupService {
 
             if result == 0 {
                 let stat = unsafe { stat.assume_init() };
+                // `f_bavail` is u32 on macOS and u64 on Linux, so the cast is
+                // needed on one platform and redundant on the other.
+                #[allow(clippy::unnecessary_cast)]
                 let available_bytes = stat.f_bavail as u64 * stat.f_frsize;
                 return Ok(available_bytes / (1024 * 1024));
             }

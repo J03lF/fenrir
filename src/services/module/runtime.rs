@@ -2327,7 +2327,13 @@ impl ModuleService {
         }
         match serde_json::to_vec_pretty(&snapshot) {
             Ok(data) => {
-                if let Err(err) = fs::write(path, data).await {
+                // Write a sibling file and rename it over the snapshot: modules
+                // booting in parallel read this file in their bootstrapper, and
+                // a plain write lets them see it truncated (seen on Linux).
+                let tmp = path.with_extension("json.tmp");
+                if let Err(err) = fs::write(&tmp, data).await {
+                    tracing::warn!(error = %err, "failed to persist service snapshot");
+                } else if let Err(err) = fs::rename(&tmp, path).await {
                     tracing::warn!(error = %err, "failed to persist service snapshot");
                 }
             }

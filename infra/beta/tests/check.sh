@@ -64,5 +64,11 @@ else
 	echo "caddy: skipped (not installed)"
 fi
 
+# The console path for the first admin, against a stand-in of the API.
+bash "$here/tests/bootstrap-admin-test.sh" >"${TMPDIR:-/tmp}/bootstrap-admin-test.$$.log" 2>&1 ||
+	err "bootstrap-admin: $(tail -n 5 "${TMPDIR:-/tmp}/bootstrap-admin-test.$$.log")"
+tail -n 1 "${TMPDIR:-/tmp}/bootstrap-admin-test.$$.log"
+rm -f "${TMPDIR:-/tmp}/bootstrap-admin-test.$$.log"
+
 [ "$fail" = 0 ] && echo "all checks passed"
 exit "$fail"

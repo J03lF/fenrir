@@ -263,19 +263,46 @@ Im Browser:
 
 ## 4. Erstes Admin-Konto
 
-Solange es **kein aktives Konto** gibt, schreibt der Core einen Einmal-Token. Er gilt 24 Stunden und wird mit der Bestätigung verbraucht.
+Das erste Admin-Konto legst du **nur auf der Konsole des Servers** an. Eine Web-Seite dafür gibt es nicht, und die Login-Seite verrät nicht, dass die Installation noch leer ist.
 
-1. Token anzeigen (nur auf dem Server, nirgends hinkopieren ausser ins Formular):
+Solange es **kein aktives Konto** gibt, schreibt der Core beim Start einen Einmal-Token nach `/var/lib/athenos/modules-runtime/secrets/athenos-setup-token` (0600, Dienstbenutzer `athenos`). Er gilt 24 Stunden und wird erst mit der PIN-Bestätigung verbraucht.
+
+1. Auf dem Server (per SSH, nicht über Cloudflare):
    ```bash
-   sudo cat /var/lib/athenos/modules-runtime/secrets/athenos-setup-token
+   sudo /usr/local/lib/athenos/bootstrap-admin.sh --email du@example.org --name "Dein Name"
    ```
-2. `https://app.athenos.dev/setup` öffnen. Token, Name, E-Mail und Passwort eingeben, der Zustimmung zustimmen. Dann den PIN aus der Mail eingeben. Du bist als Plattform-Admin angemeldet.
-3. **Notweg**, falls die Seite nicht geht:
-   ```bash
-   sudo /usr/local/lib/athenos/bootstrap-admin.sh du@example.org "Dein Name"
-   ```
-4. Ist der Token abgelaufen und noch kein Konto aktiv, startet `sudo systemctl restart athenos` einen neuen.
-5. Danach in **Admin → Einstellungen**:
+   Das Skript
+   - fragt zuerst `/public/site`, ob die Installation noch leer ist, und bricht sonst ab;
+   - liest den Token selbst aus der Datei. Du kopierst ihn nirgends hin, er erscheint nie auf dem Bildschirm, in `ps` oder in der History;
+   - zeigt die Version der Rechtstexte und fragt, ob du sie annimmst;
+   - fragt das Passwort zweimal ohne Anzeige (mindestens 12 Zeichen). Es geht über eine Pipe an `curl`, nie über Argumente;
+   - fragt den PIN aus der Mail. `r` schickt einen neuen Code, `q` bricht ab;
+   - prüft, dass das Konto Admin ist, und löscht die verbrauchte Token-Datei.
+
+   Statt `sudo` geht auch `sudo -u athenos /usr/local/lib/athenos/bootstrap-admin.sh …`. Root oder der Dienstbenutzer sind nötig, weil nur sie die Token-Datei lesen dürfen.
+2. Danach meldest du dich unter `https://app.athenos.dev/auth/login` an und bist Plattform-Admin.
+
+**Wenn etwas schiefgeht:**
+
+| Meldung | Was du tust |
+|---|---|
+| „Es gibt schon ein aktives Konto“ | Nichts. Der erste Admin existiert schon. Weitere Admins vergibst du in der App unter Admin → Benutzer. |
+| „Kein Setup-Token unter …“ | `sudo systemctl restart athenos`. Der Core schreibt einen neuen, solange niemand aktiv ist. Im Log steht `athenos.setup_token.minted`, `.outstanding` oder `.failed`: `sudo journalctl -u athenos \| grep athenos.setup_token`. |
+| „… nicht lesbar“ | Mit `sudo` starten. |
+| „… andere können ihn lesen“ | Die Datei als verbraucht behandeln: löschen, `sudo systemctl restart athenos`. |
+| „nimmt den Setup-Token nicht an“ | Der Token ist abgelaufen (24 h) oder schon verbraucht: `sudo systemctl restart athenos`, dann das Skript noch einmal starten. |
+| „Der Code stimmt nicht oder ist abgelaufen“ | Nochmal eingeben oder `r` für einen neuen Code. Nach fünf falschen Codes ist das Konto eine halbe Stunde gesperrt. Danach startest du das Skript neu. |
+| Kein Code in der Mail | Spam-Ordner, `NOTIFY_RECIPIENT_ALLOWLIST`, Mailgun-Log. Dann `r`. |
+| Abgebrochen, Konto hängt in „unbestätigt“ | Das Skript einfach noch einmal mit derselben Adresse starten. Die neue Registrierung ersetzt die offene. Der Token gilt weiter, bis eine Bestätigung klappt. |
+| „aktiv, aber kein Admin“ | Ein anderer Versuch hat den Token zuerst verbraucht. Im Log nach `athenos.setup_token.consumed`, `.already_used` oder `.promote_failed` suchen. |
+
+**Lokal auf dem Mac** (Fenrir im Dev-Modus, abends gestartet), im Fenrir-Checkout:
+```bash
+infra/beta/server/bootstrap-admin.sh --local --email du@example.org --name "Dein Name"
+```
+Der Token liegt dann unter `~/Documents/personal/modules/runtime/secrets/athenos-setup-token`. Ein anderer Ort geht mit `--token-file`. Den PIN findest du in der letzten Zeile des PIN-Sinks (`AUTH_DEV_PIN_SINK`).
+
+3. Danach in **Admin → Einstellungen**:
    - `legal_hoster` („Infomaniak Network SA, Genf, Schweiz“) und `legal_effective_date`;
    - Registrierungsmodus;
    - Beta-Banner an;
@@ -550,7 +577,7 @@ Neustart heisst immer `sudo systemctl restart athenos`. Nach einem Verdacht auf 
 - [ ] Die echte Besucher-IP erscheint im Log; Rate-Limits greifen pro Person (zwei Geräte testen)
 
 **Konto und Recht**
-- [ ] Erster Admin angelegt; der Setup-Token ist verbraucht (Datei weg)
+- [ ] Erster Admin über `bootstrap-admin.sh` angelegt; der Setup-Token ist verbraucht (Datei weg); `/setup` gibt es nicht
 - [ ] `legal_hoster` und `legal_effective_date` gesetzt; Impressum, Datenschutz und Nutzungsbedingungen erreichbar (DE/EN); Beta-Banner an
 - [ ] AVV/DPA mit Infomaniak, Cloudflare und Mailgun abgelegt; Cloudflare in der Datenschutzerklärung genannt; `privacy@athenos.dev` funktioniert
 - [ ] Datenschutz-Texte von einer Fachperson gegengelesen (RECHT_BETA.md)

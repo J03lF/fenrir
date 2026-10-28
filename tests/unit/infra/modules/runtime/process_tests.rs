@@ -166,6 +166,12 @@ fn assert_static_defaults(response: &Response, label: &str) {
         }
         assert_eq!(header_str(response, name), Some(*value), "{label}: {name}");
     }
+    // HSTS belongs to the TLS terminator (W9A-21).
+    assert_eq!(
+        header_str(response, "strict-transport-security"),
+        None,
+        "{label}"
+    );
 }
 
 fn assert_no_static_headers(response: &Response, label: &str) {
@@ -375,6 +381,7 @@ index_file = "index.html"
 "Content-Security-Policy-Report-Only" = "{TEST_CSP}"
 "Cache-Control" = "public, max-age=999"
 "Content-Type" = "text/plain"
+"Strict-Transport-Security" = "max-age=0"
 "bad header" = "x"
 "#
         ),

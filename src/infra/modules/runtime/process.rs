@@ -139,7 +139,11 @@ const STATIC_DEFAULT_HEADERS: &[(&str, &str)] = &[
 ];
 
 /// Headers that `response_headers` from a module manifest may not set,
-/// because the static handler derives them itself.
+/// because the static handler derives them itself, or because they belong
+/// to the TLS terminator in front of the host: the edge speaks plain HTTP
+/// on loopback, so `Strict-Transport-Security` is set once, by the proxy
+/// that terminates TLS (Caddy), and nothing here may contradict it
+/// (W9A-21).
 const STATIC_HOST_OWNED_HEADERS: &[&str] = &[
     "cache-control",
     "connection",
@@ -147,6 +151,7 @@ const STATIC_HOST_OWNED_HEADERS: &[&str] = &[
     "content-type",
     "etag",
     "last-modified",
+    "strict-transport-security",
     "transfer-encoding",
 ];
 

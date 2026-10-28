@@ -3,109 +3,171 @@
 Diese Anleitung führt dich vom gemieteten Server bis zur offenen Beta und durch den Betrieb danach. Alle Befehle mit `sudo` laufen auf dem Server, alle mit `infra/beta/…` auf deinem Mac im Fenrir-Checkout.
 
 Kurz zum Aufbau (Details in [README.md](README.md)):
-- **Caddy** nimmt HTTPS an und leitet nur an `127.0.0.1:41002` weiter (die Static-Edge des Hosts).
+- **Ein Server** bei Infomaniak (VPS Cloud, Schweiz) trägt alles: Host, Module, Web-App, PostgreSQL und Athenos AI.
+- **Cloudflare** steht als Proxy davor (orange Wolke). Es macht HTTPS für die Besucher, cacht die gehashten statischen Dateien und leitet alles andere an den Server weiter.
+- **Caddy** auf dem Server nimmt nur Verbindungen von Cloudflare an (Firewall: 443 nur aus den Cloudflare-Bereichen). Es leitet nur an `127.0.0.1:41002` weiter (die Static-Edge des Hosts) und gibt die echte Besucher-IP aus `CF-Connecting-IP` als `X-Real-IP` weiter.
 - **athenos.service** ist der Fenrir-Host. Er startet die Module als Kindprozesse.
 - **PostgreSQL 16** ist das Paket der Distribution. Es hört nur auf einem Unix-Socket; der Host meldet sich per *peer* als Systembenutzer `athenos` an. Es gibt kein Datenbank-Passwort.
 
 ---
 
-## 1. Server mieten
+## 1. Der Server: Infomaniak VPS Cloud
 
-### Grösse
+**Bestellt: VPS Cloud, Schweiz.**
+
+| Eigenschaft | Wert |
+|---|---|
+| CPU | 4 vCPU (x86_64) |
+| RAM | 8 GB |
+| Platte | 256 GB SSD |
+| System | Ubuntu 24.04 LTS |
+
+**Warum das reicht:**
 
 | Teil | RAM | Platte |
 |---|---|---|
-| Ubuntu 24.04 + Caddy | 0,5 GB | 5 GB |
+| Ubuntu + Caddy | 0,5 GB | 5 GB |
 | PostgreSQL 16 (`shared_buffers` 1 GB) | 1–1,5 GB | Beta: < 1 GB |
-| Host + 4 Module | 0,5–1 GB | 5 Releases × ca. 150 MB |
+| Host + 4 Module + Web-App | 0,5–1 GB | 5 Releases × ca. 150 MB |
 | Athenos AI (Modell 1,1 GB auf der Platte, im Speicher mehr) | 1,5–2,5 GB | 1,1 GB je Modellversion |
 | Backups (14 Tage + Dumps vor jedem Deploy) | – | ein paar GB |
 | Journal (max. 1 GB) | – | 1 GB |
 
-- **Empfehlung: 4 vCPU, 8 GB RAM, ≥ 80 GB SSD, x86_64.** 4 GB RAM reichen mit dem KI-Modell nicht sicher.
-- **Architektur x86_64 (Intel/AMD), nicht ARM:** Die CI baut `x86_64-unknown-linux-gnu`.
-- **Betriebssystem: Ubuntu 24.04 LTS.** Die Binaries sind auf `ubuntu-24.04` gebaut und brauchen glibc ≥ 2.39 und OpenSSL 3. Debian 12 ist zu alt.
+- **Ubuntu 24.04 ist Pflicht.** Die CI baut auf `ubuntu-24.04` für `x86_64-unknown-linux-gnu`. Die Binaries brauchen glibc ≥ 2.39 und OpenSSL 3. Ein älteres System oder ARM geht nicht.
+- **Für die Datenschutzerklärung** (Platzhalter `[HOSTER, LAND]`, später in Admin → Einstellungen → `legal_hoster`): **„Infomaniak Network SA, Genf, Schweiz“**.
+  - Cloudflare kommt als weiterer Auftragsverarbeiter dazu: Es sieht als Proxy jeden Aufruf.
+  - Steht die Off-site-Kopie woanders, nennst du sie mit.
 
-### Anbieter
+**Beim Bestellen bzw. jetzt in der Infomaniak-Verwaltung:**
+1. Image **Ubuntu 24.04**. IPv4 (und IPv6, falls angeboten) an.
+2. **SSH-Schlüssel** hinterlegen (dein `~/.ssh/id_ed25519.pub`). Der Login geht per Schlüssel, ohne Passwort.
+   - Infomaniak legt dafür den Benutzer `ubuntu` mit `sudo` an.
+3. **Firewall der VPS Cloud** (Sicherheitsgruppe) als zweite Schicht vor `ufw`. Eingehend nur:
+   - 22/tcp von überall (oder nur von deinen Adressen);
+   - 443/tcp aus den Cloudflare-Bereichen (`infra/beta/cloudflare/ips.txt`).
+4. Optional die Snapshots von Infomaniak. Sie ersetzen den eigenen Dump nicht und laufen ausserhalb der 14-Tage-Frist: Prüfe ihre Aufbewahrung, bevor du sie einschaltest.
+5. Den **Vertrag zur Auftragsverarbeitung (AVV/DPA)** mit Infomaniak abschliessen und ablegen.
 
-| | Hetzner Cloud (DE) | Infomaniak (CH) |
-|---|---|---|
-| Typ | z. B. CX33/CX32 (4 vCPU geteilt, 8 GB, 80 GB) oder CPX31 (4 vCPU AMD, 8 GB, 160 GB) | VPS Cloud / VPS Lite mit 4 vCPU, 8 GB |
-| Preis ca. | 7–17 € / Monat | 15–35 CHF / Monat |
-| Standort | Falkenstein oder Nürnberg (Deutschland) | Genf oder Winterthur (Schweiz) |
-| Off-site-Backup | Storage Box BX11 (1 TB, ca. 4 € / Monat), anderer Standort wählen | Swiss Backup (S3/rclone) |
-| Vertrag zur Auftragsverarbeitung (AVV/DPA) | in der Cloud Console abschliessen | in der Verwaltung abschliessen |
-
-Die Namen und Preise der Server ändern sich. **Prüfe sie beim Bestellen.**
-
-Für die Datenschutzerklärung (Platzhalter `[HOSTER, LAND]`, später in Admin → Einstellungen → `legal_hoster`) schreibst du zum Beispiel:
-- „Hetzner Online GmbH, Deutschland (Rechenzentrum Nürnberg)“ oder
-- „Infomaniak Network SA, Schweiz“.
-
-Wenn der Off-site-Speicher woanders steht, nennst du ihn mit. Der Website-Server und der Fenrir-Server stehen beim selben Hoster (so steht es im Entwurf der Datenschutzerklärung).
-
-### Beim Bestellen
-1. Image **Ubuntu 24.04**. IPv4 und IPv6 an.
-2. Deinen **SSH-Public-Key** hinterlegen. Kein Root-Passwort.
-3. **Cloud-Firewall des Anbieters** dazu (zweite Schicht vor `ufw`). Eingehend nur 22/tcp, 80/tcp, 443/tcp und 443/udp.
-4. Optional die Snapshots/Backups des Anbieters. Sie ersetzen den eigenen Dump nicht und laufen ausserhalb der 14-Tage-Frist: Prüfe deren Aufbewahrung, bevor du sie einschaltest.
-5. Den AVV/DPA mit dem Anbieter abschliessen und ablegen.
+> Fussnote: Andere Anbieter gehen genauso, wenn sie Ubuntu 24.04 auf x86_64 mit 8 GB RAM bieten (z. B. Hetzner Cloud in Deutschland). Dann ändern sich nur der Hoster-Text und die Cloud-Firewall.
 
 ---
 
-## 2. DNS in Cloudflare
+## 2. Cloudflare vor app.athenos.dev
 
+Cloudflare macht drei Dinge:
+- DNS;
+- HTTPS für die Besucher;
+- den Cache für die gehashten Dateien der Web-App (`chunk-*.js`, `styles-*.css`, Fonts).
+
+Alles andere geht an den Server weiter, verschlüsselt mit „Full (strict)“.
+
+### 2.1 DNS
 Zone `athenos.dev`:
 
-| Typ | Name | Inhalt | Proxy | TTL |
-|---|---|---|---|---|
-| A | `app` | IPv4 des Servers | **aus** (graue Wolke, „DNS only“) | 5 min |
-| AAAA | `app` | IPv6 des Servers | **aus** | 5 min |
-| CAA | `app` | `0 issue "letsencrypt.org"` | – | Auto |
-| CAA | `app` | `0 issue "sectigo.com"` (ZeroSSL, Caddys Ausweich-CA) | – | Auto |
-| CAA | `app` | `0 iodef "mailto:privacy@athenos.dev"` | – | Auto |
-
-**Warum der Proxy zuerst aus bleibt:**
-- Caddy holt das Zertifikat direkt bei Let's Encrypt (HTTP-01/TLS-ALPN). Mit Proxy müsste die Verschlüsselung zweimal stimmen („Full (strict)“).
-- Caddy sieht die echte Besucher-IP als TCP-Gegenstelle. Die Rate-Limits und die Login-Sperren hängen daran (SPEC §2). Mit Proxy käme jeder Besuch von einer Cloudflare-Adresse.
-- Mit Proxy entschlüsselt Cloudflare jeden Aufruf, auch Passwörter und Tickets. Cloudflare wäre dann ein weiterer Auftragsverarbeiter in der Datenschutzerklärung.
-- Event-Streams (Live-Tickets) laufen ohne Zwischenpuffer, und die Fehlersuche ist einfacher.
-
-**Später einschalten geht so:**
-1. Im Caddyfile unter `servers` die Cloudflare-Bereiche als `trusted_proxies static …` eintragen und `client_ip_headers CF-Connecting-IP` setzen.
-2. In Cloudflare SSL auf „Full (strict)“ stellen.
-3. Die Datenschutzerklärung ergänzen.
+| Typ | Name | Inhalt | Proxy |
+|---|---|---|---|
+| A | `app` | IPv4 des Servers | **an** (orange Wolke) |
+| AAAA | `app` | IPv6 des Servers (falls vorhanden) | **an** |
 
 **Nicht anfassen:**
-- die Einträge von Mailgun unter `mail.athenos.dev` (MX, SPF-TXT, DKIM, CNAME für Tracking);
+- die Einträge von Mailgun unter `mail.athenos.dev` (MX, SPF-TXT, DKIM, CNAME für Tracking; diese bleiben „DNS only“);
 - das Email Routing der Hauptdomain (`privacy@athenos.dev`);
 - den DMARC-Eintrag.
 
-Die CAA-Einträge liegen bewusst nur auf `app`, damit sie die Website unter `athenos.dev` nicht betreffen.
+**CAA:** Cloudflare stellt das Besucher-Zertifikat selbst aus (Universal SSL) und trägt die nötigen CAA-Werte selbst ein. Setz keine eigenen CAA-Einträge auf `app`, sonst kann die Erneuerung scheitern. Das Origin-Zertifikat (2.3) braucht kein CAA.
 
-**Prüfen:** `dig +short app.athenos.dev A`, `dig +short app.athenos.dev AAAA` und `dig app.athenos.dev CAA`.
+### 2.2 SSL/TLS-Einstellungen (Cloudflare → SSL/TLS)
+- **Verschlüsselungsmodus: Full (strict).** Cloudflare prüft das Zertifikat des Servers.
+- **Edge Certificates:**
+  - **Always Use HTTPS: an.** Port 80 ist am Server zu.
+  - **Minimum TLS Version: 1.2.**
+  - **TLS 1.3: an.**
+  - **HSTS: aus lassen.** Caddy setzt `Strict-Transport-Security: max-age=31536000; includeSubDomains`, und Cloudflare reicht den Header unverändert durch. Schaltest du HSTS auch in Cloudflare ein, kommt der Header doppelt und vielleicht mit verschiedenen Werten. Also nur an einer Stelle; hier bei Caddy, damit es mit der Konfiguration im Repo versioniert ist.
+- **Automatic HTTPS Rewrites:** egal (die App lädt nur eigene https-Ressourcen).
+
+### 2.3 Origin-Zertifikat für Caddy
+**Entscheid: Cloudflare Origin CA**, nicht ACME.
+- Ein Origin-CA-Zertifikat gilt bis 15 Jahre, Caddy braucht kein Plugin, und es kommt nichts über Port 80 herein.
+- ACME mit DNS-Challenge bräuchte einen eigenen Caddy-Build mit dem Cloudflare-DNS-Modul und einen API-Token auf dem Server.
+- Nachteil: Nur Cloudflare vertraut diesem Zertifikat. Wer den Proxy ausschaltet, muss auf ACME wechseln.
+
+**So gehst du vor:**
+1. Cloudflare → SSL/TLS → **Origin Server → Create Certificate**:
+   - Key type ECC;
+   - Hostname `app.athenos.dev`;
+   - Gültigkeit 15 Jahre.
+2. Auf dem Server:
+   ```bash
+   sudo install -d -m 0750 -o root -g caddy /etc/caddy/origin
+   sudo nano /etc/caddy/origin/app.athenos.dev.pem   # "Origin Certificate" einfügen
+   sudo nano /etc/caddy/origin/app.athenos.dev.key   # "Private Key" einfügen
+   sudo chown root:caddy /etc/caddy/origin/app.athenos.dev.*
+   sudo chmod 0644 /etc/caddy/origin/app.athenos.dev.pem
+   sudo chmod 0640 /etc/caddy/origin/app.athenos.dev.key
+   ```
+   Den privaten Schlüssel legst du zusätzlich in den Passwortmanager. Cloudflare zeigt ihn nur einmal.
+3. Danach `sudo ~/athenos-beta/server/install.sh caddy`. Der Healthcheck prüft das Ablaufdatum dieses Zertifikats auf `127.0.0.1:443`.
+
+**Optional, zusätzliche Härtung: Authenticated Origin Pulls.** Dann bekommt nur Cloudflare (mit seinem Client-Zertifikat) eine TLS-Verbindung, selbst wenn die Firewall einmal offen wäre.
+1. Das Cloudflare-Origin-Pull-CA-Zertifikat nach `/etc/caddy/origin/cloudflare-origin-pull-ca.pem` legen. Es steht in der Cloudflare-Doku „Authenticated Origin Pulls“ (zonenweit).
+2. In Cloudflare SSL/TLS → Origin Server → **Authenticated Origin Pulls** einschalten.
+3. Im Caddyfile den Block `client_auth` auskommentieren, dann `sudo systemctl reload caddy`.
+4. Prüfen: `curl -sS https://app.athenos.dev/healthz` geht weiter. Ein direkter Aufruf der Server-IP mit `curl -k --resolve app.athenos.dev:443:<IP> https://app.athenos.dev/` scheitert, und das soll er.
+
+### 2.4 Cache-Regeln (Cloudflare → Caching → Cache Rules)
+Die Edge des Hosts sendet `Cache-Control: public, max-age=31536000, immutable` nur für die gehashten Build-Dateien. Für alles andere (HTML, `index.html`, i18n-JSON, Icons) sendet sie `no-cache`. Cloudflare soll diesen Angaben folgen und nie etwas Persönliches cachen.
+
+Reihenfolge der Regeln:
+
+| # | Name | Wenn | Dann |
+|---|---|---|---|
+| 1 | API nie cachen | URI-Pfad beginnt mit `/gateway/` **oder** beginnt mit `/api/` | **Bypass cache** |
+| 2 | Angemeldete Anfragen | Header `Authorization` vorhanden **oder** Cookie enthält `athenos_` | **Bypass cache** |
+| 3 | HTML nie cachen | URI-Pfad ist `/` **oder** URI Path Extension ist `html` **oder** URI Path Extension ist leer (SPA-Routen wie `/app/…`) | **Bypass cache** |
+| 4 | Statische Dateien | URI Path Extension ist eine von `js`, `css`, `woff2`, `woff`, `png`, `svg`, `ico`, `webp` | **Eligible for cache**; Edge TTL: „Use cache-control header if present, bypass cache if not“; Browser TTL: „Respect origin“ |
+
+Regel 4 cacht nur, was die Edge als `immutable` markiert (die gehashten Dateien). Für Dateien mit `no-cache` (ungehashte Skripte, Icons) fragt Cloudflare jedes Mal beim Server nach. Die Regeln brauchen keine regulären Ausdrücke und gehen deshalb im Free-Plan.
+
+Danach:
+- Caching → Configuration → **Purge Everything** einmal nach jedem Deploy, der `index.html` ändert. Nötig ist es nicht, weil `index.html` nie gecacht wird; es schadet aber nicht.
+- Die Antwort-Header prüfen: `curl -sI https://app.athenos.dev/` muss `cf-cache-status: BYPASS` (oder `DYNAMIC`) zeigen. Ein Chunk aus `index.html` zeigt beim zweiten Aufruf `HIT`. `/gateway/...` zeigt nie `HIT`.
+
+Weitere Einstellungen:
+- **Rocket Loader, Auto Minify, Email Obfuscation: aus.** Sie verändern HTML und Skripte und verletzen damit die CSP.
+- **Speed → Optimization → Early Hints:** egal.
+- **Network → WebSockets:** an (schadet nicht).
+- **Network → HTTP/3:** an (zwischen Browser und Cloudflare).
+
+### 2.5 Echte Besucher-IP und die Cloudflare-Liste
+- **Caddy** glaubt `CF-Connecting-IP` nur, wenn die Verbindung aus einem Cloudflare-Bereich kommt (`trusted_proxies`). Es gibt die Adresse als `X-Real-IP` an den Host weiter. Der Host glaubt `X-Real-IP` nur von `127.0.0.1` (SPEC §2).
+- **Die Bereiche stehen in einer einzigen Liste:** `/etc/athenos/cloudflare-ips.txt`, aus https://www.cloudflare.com/ips-v4 und `ips-v6`.
+  - `/usr/local/lib/athenos/cloudflare-ips.sh update` holt sie, prüft sie und schreibt daraus `/etc/caddy/cloudflare-trusted-proxies.caddy` (Caddy lädt neu) und die ufw-Regeln „443/tcp von Cloudflare“. Dabei kommen neue Bereiche zuerst dazu, alte gehen danach.
+  - `athenos-cloudflare-ips.timer` macht das jeden Montag. Scheitert es, kommt eine Alarm-Mail, und die alte Liste bleibt.
+  - Eine Kopie zum Start ohne Netz liegt in `infra/beta/cloudflare/ips.txt` (`cloudflare-ips.sh update --offline`).
+  - Ändert Cloudflare die Bereiche, passt du auch die Firewall bei Infomaniak an (`cloudflare-ips.sh show`).
 
 ---
 
 ## 3. Erstinstallation
 
 ### 3.1 Admin-Konto auf dem Server
-Als `root` per Schlüssel einloggen (nur dieses eine Mal):
+Infomaniak gibt dir den Benutzer `ubuntu` mit deinem Schlüssel. Lege dein eigenes Konto an (oder bleib bei `ubuntu` und setze unten `--admin-user ubuntu`):
 
 ```bash
-adduser joel                      # Passwort für sudo setzen (Passwortmanager)
-usermod -aG sudo joel
-install -d -m 700 -o joel -g joel /home/joel/.ssh
-cp /root/.ssh/authorized_keys /home/joel/.ssh/ && chown joel:joel /home/joel/.ssh/authorized_keys
-hostnamectl set-hostname athenos-beta
+ssh ubuntu@<server-ip>
+sudo adduser joel                      # Passwort für sudo setzen (Passwortmanager)
+sudo usermod -aG sudo joel
+sudo install -d -m 700 -o joel -g joel /home/joel/.ssh
+sudo cp ~/.ssh/authorized_keys /home/joel/.ssh/ && sudo chown joel:joel /home/joel/.ssh/authorized_keys
+sudo hostnamectl set-hostname athenos-beta
 ```
 
-Dann **in einem zweiten Terminal** `ssh joel@<server>` testen. Erst danach `root` verlassen.
+Dann **in einem zweiten Terminal** `ssh joel@<server-ip>` testen.
 
-Auf dem Mac in `~/.ssh/config`:
+Auf dem Mac in `~/.ssh/config`. Nimm die IP, nicht `app.athenos.dev`: Der Name zeigt auf Cloudflare, und Cloudflare leitet kein SSH weiter.
 ```
 Host athenos-beta
-  HostName app.athenos.dev
+  HostName <server-ip>
   User joel
   IdentityFile ~/.ssh/id_ed25519
 ```
@@ -131,9 +193,10 @@ Das Skript arbeitet diese Schritte ab. Jeder einzelne lässt sich mit `install.s
 | `postgres` | nur Socket, nur peer; Rolle und DB `athenos` (Besitzer, kein Superuser, Sortierung `C`) |
 | `config` | `/etc/athenos/{fenrir,backup,monitor}.env` aus den Vorlagen; Tokens erzeugen; `ports.json` vorbelegen (die Edge muss 41002 sein) |
 | `units` | Skripte nach `/usr/local/lib/athenos`, systemd-Units, Journal und logrotate auf 7 Tage, Timer an |
-| `caddy` | Caddyfile, `caddy validate`, neu laden. Das Zertifikat kommt, sobald das DNS zeigt |
+| `cloudflare` | Cloudflare-Bereiche holen (für Caddy und die Firewall, siehe 2.5) |
+| `caddy` | Caddyfile, `caddy validate`, neu laden. Fehlt das Origin-Zertifikat (2.3), überspringt der Schritt das Caddyfile und sagt, was zu tun ist |
 | `updates` | nächtliche Sicherheitsupdates, Neustart bei Bedarf um 03:30 UTC |
-| `firewall` | ufw: 22 begrenzt, 80, 443 tcp+udp; alles andere zu |
+| `firewall` | ufw: 22 begrenzt (nur Schlüssel), 443/tcp nur aus den Cloudflare-Bereichen; alles andere zu, auch 80. Mit `SSH_SOURCES="<cidr> …"` nur von deinen Adressen |
 | `ssh` | nur Schlüssel, kein root, `AllowUsers joel`. **Die offene Sitzung erst schliessen, wenn ein neuer Login klappt** |
 
 Bestehende Dateien in `/etc/athenos` überschreibt das Skript nicht.
@@ -181,7 +244,7 @@ infra/beta/model-upload.sh ~/Documents/personal/modules/models/athenos-quality/0
 Das Skript prüft die `SHA256SUMS` des Pakets vor und nach dem Hochladen und legt es schreibgeschützt nach `/opt/athenos/shared/models/athenos-quality/0.5.0-beta4`.
 
 ### 3.5 Erster Deploy
-DNS zeigt auf den Server (siehe 2). Dann wie in 5.1 einen Release ausrollen:
+Cloudflare ist eingerichtet (2.1 bis 2.4), das Origin-Zertifikat liegt bei Caddy (`install.sh caddy` lief ohne Warnung). Dann wie in 5.1 einen Release ausrollen:
 ```bash
 infra/beta/deploy.sh v0.11.0
 ```
@@ -192,8 +255,9 @@ curl -sS https://app.athenos.dev/healthz
 ```
 Im Browser:
 - `https://app.athenos.dev` lädt ohne Konsolenfehler.
-- Das Schloss zeigt ein gültiges Zertifikat.
-- `curl -sI https://app.athenos.dev` zeigt `strict-transport-security`.
+- Das Schloss zeigt ein gültiges Zertifikat (von Cloudflare).
+- `curl -sI https://app.athenos.dev` zeigt `strict-transport-security` **genau einmal**, `server: cloudflare` und `cf-cache-status`.
+- Im Caddy-Access-Log (`sudo tail -n 3 /var/log/caddy/app.athenos.dev.access.log`) steht bei `client_ip` deine eigene IP, bei `remote_ip` eine Cloudflare-Adresse.
 
 ---
 
@@ -212,7 +276,7 @@ Solange es **kein aktives Konto** gibt, schreibt der Core einen Einmal-Token. Er
    ```
 4. Ist der Token abgelaufen und noch kein Konto aktiv, startet `sudo systemctl restart athenos` einen neuen.
 5. Danach in **Admin → Einstellungen**:
-   - `legal_hoster` (zum Beispiel „Hetzner Online GmbH, Deutschland“) und `legal_effective_date`;
+   - `legal_hoster` („Infomaniak Network SA, Genf, Schweiz“) und `legal_effective_date`;
    - Registrierungsmodus;
    - Beta-Banner an;
    - Sitzungsdauer.
@@ -249,7 +313,7 @@ Bleibt die neue Version krank, schaltet das Skript **automatisch auf das vorige 
 
 Mit `--restore-db-on-failure` spielt es zusätzlich den Dump von vor dem Deploy zurück. Was nach dem Dump geschrieben wurde, ist dann nicht mehr live; `restore.sh` behält die alte DB unter neuem Namen.
 
-Es bleiben 5 Releases liegen, nie das aktuelle und das vorige. Das Log liegt in `/var/log/athenos/deploy.log`.
+Es bleiben 5 Releases liegen, nie das aktuelle und das vorige. Das Log liegt in `/var/log/athenos-deploy.log`.
 
 **Units geändert?** Meldet der Deploy „systemd units differ“:
 ```bash
@@ -284,21 +348,37 @@ infra/beta/rollback.sh <id> --with-db /var/backups/athenos/athenos-<zeit>-predep
 - **Von Hand:** `sudo systemctl start athenos-backup.service`, dann `journalctl -u athenos-backup -n 20`.
 - **Scheitert ein Backup**, kommt eine Alarm-Mail (OnFailure), und der Healthcheck meldet ein Backup, das älter als 26 h ist.
 
-### 6.3 Off-site-Kopie einrichten (Beispiel Hetzner Storage Box)
-1. Storage Box bestellen, an einem anderen Standort als der Server. SSH-Zugang aktivieren.
-2. Schlüssel nur für Backups anlegen:
+### 6.3 Off-site-Kopie einrichten
+Die Kopie gehört an einen anderen Ort als der Server. Zwei Wege:
+
+**A) Infomaniak Swiss Backup (S3, rclone)**: bleibt in der Schweiz beim selben Auftragsverarbeiter, aber in einem anderen Rechenzentrum.
+1. In der Infomaniak-Verwaltung Swiss Backup → ein Gerät vom Typ „Cloud-Speicher (S3)“ anlegen; die Zugangsdaten notieren.
+2. `sudo apt install rclone`. Dann die rclone-Konfiguration nur für den Dienst anlegen:
+   ```bash
+   sudo -u athenos rclone config --config /etc/athenos/secrets/rclone.conf
+   ```
+   Typ `s3`, Provider „Other“, Endpoint und Schlüssel von Swiss Backup, Remote-Name `swissbackup`.
+3. In `/etc/athenos/backup.env`:
+   - `OFFSITE_MODE=rclone`;
+   - `OFFSITE_RCLONE_REMOTE=swissbackup:athenos-db`;
+   - `RCLONE_CONFIG=/etc/athenos/secrets/rclone.conf`.
+
+**B) rsync über SSH** (z. B. eine Storage Box bei einem anderen Anbieter):
+1. Schlüssel nur für Backups anlegen:
    ```bash
    sudo -u athenos ssh-keygen -t ed25519 -N '' -f /etc/athenos/secrets/offsite_ed25519
    ```
-   Den Public Key in der Storage Box hinterlegen.
-3. Host-Key festhalten:
+   Den Public Key beim Ziel hinterlegen.
+2. Host-Key festhalten:
    ```bash
-   ssh-keyscan -p 23 u123456.your-storagebox.de | sudo tee /etc/athenos/offsite_known_hosts
+   ssh-keyscan -p 23 <ziel-host> | sudo tee /etc/athenos/offsite_known_hosts
    ```
-   Den Fingerprint vergleichst du mit der Hetzner-Konsole.
-4. In `/etc/athenos/backup.env` `OFFSITE_MODE=rsync` und die `OFFSITE_RSYNC_*`-Zeilen setzen.
-5. Verschlüsseln (empfohlen): `age-keygen -o athenos-backup.key` **auf dem Mac**. Den privaten Schlüssel legst du in den Passwortmanager. Nur den Public Key (`age1…`) schreibst du nach `/etc/athenos/offsite-age-recipients.txt` und setzt `OFFSITE_AGE_RECIPIENTS_FILE`.
-6. `sudo systemctl start athenos-backup.service` und prüfen, ob die Dateien drüben liegen.
+   Den Fingerprint vergleichst du mit der Anzeige des Anbieters.
+3. In `/etc/athenos/backup.env` `OFFSITE_MODE=rsync` und die `OFFSITE_RSYNC_*`-Zeilen setzen. Den Anbieter nennst du in der Datenschutzerklärung.
+
+**Für beide:**
+- Verschlüsseln (empfohlen): `age-keygen -o athenos-backup.key` **auf dem Mac**. Den privaten Schlüssel legst du in den Passwortmanager. Nur den Public Key (`age1…`) schreibst du nach `/etc/athenos/offsite-age-recipients.txt` und setzt `OFFSITE_AGE_RECIPIENTS_FILE`.
+- `sudo systemctl start athenos-backup.service` und prüfen, ob die Dateien drüben liegen.
 
 Die Off-site-Kopie spiegelt den lokalen Bestand. Sie läuft also auch nach 14 Tagen ab, wie es die Datenschutzerklärung verspricht. Ein leerer lokaler Ordner wird nie gespiegelt.
 
@@ -372,6 +452,7 @@ Neustart heisst immer `sudo systemctl restart athenos`. Nach einem Verdacht auf 
 
 ## 8. Updates
 
+- **Cloudflare-Bereiche:** jeden Montag automatisch (2.5).
 - **Betriebssystem:** `unattended-upgrades` spielt die Sicherheitsupdates jede Nacht ein und startet bei Bedarf um 03:30 UTC neu. Alle Dienste kommen von selbst wieder.
 - **Einmal im Monat** von Hand:
   ```bash
@@ -392,15 +473,16 @@ Neustart heisst immer `sudo systemctl restart athenos`. Nach einem Verdacht auf 
   - von aussen `https://app.athenos.dev/healthz` und die API-Gesundheit über das Gateway;
   - die Platte (< 85 %);
   - das Alter des letzten Backups (< 26 h);
-  - das Zertifikat (> 14 Tage).
+  - die Zertifikate (> 14 Tage): das von Cloudflare für die Besucher und das Origin-Zertifikat von Caddy (`127.0.0.1:443`).
 - **Alarm-Mails:** bei einem neuen Problem, alle 6 h, solange es andauert, und einmal, wenn alles wieder grün ist.
   - Zuerst geht die Mail über den eigenen notification-service, sonst über `sendmail`/msmtp (3.3).
-  - Fällt `athenos`, das Backup, Postgres oder Caddy aus, schickt `athenos-alert@` den Status und die letzten Logzeilen.
+  - Fällt `athenos`, das Backup, Postgres, Caddy oder die wöchentliche Aktualisierung der Cloudflare-Liste aus, schickt `athenos-alert@` den Status und die letzten Logzeilen.
 - **Von Hand:** `sudo /usr/local/lib/athenos/healthcheck.sh` und `journalctl -u athenos -f`.
 - **Von aussen (empfohlen, gratis):** Fällt der ganze Server aus, kann er selbst nicht mehr warnen.
   - **Better Stack Uptime** (Free) oder **UptimeRobot** (Free, 5-Minuten-Intervall): ein HTTPS-Monitor auf `https://app.athenos.dev/gateway/services/module%3Aathenos-api%3A%3Aapi-gateway/health` mit dem Stichwort `healthy`, dazu einer auf `https://app.athenos.dev/healthz`.
   - **Heartbeats** (healthchecks.io oder Better Stack): `BACKUP_HEARTBEAT_URL` in `backup.env` (Erwartung: einmal täglich) und `HEALTHCHECK_HEARTBEAT_URL` in `monitor.env` (Erwartung: alle 5 Minuten). Bleibt der Ping aus, warnt dich der Dienst.
   - Die Dienste sehen nur die öffentlichen Health-Adressen, keine Personendaten.
+  - Die externen Monitore laufen über Cloudflare. Sie erkennen also auch einen Ausfall zwischen Cloudflare und dem Server (z. B. eine veraltete Cloudflare-Liste in der Firewall).
 
 ---
 
@@ -409,12 +491,13 @@ Neustart heisst immer `sudo systemctl restart athenos`. Nach einem Verdacht auf 
 ### Sofort
 1. **Eindämmen:**
    - `sudo systemctl stop athenos` (oder nur `caddy`, wenn du intern weiter prüfen willst);
-   - bei laufendem Angriff zusätzlich in der Cloud-Firewall alles ausser deiner IP sperren.
+   - bei laufendem Angriff zusätzlich in Cloudflare Security → **„Under Attack“-Modus** einschalten oder eine WAF-Regel „Block“ setzen;
+   - im Notfall in der Infomaniak-Firewall 443 schliessen (die Seite ist dann aus).
 2. **Spuren sichern, nichts löschen:**
    ```bash
    sudo journalctl --since "-3 days" > ~/incident-journal.txt
    ```
-   Dazu das Caddy-Access-Log (`/var/log/caddy/`), `/var/log/athenos/` und einen frischen DB-Dump. Die Logs laufen nach 7 Tagen ab: Kopiere sie zuerst.
+   Dazu das Caddy-Access-Log (`/var/log/caddy/`), `/var/log/athenos/` und einen frischen DB-Dump. Die Logs laufen nach 7 Tagen ab: Kopiere sie zuerst. Die Cloudflare-Ereignisse (Security → Events) zeigen blockierte und auffällige Anfragen.
 3. **Einordnen:**
    - Welche Daten (Konten, E-Mail-Adressen, Tickets, Anhänge)?
    - Wie viele Personen?
@@ -444,7 +527,7 @@ Neustart heisst immer `sudo systemctl restart athenos`. Nach einem Verdacht auf 
   - Kontakt `privacy@athenos.dev`.
 
   Versand über **Admin → Ankündigung per Mail** (geht an alle aktiven Konten).
-- **Auftragsverarbeiter informieren**, wenn sie betroffen sind oder helfen müssen: Hoster, Mailgun, gegebenenfalls Cloudflare.
+- **Auftragsverarbeiter informieren**, wenn sie betroffen sind oder helfen müssen: Infomaniak, Cloudflare, Mailgun.
 
 ---
 
@@ -452,12 +535,15 @@ Neustart heisst immer `sudo systemctl restart athenos`. Nach einem Verdacht auf 
 
 **Server und Netz**
 - [ ] Ubuntu 24.04, `install.sh all` ohne Fehler, Login nur per Schlüssel, root gesperrt
-- [ ] `sudo ufw status`: nur 22 (LIMIT), 80, 443/tcp, 443/udp; die Cloud-Firewall gleich
-- [ ] von aussen `nmap -Pn -p 1-65535 app.athenos.dev`: nur 22, 80, 443 offen
-- [ ] DNS A/AAAA/CAA gesetzt, Proxy aus; die Mailgun-Einträge unverändert
+- [ ] `sudo ufw status`: 22 (LIMIT) und 443/tcp nur aus den Cloudflare-Bereichen; die Infomaniak-Firewall gleich
+- [ ] von aussen `nmap -Pn -p 1-65535 <server-ip>`: nur 22 offen (443 nur für Cloudflare)
+- [ ] `curl -sk --resolve app.athenos.dev:443:<server-ip> https://app.athenos.dev/healthz` von zu Hause: keine Antwort (Firewall)
+- [ ] DNS A/AAAA mit Proxy an; SSL „Full (strict)“, Always Use HTTPS, HSTS in Cloudflare aus; die Cache-Regeln 2.4 stehen; die Mailgun-Einträge unverändert
+- [ ] `athenos-cloudflare-ips.timer` aktiv, `/etc/athenos/cloudflare-ips.txt` aktuell
 
 **Dienst**
-- [ ] `https://app.athenos.dev` mit gültigem Zertifikat, HSTS-Header, HTTP leitet auf HTTPS um
+- [ ] `https://app.athenos.dev` mit gültigem Zertifikat, HSTS-Header genau einmal, HTTP leitet auf HTTPS um (Cloudflare)
+- [ ] `/gateway/...` zeigt nie `cf-cache-status: HIT`; ein Chunk zeigt beim zweiten Abruf `HIT`
 - [ ] `/gateway/services/module%3Aathenos%3A%3Acore/...` gibt 404 (nur das API-Gateway ist offen)
 - [ ] `FENRIR_ENV=prod`; keine Dev-Variablen in `/etc/athenos/fenrir.env`; Swagger `/api/docs` nicht erreichbar
 - [ ] Mails kommen an (Registrierung, Reset); Allowlist entfernt, wenn es offen sein soll
@@ -466,7 +552,7 @@ Neustart heisst immer `sudo systemctl restart athenos`. Nach einem Verdacht auf 
 **Konto und Recht**
 - [ ] Erster Admin angelegt; der Setup-Token ist verbraucht (Datei weg)
 - [ ] `legal_hoster` und `legal_effective_date` gesetzt; Impressum, Datenschutz und Nutzungsbedingungen erreichbar (DE/EN); Beta-Banner an
-- [ ] AVV/DPA mit Hoster und Mailgun (und Cloudflare) abgelegt; `privacy@athenos.dev` funktioniert
+- [ ] AVV/DPA mit Infomaniak, Cloudflare und Mailgun abgelegt; Cloudflare in der Datenschutzerklärung genannt; `privacy@athenos.dev` funktioniert
 - [ ] Datenschutz-Texte von einer Fachperson gegengelesen (RECHT_BETA.md)
 
 **Backup und Betrieb**

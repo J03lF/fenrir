@@ -28,6 +28,14 @@ else
 	echo "toml: skipped (python3 without tomllib/tomli)"
 fi
 
+# The keyring the host bundle ships (config/modules/keyring.json): valid,
+# version 1, no keys (signatures are off on the beta server).
+python3 -c 'import json, sys; k = json.load(open(sys.argv[1])); sys.exit(0 if k.get("version") == 1 and k.get("keys") == [] else 1)' \
+	"$here/config/keyring.json" || err "config/keyring.json is not an empty version-1 keyring"
+grep -q 'infra/beta/config/keyring.json "$pkg/config/modules/keyring.json"' "$here/ci/package-host.sh" ||
+	err "ci/package-host.sh does not package config/modules/keyring.json"
+echo "keyring: config/keyring.json is empty and packaged"
+
 # Templates: every secret must be a *_FILE path, never a value.
 if grep -nE '^[A-Z_]*(TOKEN|PASSWORD|SECRET|PEPPER|KEY)=' "$here"/env/*.example | grep -v '_FILE='; then
 	err "a template sets a secret value directly"

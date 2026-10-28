@@ -137,5 +137,8 @@ base_path = ""
 [modules.runtime]
 env_passthrough_prefixes = ["NOTIFY_", "SMTP_"]
 
+# keyring_path stays default.toml's config/modules/keyring.json (relative to
+# the release): ci/package-host.sh ships infra/beta/config/keyring.json there,
+# an empty keyring. The verifier reads it even without signatures.
 [modules.trust]
 require_signature = false

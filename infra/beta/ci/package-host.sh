@@ -9,6 +9,7 @@
 #   SHA256SUMS                                          of the tarball
 # The tarball holds the three binaries (fenrir, fenrir-module-kit,
 # fenrirctl), config/default.toml + prod.toml + beta.toml (from
+# infra/beta/config), config/modules/keyring.json (the empty keyring of
 # infra/beta/config), infra/db/migrations, infra/beta (server scripts,
 # units, configs), static/, BUILDINFO.json and FILES.SHA256SUMS.
 # Never: bin/.fenrir-profile, config/local.toml, config/dev.toml, secrets/.
@@ -40,6 +41,10 @@ for b in fenrir fenrir-module-kit fenrirctl; do
 done
 install -m 0644 -- config/default.toml config/prod.toml "$pkg/config/"
 install -m 0644 -- infra/beta/config/beta.toml "$pkg/config/beta.toml"
+# The module verifier reads modules.trust.keyring_path
+# (config/modules/keyring.json, relative to the release) even with
+# require_signature = false: an empty keyring, no trusted signer.
+install -D -m 0644 -- infra/beta/config/keyring.json "$pkg/config/modules/keyring.json"
 
 # Tracked files only (nothing local or secret can slip in).
 copy_tracked() { # path...

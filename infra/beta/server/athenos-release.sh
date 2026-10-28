@@ -96,6 +96,9 @@ verify_layout() {
 	local r=$1 m
 	[ -x "$r/fenrir" ] && [ -x "$r/fenrir-module-kit" ] || die "fenrir or fenrir-module-kit missing in $r"
 	[ -f "$r/config/default.toml" ] && [ -f "$r/config/beta.toml" ] || die "config/default.toml or config/beta.toml missing"
+	# The module verifier needs a keyring even without signatures (an older
+	# host bundle lacked it and the host refused to start).
+	[ -f "$r/config/modules/keyring.json" ] || die "config/modules/keyring.json missing (host bundle too old: package it with ci/package-host.sh of this revision)"
 	[ -d "$r/infra/db/migrations/postgres" ] || die "host migrations missing"
 	for f in bin/.fenrir-profile config/local.toml config/dev.toml secrets/.env; do
 		[ ! -e "$r/$f" ] || die "release contains $f (developer settings must not ship)"

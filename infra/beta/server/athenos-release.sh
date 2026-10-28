@@ -230,7 +230,9 @@ wait_healthy() {
 		systemctl is-active --quiet -- "$ATHENOS_UNIT" || continue
 		curl -fsS -m 5 -o /dev/null -- "$HOST_URL/health/ready" || continue
 		curl -fsS -m 5 -o /dev/null -- "$EDGE_URL/healthz" || continue
-		curl -fsS -m 5 -- "$EDGE_URL$API_SERVICE_PATH/health" 2>/dev/null | grep -q '"status":"healthy"' || continue
+		# The gateway's /health is not on its route allowlist behind the edge;
+		# a public read proves edge -> gateway -> core -> auth end to end.
+		curl -fsS -m 5 -o /dev/null -- "$EDGE_URL$API_SERVICE_PATH/api/v1/auth/features" || continue
 		overall=$(curl -fsS -m 5 -- "$HOST_URL/public/status" 2>/dev/null | jq -r '.overall // empty' 2>/dev/null || true)
 		[ "$overall" = operational ] || [ "$overall" = degraded ] || continue
 		log "healthy (host ready, edge, API, status $overall)"

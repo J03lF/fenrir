@@ -99,11 +99,8 @@ if [ -r "$MAINTENANCE_STATUS" ]; then
 	if [ "$marker" = planned ]; then pass "public $PUBLIC_URL/ shows the maintenance page"; else problem "maintenance is on but $PUBLIC_URL/ does not show the page (Caddyfile installed?)"; fi
 else
 	if http_ok "$PUBLIC_URL/healthz"; then pass "public $PUBLIC_URL/healthz"; else problem "public $PUBLIC_URL/healthz fails"; fi
-	api=$(curl -fsS -m 10 -- "$PUBLIC_URL$API_SERVICE_PATH/health" 2>/dev/null || true)
-	case $api in
-	*'"status":"healthy"'*) pass "public API health" ;;
-	*) problem "public API $PUBLIC_URL$API_SERVICE_PATH/health not healthy" ;;
-	esac
+	# The gateway's /health is not routed behind the edge; a public read is.
+	if http_ok "$PUBLIC_URL$API_SERVICE_PATH/api/v1/auth/features"; then pass "public API answers"; else problem "public API $PUBLIC_URL$API_SERVICE_PATH/api/v1/auth/features fails"; fi
 fi
 
 # disk

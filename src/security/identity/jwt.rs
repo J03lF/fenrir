@@ -67,7 +67,7 @@ pub(super) fn parse_jwt(
     let signature_bytes = URL_SAFE_NO_PAD.decode(signature).map_err(|_| {
         IdentityError::Unauthorized(identity_messages::invalid_signature_encoding().into())
     })?;
-    let signature = Signature::from_bytes(&signature_bytes).map_err(|_| {
+    let signature = Signature::from_slice(&signature_bytes).map_err(|_| {
         IdentityError::Unauthorized(identity_messages::invalid_signature_length().into())
     })?;
 

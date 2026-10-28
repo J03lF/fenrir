@@ -168,6 +168,12 @@ pub fn production_violations(cfg: &AppConfig) -> Vec<String> {
                 .is_some_and(|grpc| !grpc.tls.enabled && !is_loopback_host(&grpc.host)),
         "server.grpc listens beyond loopback without TLS",
     );
+    // The SSH admin shell runs on russh 0.44 (known pre-auth DoS, see
+    // deny.toml) until the upgrade: loopback only.
+    flag(
+        !is_loopback_host(&cfg.server.ssh.host),
+        "server.ssh listens beyond loopback",
+    );
     flag(
         is_plain_remote_url(&cfg.modules.registry.url),
         "modules.registry.url is plain http:// to a remote host",

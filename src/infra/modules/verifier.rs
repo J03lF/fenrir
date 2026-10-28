@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use ed25519_dalek::{PublicKey, Signature, Verifier};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tracing::warn;
@@ -19,7 +19,7 @@ use crate::utils::messages;
 pub struct Ed25519ModuleVerifier {
     require_signature: bool,
     allowed_signers: Option<HashSet<String>>,
-    keys: HashMap<String, PublicKey>,
+    keys: HashMap<String, VerifyingKey>,
 }
 
 impl Ed25519ModuleVerifier {
@@ -55,7 +55,7 @@ impl Ed25519ModuleVerifier {
                 }
                 let mut key_bytes = [0u8; ed25519_dalek::PUBLIC_KEY_LENGTH];
                 key_bytes.copy_from_slice(&decoded);
-                let verifying = PublicKey::from_bytes(&key_bytes).map_err(|err| {
+                let verifying = VerifyingKey::from_bytes(&key_bytes).map_err(|err| {
                     ModuleVerifierInitError::InvalidKeyring(
                         messages::infra::modules::verifier::public_key_invalid(&entry.id, err),
                     )
@@ -220,4 +220,94 @@ struct KeyringEntry {
     id: String,
     algorithm: String,
     public_key: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::module::{
+        ChecksumAlgorithm, ModuleArtifactDescriptor, ModuleChecksum, ModuleManifest,
+        ModuleSignatureDescriptor,
+    };
+    use ed25519_dalek::{Signer, SigningKey};
+
+    fn manifest(key_id: &str) -> ModuleManifest {
+        ModuleManifest {
+            id: "athenos".to_string(),
+            version: semver::Version::new(1, 0, 0),
+            title: None,
+            description: None,
+            fenrir_version: None,
+            authors: vec![],
+            license: None,
+            artifact: ModuleArtifactDescriptor {
+                download_url: String::new(),
+                checksum: ModuleChecksum {
+                    algorithm: ChecksumAlgorithm::Sha256,
+                    hash: String::new(),
+                },
+                content_type: None,
+                size_bytes: None,
+            },
+            signature: ModuleSignatureDescriptor {
+                algorithm: SignatureAlgorithm::Ed25519,
+                key_id: key_id.to_string(),
+                signature: String::new(),
+            },
+            dependencies: vec![],
+            tags: vec![],
+            published_at: None,
+        }
+    }
+
+    /// A registry key signs the archive digest; the verifier accepts exactly
+    /// that signature (ed25519-dalek 2, W9A-09).
+    #[tokio::test]
+    async fn registry_signatures_verify_and_tampering_fails() {
+        let signing = SigningKey::from_bytes(&[7u8; 32]);
+        let dir = std::env::temp_dir().join(format!("w9-host-keyring-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let keyring = dir.join("keyring.json");
+        std::fs::write(
+            &keyring,
+            serde_json::json!({
+                "version": 1,
+                "keys": [{
+                    "id": "module-registry",
+                    "algorithm": "ed25519",
+                    "public_key": BASE64.encode(signing.verifying_key().as_bytes()),
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let verifier = Ed25519ModuleVerifier::from_config(&ModuleTrustSection {
+            require_signature: true,
+            allowed_signers: vec!["module-registry".to_string()],
+            keyring_path: Some(keyring.display().to_string()),
+        })
+        .unwrap();
+
+        let archive = b"module archive bytes".to_vec();
+        let digest = Sha256::digest(&archive).to_vec();
+        let signature = signing.sign(&digest).to_bytes().to_vec();
+        let bundle = ModuleBundle {
+            manifest: manifest("module-registry"),
+            archive: archive.clone(),
+            signature: signature.clone(),
+            checksum: digest.clone(),
+        };
+        verifier.verify(&bundle).await.unwrap();
+
+        let mut forged = signature;
+        forged[10] ^= 1;
+        let tampered = ModuleBundle {
+            manifest: manifest("module-registry"),
+            archive,
+            signature: forged,
+            checksum: digest,
+        };
+        assert!(verifier.verify(&tampered).await.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

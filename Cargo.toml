@@ -2,6 +2,7 @@
 name = "fenrir"
 version = "0.1.4"
 edition = "2021"
+publish = false
 
 # Workspace removed - modules are now managed externally
 
@@ -29,9 +30,9 @@ uuid = { version = "1.8", features = ["v4"] }
 axum = { version = "0.7", features = ["macros"] }
 subtle = "2.5"
 arc-swap = "1.6"
-tokio-rustls = "0.24"
-rustls = "0.21"
-rustls-pemfile = "1.0"
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["logging", "ring", "tls12"] }
+rustls = { version = "0.23.46", default-features = false, features = ["logging", "ring", "std", "tls12"] }
+rustls-pki-types = { version = "1.12", features = ["std"] }
 libc = "0.2"
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 hyper = { version = "1.7", features = ["http1", "http2", "server"] }
@@ -43,11 +44,11 @@ sysinfo = "0.30"
 semver = { version = "1.0", features = ["serde"] }
 base64 = "0.21"
 hex = "0.4"
-ed25519-dalek = { version = "1.0", features = ["std"] }
+ed25519-dalek = { version = "2.2", features = ["std"] }
 sha2 = "0.10"
 hmac = "0.12"
 toml = "0.8.23"
-reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls", "blocking", "stream"] }
+reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls", "blocking", "stream"] }
 urlencoding = "2.1"
 flate2 = { version = "1.0", default-features = true }
 brotli = "8.0.4"

@@ -4946,7 +4946,7 @@ mod stream_disconnect_tests {
                 Some(socket)
             }
             Leave::Reset => {
-                socket.set_linger(Some(Duration::ZERO)).unwrap();
+                socket.set_zero_linger().unwrap();
                 drop(socket);
                 None
             }

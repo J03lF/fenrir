@@ -6,7 +6,7 @@ use std::str::FromStr;
 use std::sync::RwLock;
 
 use base64::Engine;
-use ed25519_dalek::{Keypair, PublicKey, SecretKey};
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -52,17 +52,19 @@ impl IdentityKeyMaterial {
         Self::new(key_id, secret_key, public_key, created_at)
     }
 
-    pub fn keypair(&self) -> Result<Keypair, IdentityError> {
+    /// The signing key; fails when the stored public half does not belong
+    /// to the secret.
+    pub fn keypair(&self) -> Result<SigningKey, IdentityError> {
         let mut bytes = [0u8; 64];
         bytes[..32].copy_from_slice(&self.secret_key);
         bytes[32..].copy_from_slice(&self.public_key);
-        Keypair::from_bytes(&bytes).map_err(|_| {
+        SigningKey::from_keypair_bytes(&bytes).map_err(|_| {
             IdentityError::Invalid(identity_messages::stored_key_material_invalid().into())
         })
     }
 
-    pub fn verifying_key(&self) -> Result<PublicKey, IdentityError> {
-        PublicKey::from_bytes(&self.public_key).map_err(|_| {
+    pub fn verifying_key(&self) -> Result<VerifyingKey, IdentityError> {
+        VerifyingKey::from_bytes(&self.public_key).map_err(|_| {
             IdentityError::Invalid(identity_messages::stored_public_key_invalid().into())
         })
     }
@@ -158,10 +160,8 @@ impl IdentityStore {
         } else {
             let mut secret_bytes = [0u8; 32];
             OsRng.fill_bytes(&mut secret_bytes);
-            let secret = SecretKey::from_bytes(&secret_bytes).map_err(|_| {
-                IdentityError::Invalid(identity_messages::unable_to_initialize_secret_key().into())
-            })?;
-            let public: PublicKey = (&secret).into();
+            let secret = SigningKey::from_bytes(&secret_bytes);
+            let public = secret.verifying_key();
             let created_at = OffsetDateTime::now_utc();
             IdentityState {
                 environment,

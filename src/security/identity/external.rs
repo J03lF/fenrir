@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use ed25519_dalek::{PublicKey, Verifier};
+use ed25519_dalek::{Verifier, VerifyingKey};
 use reqwest::blocking::{Client, RequestBuilder};
 use reqwest::{Certificate, Identity, Url};
 use serde::{Deserialize, Serialize};
@@ -41,7 +41,7 @@ pub struct ExternalIdentityProvider {
 }
 
 struct JwksCache {
-    keys: HashMap<String, PublicKey>,
+    keys: HashMap<String, VerifyingKey>,
     expires_at: Instant,
 }
 
@@ -302,7 +302,7 @@ impl ExternalIdentityProvider {
         }
     }
 
-    fn lookup_public_key(&self, kid: &str) -> Result<PublicKey, IdentityError> {
+    fn lookup_public_key(&self, kid: &str) -> Result<VerifyingKey, IdentityError> {
         if let Some(key) = self.cached_key(kid) {
             return Ok(key);
         }
@@ -311,7 +311,7 @@ impl ExternalIdentityProvider {
             .ok_or_else(|| IdentityError::Unauthorized("unknown signing key".into()))
     }
 
-    fn cached_key(&self, kid: &str) -> Option<PublicKey> {
+    fn cached_key(&self, kid: &str) -> Option<VerifyingKey> {
         if let Ok(guard) = self.jwks_cache.read() {
             if let Some(cache) = guard.as_ref() {
                 if cache.expires_at > Instant::now() {
@@ -355,11 +355,11 @@ impl ExternalIdentityProvider {
             let bytes = URL_SAFE_NO_PAD.decode(key.x.as_bytes()).map_err(|err| {
                 IdentityError::Invalid(format!("invalid JWKS key encoding: {err}"))
             })?;
-            if bytes.len() != 32 {
+            let Ok(bytes) = <[u8; 32]>::try_from(bytes.as_slice()) else {
                 warn!(kid = %key.kid, "skipping JWKS key with unexpected length");
                 continue;
-            }
-            let public = PublicKey::from_bytes(&bytes)
+            };
+            let public = VerifyingKey::from_bytes(&bytes)
                 .map_err(|_| IdentityError::Invalid("failed to parse JWKS public key".into()))?;
             map.insert(key.kid, public);
         }

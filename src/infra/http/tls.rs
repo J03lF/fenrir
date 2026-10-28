@@ -15,8 +15,10 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as HyperBuilder;
 use hyper_util::service::TowerToHyperService;
 use notify::{Config as NotifyConfig, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use rustls::crypto::ring::cipher_suite;
 use rustls::{self, ServerConfig as RustlsServerConfig};
-use rustls_pemfile::{certs, pkcs8_private_keys, rsa_private_keys};
+use rustls_pki_types::pem::PemObject;
+use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use std::convert::Infallible;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsAcceptor;
@@ -485,35 +487,28 @@ fn build_server_config(
     cert_bytes: Vec<u8>,
     key_bytes: Vec<u8>,
 ) -> Result<RustlsServerConfig> {
-    let mut cert_reader: &[u8] = &cert_bytes;
-    let cert_chain = certs(&mut cert_reader)
-        .map_err(|_| anyhow!(messages::infra::http::tls::CERT_PARSE_FAILED))?
-        .into_iter()
-        .map(rustls::Certificate)
-        .collect::<Vec<_>>();
+    let cert_chain = CertificateDer::pem_slice_iter(&cert_bytes)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| anyhow!(messages::infra::http::tls::CERT_PARSE_FAILED))?;
     if cert_chain.is_empty() {
         return Err(anyhow!(messages::infra::http::tls::CERT_CHAIN_EMPTY));
     }
 
-    let mut key_reader: &[u8] = &key_bytes;
-    let mut keys = pkcs8_private_keys(&mut key_reader)
-        .map_err(|_| anyhow!(messages::infra::http::tls::PKCS8_PARSE_FAILED))?;
-    if keys.is_empty() {
-        key_reader = &key_bytes;
-        keys = rsa_private_keys(&mut key_reader)
-            .map_err(|_| anyhow!(messages::infra::http::tls::RSA_PARSE_FAILED))?;
-    }
-    let key = keys
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow!(messages::infra::http::tls::PRIVATE_KEY_MISSING))?;
-    let key = rustls::PrivateKey(key);
+    // The first private key of the file: PKCS#8, PKCS#1 (RSA) or SEC1.
+    let key = PrivateKeyDer::from_pem_slice(&key_bytes).map_err(|err| match err {
+        rustls_pki_types::pem::Error::NoItemsFound => {
+            anyhow!(messages::infra::http::tls::PRIVATE_KEY_MISSING)
+        }
+        _ => anyhow!(messages::infra::http::tls::PKCS8_PARSE_FAILED),
+    })?;
 
     let cipher_suites = resolve_cipher_suites(&runtime.cipher_suites)?;
 
-    let mut config = rustls::ServerConfig::builder()
-        .with_cipher_suites(cipher_suites.as_slice())
-        .with_safe_default_kx_groups()
+    let provider = rustls::crypto::CryptoProvider {
+        cipher_suites,
+        ..rustls::crypto::ring::default_provider()
+    };
+    let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(provider))
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .with_no_client_auth()
         .with_single_cert(cert_chain, key)?;
@@ -524,24 +519,117 @@ fn build_server_config(
 fn resolve_cipher_suites(names: &[String]) -> Result<Vec<rustls::SupportedCipherSuite>> {
     if names.is_empty() {
         return Ok(vec![
-            rustls::cipher_suite::TLS13_AES_256_GCM_SHA384,
-            rustls::cipher_suite::TLS13_AES_128_GCM_SHA256,
-            rustls::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
+            cipher_suite::TLS13_AES_256_GCM_SHA384,
+            cipher_suite::TLS13_AES_128_GCM_SHA256,
+            cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
         ]);
     }
 
     names
         .iter()
         .map(|name| match name.as_str() {
-            "TLS_AES_256_GCM_SHA384" => Ok(rustls::cipher_suite::TLS13_AES_256_GCM_SHA384),
-            "TLS_AES_128_GCM_SHA256" => Ok(rustls::cipher_suite::TLS13_AES_128_GCM_SHA256),
-            "TLS_CHACHA20_POLY1305_SHA256" => {
-                Ok(rustls::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256)
-            }
+            "TLS_AES_256_GCM_SHA384" => Ok(cipher_suite::TLS13_AES_256_GCM_SHA384),
+            "TLS_AES_128_GCM_SHA256" => Ok(cipher_suite::TLS13_AES_128_GCM_SHA256),
+            "TLS_CHACHA20_POLY1305_SHA256" => Ok(cipher_suite::TLS13_CHACHA20_POLY1305_SHA256),
             other => Err(anyhow!(
                 "{}",
                 messages::infra::http::tls::cipher_suite_unknown(other)
             )),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    /// A throwaway self-signed certificate and key from the `openssl` CLI
+    /// (`None` when it is not installed).
+    fn self_signed(key_args: &[&str]) -> Option<(Vec<u8>, Vec<u8>)> {
+        let dir = std::env::temp_dir().join(format!("w9-host-tls-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).ok()?;
+        let key = dir.join("key.pem");
+        let cert = dir.join("cert.pem");
+        let mut args = vec![
+            "req",
+            "-x509",
+            "-nodes",
+            "-days",
+            "1",
+            "-subj",
+            "/CN=localhost",
+        ];
+        args.extend_from_slice(key_args);
+        let status = Command::new("openssl")
+            .args(&args)
+            .arg("-keyout")
+            .arg(&key)
+            .arg("-out")
+            .arg(&cert)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .ok()?;
+        let result = status
+            .success()
+            .then(|| Some((std::fs::read(&cert).ok()?, std::fs::read(&key).ok()?)))
+            .flatten();
+        let _ = std::fs::remove_dir_all(&dir);
+        result
+    }
+
+    fn runtime(cipher_suites: &[&str]) -> HttpTlsRuntime {
+        HttpTlsRuntime {
+            enabled: true,
+            cert_path: PathBuf::from("cert.pem"),
+            key_path: PathBuf::from("key.pem"),
+            cipher_suites: cipher_suites.iter().map(|s| (*s).to_string()).collect(),
+            reload_interval: None,
+        }
+    }
+
+    #[test]
+    fn server_config_loads_rsa_and_ec_keys_with_tls13_only() {
+        for key_args in [
+            &["-newkey", "rsa:2048"][..],
+            &["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1"][..],
+        ] {
+            let Some((cert, key)) = self_signed(key_args) else {
+                eprintln!("skipped: openssl CLI not available");
+                return;
+            };
+            let config = build_server_config(&runtime(&[]), cert.clone(), key.clone())
+                .unwrap_or_else(|err| panic!("{key_args:?}: {err}"));
+            assert_eq!(
+                config.alpn_protocols,
+                vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+            );
+            assert_eq!(config.crypto_provider().cipher_suites.len(), 3);
+
+            let one =
+                build_server_config(&runtime(&["TLS_AES_128_GCM_SHA256"]), cert, key).unwrap();
+            let suites = &one.crypto_provider().cipher_suites;
+            assert_eq!(suites.len(), 1);
+            assert_eq!(suites[0], cipher_suite::TLS13_AES_128_GCM_SHA256);
+        }
+    }
+
+    #[test]
+    fn broken_material_is_rejected() {
+        assert!(build_server_config(&runtime(&[]), b"no pem".to_vec(), b"x".to_vec()).is_err());
+        let Some((cert, _)) = self_signed(&["-newkey", "rsa:2048"]) else {
+            eprintln!("skipped: openssl CLI not available");
+            return;
+        };
+        assert!(build_server_config(&runtime(&[]), cert.clone(), b"no key".to_vec()).is_err());
+        let Some((_, other_key)) = self_signed(&["-newkey", "rsa:2048"]) else {
+            return;
+        };
+        assert!(
+            build_server_config(&runtime(&[]), cert.clone(), other_key).is_err(),
+            "key must match the certificate"
+        );
+        assert!(build_server_config(&runtime(&["TLS_RSA_WITH_RC4"]), cert, Vec::new()).is_err());
+    }
 }

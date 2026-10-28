@@ -293,6 +293,7 @@ fn production_refuses_dev_only_settings() {
             "auth_method",
         ),
         ("FENRIR__SERVER__HTTP__HOST", "0.0.0.0", "server.http"),
+        ("FENRIR__SERVER__SSH__HOST", "0.0.0.0", "server.ssh"),
     ];
     for (key, value, expected) in cases {
         let err =

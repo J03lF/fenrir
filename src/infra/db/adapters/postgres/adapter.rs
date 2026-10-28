@@ -1,3 +1,4 @@
+use std::fmt;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -90,8 +91,10 @@ impl PgConnector {
         let config = self.config_for(key);
         match &self.mode {
             ConnectionMode::Tcp => {
-                let (client, connection) =
-                    config.connect(NoTls).await.map_err(DbError::connection)?;
+                let (client, connection) = config
+                    .connect(NoTls)
+                    .await
+                    .map_err(|err| DbError::connection(PgErrorText(&err)))?;
                 tokio::spawn(async move {
                     if let Err(err) = connection.await {
                         tracing::debug!(error = %err, "postgres connection terminated");
@@ -110,7 +113,8 @@ impl PgConnector {
                 let (client, connection) =
                     config.connect_raw(socket, NoTls).await.map_err(|err| {
                         DbError::connection(format!(
-                            "postgres handshake failed on Unix socket: {err}"
+                            "postgres handshake failed on Unix socket: {}",
+                            PgErrorText(&err)
                         ))
                     })?;
                 tokio::spawn(async move {
@@ -193,12 +197,32 @@ impl Failure {
     }
 }
 
+/// A tokio-postgres error as text, cause included: `db error: ERROR: …`.
+/// Since tokio-postgres 0.7.14 `Display` stops at `db error`; the DB
+/// connector hands these texts to the modules, so the old form stays.
+struct PgErrorText<'a>(&'a tokio_postgres::Error);
+
+impl fmt::Display for PgErrorText<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)?;
+        if let Some(cause) = std::error::Error::source(self.0) {
+            write!(f, ": {cause}")?;
+        }
+        Ok(())
+    }
+}
+
+fn pg_error(err: tokio_postgres::Error) -> DbError {
+    DbError::query(PgErrorText(&err))
+}
+
 fn is_stale_plan(err: &tokio_postgres::Error) -> bool {
     err.code().is_some_and(|code| {
         (*code == SqlState::FEATURE_NOT_SUPPORTED
-            && err
-                .to_string()
-                .contains("cached plan must not change result type"))
+            && err.as_db_error().is_some_and(|db| {
+                db.message()
+                    .contains("cached plan must not change result type")
+            }))
             || *code == SqlState::INVALID_SQL_STATEMENT_NAME
     })
 }
@@ -214,11 +238,11 @@ fn ends_the_session(code: &SqlState) -> bool {
 
 fn classify_pg_error(err: tokio_postgres::Error) -> Failure {
     if is_stale_plan(&err) {
-        return Failure::StalePlan(DbError::query(err));
+        return Failure::StalePlan(pg_error(err));
     }
     match err.code() {
-        Some(code) if !ends_the_session(code) => Failure::Statement(DbError::query(err)),
-        _ => Failure::Connection(DbError::query(err)),
+        Some(code) if !ends_the_session(code) => Failure::Statement(pg_error(err)),
+        _ => Failure::Connection(pg_error(err)),
     }
 }
 
@@ -441,10 +465,10 @@ impl PostgresAdapter {
             client.batch_execute("COMMIT")
         );
         if let Err(err) = begin {
-            return Err(Failure::Connection(DbError::query(err)));
+            return Err(Failure::Connection(pg_error(err)));
         }
         let executed = result.map_err(classify_pg_error)?;
-        commit.map_err(|err| Failure::Connection(DbError::query(err)))?;
+        commit.map_err(|err| Failure::Connection(pg_error(err)))?;
         Ok(executed)
     }
 
@@ -551,7 +575,7 @@ impl PostgresAdapter {
             self.query_timeout,
             conn.client.query(sql, params),
             || DbError::query(infra_db_messages::postgres::query_timeout()),
-            DbError::query,
+            pg_error,
         )
         .await;
         if result.is_err() {

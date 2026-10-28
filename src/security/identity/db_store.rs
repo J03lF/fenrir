@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use base64::Engine;
-use ed25519_dalek::{PublicKey, SecretKey};
+use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use time::OffsetDateTime;
@@ -55,10 +55,7 @@ impl DbIdentityStore {
         if existing_key.is_none() {
             let mut secret_bytes = [0u8; 32];
             OsRng.fill_bytes(&mut secret_bytes);
-            let secret = SecretKey::from_bytes(&secret_bytes).map_err(|_| {
-                IdentityError::Invalid(identity_messages::unable_to_initialize_secret_key().into())
-            })?;
-            let public: PublicKey = (&secret).into();
+            let public = SigningKey::from_bytes(&secret_bytes).verifying_key();
             let key_id = format!("kid-{}", Uuid::new_v4());
             let now = OffsetDateTime::now_utc();
 

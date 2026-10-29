@@ -25,6 +25,7 @@ use crate::cli::commands::registry::{
 };
 use crate::cli::completion::{self, ContextualCompleter};
 use crate::config::{AppConfig, IdentityProviderKind};
+use crate::domain::module::compare_versions;
 use crate::infra::telemetry;
 use crate::prompts::{self, PromptContext};
 use crate::security::auth::Role;
@@ -1802,7 +1803,7 @@ fn should_enforce_identity(cfg: &AppConfig) -> bool {
                 return false;
             }
             match Version::parse(&cfg.app.version) {
-                Ok(version) => version >= Version::new(1, 0, 0),
+                Ok(version) => compare_versions(&version, &Version::new(1, 0, 0)).is_ge(),
                 Err(_) => false,
             }
         }

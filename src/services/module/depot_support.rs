@@ -32,7 +32,7 @@ impl ModuleService {
             ModuleServiceError::Storage(ModuleStorageError::InvalidState(err.to_string()))
         })?;
         if let Some(installed) = self.storage.load(&module_id).await? {
-            if installed.manifest.version > bundle.manifest.version {
+            if installed.manifest.module_version() > bundle.manifest.module_version() {
                 self.storage.remove(&module_id).await?;
             }
         }

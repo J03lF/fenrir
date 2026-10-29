@@ -8,8 +8,8 @@ use std::{
 };
 
 use crate::domain::module::{
-    InstalledModule, ModuleId, ModuleManifest, ModuleRuntimeError, ModuleRuntimeInfo,
-    ModuleRuntimeKind, ModuleRuntimeStatus, ModuleStartConfig, ModuleVersion,
+    version_req_matches, InstalledModule, ModuleId, ModuleManifest, ModuleRuntimeError,
+    ModuleRuntimeInfo, ModuleRuntimeKind, ModuleRuntimeStatus, ModuleStartConfig, ModuleVersion,
 };
 use crate::security::service::{ServiceRole, ServiceScope};
 use crate::security::service_tokens::DelegatedToken;
@@ -303,7 +303,7 @@ impl ModuleService {
                     let Some(dep_manifest) = manifests.get(&dep_id) else {
                         continue;
                     };
-                    if !required_version.matches(&dep_manifest.version) {
+                    if !version_req_matches(required_version, &dep_manifest.version) {
                         blocked_ids.insert(module_id.clone());
                         blocked.push(BlockedAutostartModule {
                             module_id: module_id.clone(),

@@ -16,10 +16,10 @@ use tracing::warn;
 
 use crate::config::ModuleRegistrySection;
 use crate::domain::module::{
-    ChecksumAlgorithm, DistributionTarget, ModuleArtifactDescriptor, ModuleBundle, ModuleChecksum,
-    ModuleId, ModuleManifest, ModuleProgress, ModuleRegistryError, ModuleRegistryPort,
-    ModuleSearchQuery, ModuleSignatureDescriptor, ModuleSummary, ModuleVersion, ProgressCallback,
-    SignatureAlgorithm,
+    version_req_matches, ChecksumAlgorithm, DistributionTarget, ModuleArtifactDescriptor,
+    ModuleBundle, ModuleChecksum, ModuleId, ModuleManifest, ModuleProgress, ModuleRegistryError,
+    ModuleRegistryPort, ModuleSearchQuery, ModuleSignatureDescriptor, ModuleSummary, ModuleVersion,
+    ProgressCallback, SignatureAlgorithm,
 };
 use crate::utils::messages;
 
@@ -883,7 +883,7 @@ struct LocalModuleVersion {
 impl LocalModuleVersion {
     fn is_compatible_with(&self, version: &Version) -> bool {
         match &self.fenrir_req {
-            Some(req) => req.matches(version),
+            Some(req) => version_req_matches(req, version),
             None => true,
         }
     }

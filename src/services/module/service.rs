@@ -8,8 +8,8 @@ use crate::audit::AuditOutcome;
 use crate::config::OperatingMode;
 use crate::dev_agent::config::{DevAgentConfig, DevAgentService};
 use crate::domain::module::{
-    ChecksumAlgorithm, DistributionTarget, InstalledModule, ModuleBundle, ModuleId,
-    ModuleInstallResult, ModuleInstallSource, ModuleInstallStatus, ModuleManifest,
+    version_req_matches, ChecksumAlgorithm, DistributionTarget, InstalledModule, ModuleBundle,
+    ModuleId, ModuleInstallResult, ModuleInstallSource, ModuleInstallStatus, ModuleManifest,
     ModuleRegistryPort, ModuleResult, ModuleRuntimeError, ModuleRuntimePort, ModuleRuntimeStatus,
     ModuleSearchQuery, ModuleServiceError, ModuleStorageError, ModuleStoragePort, ModuleSummary,
     ModuleVerifierPort, ModuleVersion, ProgressCallback,
@@ -2495,7 +2495,7 @@ impl ModuleService {
                     let current_version = ModuleVersion(module.manifest.version.clone());
                     let latest_version = ModuleVersion(latest_manifest.version.clone());
 
-                    let has_update = latest_version.0 > current_version.0;
+                    let has_update = latest_version > current_version;
 
                     // Check Fenrir compatibility
                     let compatible = if let Some(fenrir_ver) = fenrir_version {
@@ -2985,7 +2985,7 @@ fn check_fenrir_compatibility(manifest: &ModuleManifest, fenrir_version: &str) -
     if let Some(ref req) = manifest.fenrir_version {
         // Parse the Fenrir version
         if let Ok(version) = semver::Version::parse(fenrir_version) {
-            return req.matches(&version);
+            return version_req_matches(req, &version);
         }
     }
 
@@ -3186,5 +3186,13 @@ mod tests {
         };
         assert!(check_fenrir_compatibility(&manifest, "1.2.3"));
         assert!(!check_fenrir_compatibility(&manifest, "0.9.0"));
+        // Build-numbered hosts (`release.sh`): the range matches the core.
+        assert!(check_fenrir_compatibility(&manifest, "1.0.0-1"));
+        assert!(!check_fenrir_compatibility(&manifest, "0.13.0-4"));
+        let release_range = ModuleManifest {
+            fenrir_version: Some(semver::VersionReq::parse(">=0.1.0, <99.99.99").unwrap()),
+            ..manifest
+        };
+        assert!(check_fenrir_compatibility(&release_range, "0.13.0-1"));
     }
 }

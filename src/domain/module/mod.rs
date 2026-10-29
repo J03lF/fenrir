@@ -33,4 +33,4 @@ pub use runtime::{
 };
 pub use search::ModuleSearchQuery;
 pub use summary::ModuleSummary;
-pub use version::ModuleVersion;
+pub use version::{build_number, compare_versions, version_req_matches, ModuleVersion};

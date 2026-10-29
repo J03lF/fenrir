@@ -267,7 +267,7 @@ impl ModuleStoragePort for FilesystemModuleStorage {
         let current = self.read_installed(&id).await?;
         if let Some(installed) = &current {
             let installed_version = installed.manifest.module_version();
-            if installed_version.as_semver() > version.as_semver() {
+            if installed_version > version {
                 return Err(ModuleStorageError::InvalidState(
                     messages::infra::modules::storage::installed_version_newer(
                         installed_version,
@@ -365,7 +365,7 @@ impl ModuleStoragePort for FilesystemModuleStorage {
             None => ModuleInstallStatus::Installed,
             Some(installed) => {
                 let installed_version = installed.manifest.module_version();
-                if installed_version.as_semver() == version.as_semver() {
+                if installed_version == version {
                     ModuleInstallStatus::AlreadyCurrent
                 } else {
                     ModuleInstallStatus::Updated
@@ -605,5 +605,99 @@ mod flatten_tests {
         );
         assert!(dir.path().join(".fenrir/runtime.toml").is_file());
         assert!(!dir.path().join(".fenrir-flatten").exists());
+    }
+}
+
+#[cfg(test)]
+mod version_order_tests {
+    use super::FilesystemModuleStorage;
+    use crate::config::ModuleStorageSection;
+    use crate::domain::module::{
+        ChecksumAlgorithm, ModuleArtifactDescriptor, ModuleBundle, ModuleChecksum,
+        ModuleInstallSource, ModuleInstallStatus, ModuleManifest, ModuleSignatureDescriptor,
+        ModuleStorageError, ModuleStoragePort, SignatureAlgorithm,
+    };
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+
+    fn bundle(version: &str) -> ModuleBundle {
+        let mut tar = tar::Builder::new(GzEncoder::new(Vec::new(), Compression::fast()));
+        let data = b"binary";
+        let mut header = tar::Header::new_gnu();
+        header.set_size(data.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        tar.append_data(&mut header, "demo/demo", data.as_slice())
+            .unwrap();
+        let archive = tar.into_inner().unwrap().finish().unwrap();
+        ModuleBundle {
+            manifest: ModuleManifest {
+                id: "demo".to_string(),
+                version: semver::Version::parse(version).unwrap(),
+                title: None,
+                description: None,
+                fenrir_version: None,
+                authors: Vec::new(),
+                license: None,
+                artifact: ModuleArtifactDescriptor {
+                    download_url: String::new(),
+                    checksum: ModuleChecksum {
+                        algorithm: ChecksumAlgorithm::Sha256,
+                        hash: String::new(),
+                    },
+                    content_type: None,
+                    size_bytes: None,
+                },
+                signature: ModuleSignatureDescriptor {
+                    algorithm: SignatureAlgorithm::Ed25519,
+                    key_id: String::new(),
+                    signature: String::new(),
+                },
+                dependencies: Vec::new(),
+                tags: Vec::new(),
+                published_at: None,
+            },
+            archive,
+            signature: Vec::new(),
+            checksum: version.as_bytes().to_vec(),
+        }
+    }
+
+    /// `release.sh` versions: 1.2.0 (build 0) → 1.2.0-1 → 1.2.0-10 are
+    /// updates; going back from a build to 1.2.0 is refused like any
+    /// downgrade.
+    #[tokio::test]
+    async fn build_numbers_count_as_newer() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = FilesystemModuleStorage::new(&ModuleStorageSection {
+            install_dir: dir.path().to_string_lossy().to_string(),
+            cache_dir: None,
+        })
+        .unwrap();
+        let source = ModuleInstallSource::Distribution;
+        let first = storage
+            .stage_and_activate(bundle("1.2.0"), source)
+            .await
+            .unwrap();
+        assert_eq!(first.status, ModuleInstallStatus::Installed);
+        for version in ["1.2.0-1", "1.2.0-9", "1.2.0-10"] {
+            let next = storage
+                .stage_and_activate(bundle(version), source)
+                .await
+                .unwrap();
+            assert_eq!(next.status, ModuleInstallStatus::Updated, "{version}");
+        }
+        let same = storage
+            .stage_and_activate(bundle("1.2.0-10"), source)
+            .await
+            .unwrap();
+        assert_eq!(same.status, ModuleInstallStatus::AlreadyCurrent);
+        for older in ["1.2.0-9", "1.2.0"] {
+            let refused = storage.stage_and_activate(bundle(older), source).await;
+            assert!(
+                matches!(refused, Err(ModuleStorageError::InvalidState(_))),
+                "{older}: {refused:?}"
+            );
+        }
     }
 }

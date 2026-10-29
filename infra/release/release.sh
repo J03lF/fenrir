@@ -351,6 +351,7 @@ github_slug() { # DIR → owner/repo of origin, or nothing
 deploy_var() { printf 'TAG_%s' "$(printf '%s' "$1" | tr 'a-z-' 'A-Z_')"; }
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/release.XXXXXX")
+trap 'rm -rf -- "$work"' EXIT
 
 # --- list ---------------------------------------------------------------------
 if [ "$list" = 1 ]; then

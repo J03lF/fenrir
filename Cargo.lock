@@ -986,7 +986,7 @@ dependencies = [
 
 [[package]]
 name = "fenrir"
-version = "0.1.4"
+version = "0.13.0-1"
 dependencies = [
  "aes-gcm",
  "anyhow",

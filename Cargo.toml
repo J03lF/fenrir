@@ -1,6 +1,6 @@
 [package]
 name = "fenrir"
-version = "0.1.4"
+version = "0.13.0-1"
 edition = "2021"
 publish = false
 

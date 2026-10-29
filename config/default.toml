@@ -1,4 +1,4 @@
-app = { name = "fenrir", version = "0.1.4" }
+app = { name = "fenrir", version = "0.13.0-1" }
 
 # Runtime paths configuration
 # All paths are relative to base_path unless absolute

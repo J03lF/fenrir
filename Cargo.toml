@@ -63,9 +63,22 @@ fenrir-module-kit = { git = "https://github.com/J03lF/module-kit.git" }
 rusqlite = { version = "0.31", features = ["bundled"] }
 chrono = { version = "0.4", features = ["clock"] }
 tower-http = { version = "0.6.8", features = ["cors", "fs", "trace"] }
+# Fenrir Depot (signed distributions): manifest, signatures, verification.
+# The depot repository is private; see the `depot` feature below.
+depot-protocol = { git = "https://github.com/fenrir-modules/fenrir-depot.git", optional = true }
+
+[features]
+default = ["depot"]
+# Install signed distributions from the Fenrir Depot (`install distribution`,
+# `status distribution`, ...). Off: the host builds without the private
+# depot-protocol crate and those commands say the depot is not built in.
+depot = ["dep:depot-protocol"]
 
 [patch."https://github.com/J03lF/module-kit.git"]
 fenrir-module-kit = { path = "../module-kit" }
+
+[patch."https://github.com/fenrir-modules/fenrir-depot.git"]
+depot-protocol = { path = "../fenrir-depot/crates/depot-protocol" }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.27", features = ["signal", "process"] }

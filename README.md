@@ -103,6 +103,22 @@ A dedicated `db:` subshell with SQL auto-completion (tables, columns, keywords),
 ### Module & Plugin System
 Modules are installed from a composite registry (offline-first, then HTTP), verified with Ed25519 signatures, and spawned as isolated processes or embedded static-site servers. Each module receives scoped service tokens, a DB connector endpoint, and a per-module gateway — never raw credentials. Modules scale horizontally with configurable replicas, rolling restarts with surge replacement for zero-downtime updates, and canary deployments with automatic traffic shifting and health-based rollback. Failed modules are automatically quarantined after 3 crashes within 120 seconds.
 
+### Fenrir Depot (signed distributions)
+With the `depot` feature (on by default) the host installs **signed distributions** from the private Fenrir Depot: a product version such as `athenos-0.13.0` is an exact, Ed25519-signed set of module versions. The host talks to the depot over mTLS with its own client certificate, verifies every manifest, promotion and yank statement against the release keys in its configuration (`depot_protocol::verify`, the same checks as `depot verify`), checks channel, platform and every requirement against its own Fenrir version, downloads each bundle with streaming size and SHA-256 checks, and only then backs up, installs, migrates, restarts (rolling where a module has replicas), waits for health and records the result, rolling back by itself on failure. Code: `src/services/depot/`, `src/infra/modules/depot/`.
+
+| Variable (each also as `<VAR>_FILE`) | Meaning |
+|---|---|
+| `FENRIR_DEPOT_URL` | e.g. `https://depot.athenos.dev:8443`; unset = no depot |
+| `FENRIR_DEPOT_CHANNEL` | `beta`, `stable` or `prod` (default `prod`); the host installs that channel or above |
+| `FENRIR_DEPOT_TRUSTED_KEYS` | release keys `ed25519:<hex>`, comma or newline separated |
+| `FENRIR_DEPOT_CLIENT_CERT` / `FENRIR_DEPOT_CLIENT_KEY` | the host's client certificate and key (PEM, `depot cert issue <name> --role reader --kind server`) |
+| `FENRIR_DEPOT_CA_CERT` | CA of the depot's TLS certificate (unset: the public roots) |
+| `FENRIR_DEPOT_PLATFORM` | override of the build platform (`linux-x86_64`, ...) |
+
+State, verified bundle cache and backups live in `<modules.storage.install_dir>/runtime/depot/` (`state.json`, `blobs/sha256/`, `backups/`). `scripts/depot-e2e.sh` runs the host against a real depot (mTLS, throwaway Postgres).
+
+The depot repository is private: `depot-protocol` is a git dependency path-patched to `../fenrir-depot` (like module-kit), so a checkout of fenrir-depot next to fenrir is needed for every build, also with `--no-default-features`.
+
 ### Security Architecture
 All cryptographic operations go through a single `SecurityManager` facade — Argon2id password hashing, AES-256-GCM / XChaCha20-Poly1305 encryption, HMAC-SHA256 manifest signing, RBAC sessions, and delegated service tokens with grace-period refresh. The identity system supports both an embedded Ed25519 JWT authority and external identity brokers with JWKS verification.
 
@@ -263,8 +279,13 @@ When you connect via SSH or start with `--cli`, Fenrir presents an interactive s
 | `start\|stop\|restart module <id>` | Module lifecycle control |
 | `start\|stop\|restart service <id>` | Service lifecycle control (with `--force` for critical) |
 | `pause\|resume job <id>` | Scheduler job control |
-| `search modules [pattern]` | Search the module registry |
-| `install distribution` | Plan and install module updates from the registry |
+| `search modules <name> [range]` | Module versions in the Fenrir Depot (without one: the registry, offline directories first) |
+| `search distributions <query>` | Distributions in the depot, e.g. `0.12` (`--channel`, `--all`) |
+| `install distribution <product>-<version>` | Verify, plan, confirm, back up, install, health check, roll back on failure (`<product> <range>`: newest match; `--yes`) |
+| `install module <name> <range>` | One signed module as a hotfix (recorded as an override) |
+| `pin module <name> <version>` / `unpin module <name>` | Keep a module as installed across distributions |
+| `rollback` | Back to the previous distribution (local backup, else downloaded again) |
+| `status distribution` | Installed distribution, overrides, pins, previous, what is newer |
 | `synchronize module <id>` | Sync a module from local dev sources |
 | `release module <id>` | Revert a dev override to the distribution artifact |
 | `modules instances <id>` | List running instances with PID, port, and health |

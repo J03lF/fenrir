@@ -4,6 +4,7 @@ use crate::cli::commands::registry::{
     CliDependencies, CommandArgument, CommandEntry, CommandShape, CommandSubcommand,
     CompletionContext, CompletionKind,
 };
+use crate::utils::messages::cli::builtins::distribution as msg_distribution;
 use crate::utils::messages::cli::builtins::modules as msg_modules;
 use tracing::warn;
 
@@ -48,15 +49,17 @@ const MODULE_RESOURCE_PLURAL_ARGUMENT: CommandArgument = CommandArgument::requir
     .with_completion(CompletionKind::Static(MODULE_RESOURCE_PLURAL_OPTIONS));
 const MODULE_PATTERN_ARGUMENT: CommandArgument = CommandArgument::optional("pattern");
 
-const SEARCH_ARGUMENTS: &[CommandArgument] =
-    &[MODULE_RESOURCE_PLURAL_ARGUMENT, MODULE_PATTERN_ARGUMENT];
+const SEARCH_RESOURCE_OPTIONS: &[&str] = &["modules", "distributions"];
+const SEARCH_RESOURCE_ARGUMENT: CommandArgument = CommandArgument::required("resource")
+    .with_completion(CompletionKind::Static(SEARCH_RESOURCE_OPTIONS));
+const SEARCH_ARGUMENTS: &[CommandArgument] = &[SEARCH_RESOURCE_ARGUMENT, MODULE_PATTERN_ARGUMENT];
 const SEARCH_SHAPE: CommandShape = CommandShape::new("search", &[], SEARCH_ARGUMENTS, &[]);
 
-const DISTRIBUTION_RESOURCE_OPTIONS: &[&str] = &["distribution", "distributions"];
-const DISTRIBUTION_RESOURCE_ARGUMENT: CommandArgument = CommandArgument::required("resource")
-    .with_completion(CompletionKind::Static(DISTRIBUTION_RESOURCE_OPTIONS));
-
-const INSTALL_ARGUMENTS: &[CommandArgument] = &[DISTRIBUTION_RESOURCE_ARGUMENT];
+const INSTALL_RESOURCE_OPTIONS: &[&str] = &["distribution", "module"];
+const INSTALL_RESOURCE_ARGUMENT: CommandArgument = CommandArgument::required("resource")
+    .with_completion(CompletionKind::Static(INSTALL_RESOURCE_OPTIONS));
+const INSTALL_TARGET_ARGUMENT: CommandArgument = CommandArgument::optional("target");
+const INSTALL_ARGUMENTS: &[CommandArgument] = &[INSTALL_RESOURCE_ARGUMENT, INSTALL_TARGET_ARGUMENT];
 const INSTALL_SHAPE: CommandShape =
     CommandShape::new("install", &["import"], INSTALL_ARGUMENTS, &[]);
 
@@ -64,6 +67,21 @@ const UNINSTALL_ARGUMENTS: &[CommandArgument] =
     &[MODULE_RESOURCE_SINGULAR_ARGUMENT, MODULE_ID_ARGUMENT];
 const UNINSTALL_SHAPE: CommandShape =
     CommandShape::new("uninstall", &["remove"], UNINSTALL_ARGUMENTS, &[]);
+
+const PIN_ARGUMENTS: &[CommandArgument] = &[
+    MODULE_RESOURCE_SINGULAR_ARGUMENT,
+    MODULE_ID_ARGUMENT,
+    CommandArgument::required("version"),
+];
+const PIN_SHAPE: CommandShape = CommandShape::new("pin", &[], PIN_ARGUMENTS, &[]);
+const UNPIN_ARGUMENTS: &[CommandArgument] =
+    &[MODULE_RESOURCE_SINGULAR_ARGUMENT, MODULE_ID_ARGUMENT];
+const UNPIN_SHAPE: CommandShape = CommandShape::new("unpin", &[], UNPIN_ARGUMENTS, &[]);
+const ROLLBACK_OPTIONS: &[&str] = &["--yes"];
+const ROLLBACK_ARGUMENTS: &[CommandArgument] = &[
+    CommandArgument::optional("--yes").with_completion(CompletionKind::Static(ROLLBACK_OPTIONS))
+];
+const ROLLBACK_SHAPE: CommandShape = CommandShape::new("rollback", &[], ROLLBACK_ARGUMENTS, &[]);
 
 const CHECK_ARGUMENTS: &[CommandArgument] = &[MODULE_RESOURCE_PLURAL_ARGUMENT];
 const CHECK_SHAPE: CommandShape = CommandShape::new("check", &[], CHECK_ARGUMENTS, &[]);
@@ -147,6 +165,39 @@ pub fn uninstall_command() -> CommandEntry {
         msg_modules::uninstall::DETAILS,
         handlers::handle_uninstall_command,
         UNINSTALL_SHAPE,
+    )
+}
+
+pub fn pin_command() -> CommandEntry {
+    CommandEntry::with_shape(
+        "pin",
+        msg_distribution::commands::PIN_DESCRIPTION,
+        msg_distribution::commands::PIN_SYNOPSIS,
+        msg_distribution::commands::PIN_DETAILS,
+        handlers::handle_pin_command,
+        PIN_SHAPE,
+    )
+}
+
+pub fn unpin_command() -> CommandEntry {
+    CommandEntry::with_shape(
+        "unpin",
+        msg_distribution::commands::UNPIN_DESCRIPTION,
+        msg_distribution::commands::UNPIN_SYNOPSIS,
+        msg_distribution::commands::UNPIN_DETAILS,
+        handlers::handle_unpin_command,
+        UNPIN_SHAPE,
+    )
+}
+
+pub fn rollback_command() -> CommandEntry {
+    CommandEntry::with_shape(
+        "rollback",
+        msg_distribution::commands::ROLLBACK_DESCRIPTION,
+        msg_distribution::commands::ROLLBACK_SYNOPSIS,
+        msg_distribution::commands::ROLLBACK_DETAILS,
+        handlers::handle_rollback_command,
+        ROLLBACK_SHAPE,
     )
 }
 

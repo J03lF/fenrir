@@ -1,6 +1,7 @@
 pub mod audit;
 pub mod clear;
 pub mod db_shell;
+pub mod distribution;
 pub mod exit;
 pub mod help;
 pub mod jobs;

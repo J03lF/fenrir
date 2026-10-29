@@ -253,14 +253,17 @@ fn suggestions_for_search_command_stays_at_root_until_space() {
 }
 
 #[test]
-fn search_command_suggests_module_resource() {
+fn search_command_suggests_module_and_distribution_resources() {
     let dependencies = test_dependencies();
     let registry = builtins::build_registry();
     let shapes = registry.shapes();
     let completer = ContextualCompleter::new(shapes, dependencies, ShellEnvironment::Cli);
 
     let (_, suggestions) = completer.suggestions_for("search ", "search ".len());
-    assert_eq!(suggestions, vec!["modules".to_string()]);
+    assert_eq!(
+        suggestions,
+        vec!["modules".to_string(), "distributions".to_string()]
+    );
 }
 
 #[test]

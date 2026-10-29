@@ -44,6 +44,9 @@ pub(super) fn handle_status_command(
             };
             show_service_status(deps, service_id, out)?;
         }
+        "distribution" | "distributions" => {
+            return crate::cli::commands::builtins::modules::distribution_status(deps, out);
+        }
         "job" => {
             let Some(job_id) = tail.first() else {
                 MessageBox::warning("Missing job ID")
@@ -57,7 +60,7 @@ pub(super) fn handle_status_command(
         other => {
             MessageBox::error("Unknown resource")
                 .message(format!("Resource '{}' is not recognized", other))
-                .suggestion("Valid resources: fenrir, db, service, job")
+                .suggestion("Valid resources: fenrir, db, service, job, distribution")
                 .render(out)?;
         }
     }

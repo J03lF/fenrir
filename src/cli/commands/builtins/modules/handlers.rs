@@ -24,6 +24,7 @@ use crate::utils;
 use crate::utils::messages::cli::builtins::modules as msg_modules;
 
 use super::ctx::{dev_services_metadata, module_error_metadata, ModulesCommandCtx};
+use super::distribution;
 use super::entries::{available_subcommands, resolve_module_subcommand};
 use super::output::{
     module_error_code, render_distribution_plan, render_manifest, render_runtime_error,
@@ -76,6 +77,11 @@ pub(super) fn handle_search_command(
     out: &mut dyn Write,
     _env: ShellEnvironment,
 ) -> io::Result<CommandOutcome> {
+    if let Some((resource, rest)) = args.split_first() {
+        if ModuleResourceKind::Distribution.matches(resource) {
+            return distribution::search_distributions(deps, rest, out);
+        }
+    }
     run_scoped_module_command(deps, args, out, &SEARCH_SPEC)
 }
 
@@ -86,7 +92,42 @@ pub(super) fn handle_install_command(
     out: &mut dyn Write,
     _env: ShellEnvironment,
 ) -> io::Result<CommandOutcome> {
+    if let Some((resource, rest)) = args.split_first() {
+        if ModuleResourceKind::ModuleSingular.matches(resource) {
+            return distribution::install_module(deps, rest, out);
+        }
+    }
     run_scoped_module_command(deps, args, out, &INSTALL_DISTRIBUTION_SPEC)
+}
+
+pub(super) fn handle_pin_command(
+    deps: &CliDependencies,
+    args: &[&str],
+    _registry: &CommandRegistry,
+    out: &mut dyn Write,
+    _env: ShellEnvironment,
+) -> io::Result<CommandOutcome> {
+    distribution::pin(deps, args, out)
+}
+
+pub(super) fn handle_unpin_command(
+    deps: &CliDependencies,
+    args: &[&str],
+    _registry: &CommandRegistry,
+    out: &mut dyn Write,
+    _env: ShellEnvironment,
+) -> io::Result<CommandOutcome> {
+    distribution::unpin(deps, args, out)
+}
+
+pub(super) fn handle_rollback_command(
+    deps: &CliDependencies,
+    args: &[&str],
+    _registry: &CommandRegistry,
+    out: &mut dyn Write,
+    _env: ShellEnvironment,
+) -> io::Result<CommandOutcome> {
+    distribution::rollback(deps, args, out)
 }
 
 pub(super) fn handle_synchronize_command(
@@ -310,6 +351,12 @@ fn handle_search(
 ) -> io::Result<CommandOutcome> {
     use crate::domain::module::ModuleSearchQuery;
 
+    // With a depot configured, `search modules <name> [range]` asks it;
+    // otherwise the registry chain (offline directories first) answers.
+    if let Some(outcome) = distribution::search_modules(ctx.deps(), args, out)? {
+        return Ok(outcome);
+    }
+
     let pattern = args.first().map(|value| (*value).to_string());
     let pattern_for_query = pattern.clone();
 
@@ -395,6 +442,12 @@ fn handle_install_distribution(
     out: &mut dyn Write,
     args: &[&str],
 ) -> io::Result<CommandOutcome> {
+    // `install distribution athenos-0.13.0` and every install with a depot
+    // configured: signed distributions. Without arguments and without a
+    // depot: the dev flow over the offline module directories below.
+    if !args.is_empty() || distribution::depot_configured() {
+        return distribution::install_distribution(ctx.deps(), args, out);
+    }
     if !args.is_empty() {
         writeln!(
             out,
@@ -528,6 +581,7 @@ fn handle_uninstall(
             )?;
             writeln!(out)?;
             out.flush()?;
+            distribution::forget_module(ctx.deps(), module_id.as_str());
             ctx.record_audit(
                 "module::uninstall",
                 &module_id,
@@ -2041,12 +2095,12 @@ impl ModuleResourceKind {
 
 const SEARCH_SPEC: ModuleCommandSpec = ModuleCommandSpec::new(
     "search",
-    "search modules [pattern]",
+    "search modules <name> [range] | search distributions <query>",
     ModuleResourceKind::ModulePlural,
 );
 const INSTALL_DISTRIBUTION_SPEC: ModuleCommandSpec = ModuleCommandSpec::new(
     "install-distribution",
-    "install distribution",
+    "install distribution <product>-<version> | <product> [<range>] | install module <name> <range>",
     ModuleResourceKind::Distribution,
 );
 const SYNCHRONIZE_SPEC: ModuleCommandSpec = ModuleCommandSpec::new(

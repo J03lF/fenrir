@@ -27,6 +27,12 @@ const STATUS_SUBCOMMANDS: &[CommandSubcommand] = &[
         status_messages::SERVICE_DESCRIPTION,
     ),
     CommandSubcommand::new(
+        "distribution",
+        &["distributions"],
+        &[],
+        "Show the installed distribution, pins, overrides and what is newer",
+    ),
+    CommandSubcommand::new(
         "job",
         &[],
         &[JOB_ARGUMENT],

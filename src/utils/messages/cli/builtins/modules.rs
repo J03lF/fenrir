@@ -3,9 +3,14 @@ pub mod command {
     pub const SYNOPSIS: &str = "modules <subcommand>";
     pub const DETAILS: &[&str] = &[
         "list modules                    – shows all modules with runtime status",
-        "search modules [pattern]        – searches the registry",
+        "search modules <name> [range]   – module versions in the depot (else the registry)",
+        "search distributions <query>    – distributions in the depot, e.g. 0.12",
         "show module <name[@version]>    – shows manifest information",
-        "install distribution            – installs every module of a distribution",
+        "install distribution <id|range> – installs a signed distribution from the depot",
+        "install module <name> <range>   – installs one signed module (hotfix)",
+        "pin module <name> <version>     – keeps a module as is across distributions",
+        "rollback                        – back to the previous distribution",
+        "status distribution             – what runs, pins, overrides, what is newer",
         "synchronize module <name>       – replaces a module with local changes",
         "release module <name>           – returns a module to the distribution build",
         "release dev-overrides           – releases all modules currently in sync mode",
@@ -23,16 +28,25 @@ pub mod command {
 }
 
 pub mod search {
-    pub const DESCRIPTION: &str = "Search signed modules inside the registry";
-    pub const SYNOPSIS: &str = "search modules [pattern]";
-    pub const DETAILS: &[&str] = &["search modules [pattern] – query the module registry"];
+    pub const DESCRIPTION: &str = "Search modules and distributions";
+    pub const SYNOPSIS: &str = "search modules <name> [range] | search distributions <query>";
+    pub const DETAILS: &[&str] = &[
+        "search modules <name> [range]  – versions and where they are used (depot; without one the registry, offline directories first)",
+        "search distributions <query>   – e.g. 0.12 or athenos-0.13; --channel beta|stable|prod, --all",
+    ];
 }
 
 pub mod install_distribution {
-    pub const DESCRIPTION: &str = "Install modules for a Fenrir distribution";
-    pub const SYNOPSIS: &str = "install distribution";
-    pub const DETAILS: &[&str] =
-        &["install distribution – installs/updates all compatible modules"];
+    pub const DESCRIPTION: &str = "Install a signed distribution or module from the depot";
+    pub const SYNOPSIS: &str =
+        "install distribution <product>-<version> | <product> <range> | install module <name> <range>";
+    pub const DETAILS: &[&str] = &[
+        "install distribution athenos-0.13.0  – verify, plan, confirm, back up, install, health check, rollback on failure",
+        "install distribution athenos 0.12.*  – the newest non-yanked match in this host's channel or above",
+        "install module athenos-web 0.12.*    – one module from a verified distribution (hotfix, recorded as override)",
+        "--yes                                – no confirmation (scripts)",
+        "install distribution (no arguments, no depot) – dev: every compatible module of the offline directories",
+    ];
 }
 
 pub mod synchronize {

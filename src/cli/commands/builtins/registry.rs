@@ -36,6 +36,9 @@ pub fn register_builtins(registry: &mut CommandRegistry) {
     registry.register(modules::scaffold_command());
     registry.register(modules::uninstall_command());
     registry.register(modules::check_command());
+    registry.register(modules::pin_command());
+    registry.register(modules::unpin_command());
+    registry.register(modules::rollback_command());
 
     // Other
     registry.register(audit::command());

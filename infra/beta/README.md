@@ -52,8 +52,8 @@ athenos.service (User athenos) ── Unix-Socket, peer ── postgresql@16-mai
 | `server/backup.sh`, `server/restore.sh` | Backup (Rotation 14 T, Off-site, Heartbeat) und geprüftes Zurückspielen in eine frische DB |
 | `server/healthcheck.sh`, `server/alert.sh` | Überwachung alle 5 min und Alarm-Mail |
 | `server/secret.sh`, `server/set-fenrir-admin-password.sh`, `server/bootstrap-admin.sh` | Geheimnisse, Fenrir-Admin, erster Athenos-Admin (nur über die Konsole, siehe RUNBOOK §4) |
-| `ci/package-host.sh` | Release-Bündel des Hosts (von `.github/workflows/release.yml`) |
-| `tests/check.sh` | statische Prüfung (bash -n, TOML, Keyring, Vorlagen ohne Geheimnisse, `caddy validate`, Wartungsseite ohne fremde Quellen), dazu `tests/bootstrap-admin-test.sh` und `tests/maintenance-test.sh` |
+| `ci/package-host.sh` | Release-Bündel des Hosts, `fenrir-<version>-linux-x86_64.tar.gz` (von `.github/workflows/release.yml`) |
+| `tests/check.sh` | statische Prüfung (bash -n, TOML, Keyring, Vorlagen ohne Geheimnisse, `caddy validate`, Wartungsseite ohne fremde Quellen), dazu `tests/bootstrap-admin-test.sh`, `tests/maintenance-test.sh` und `infra/release/tests/release-test.sh` (release.sh in einer Sandbox, Workflow-Prüfung) |
 | `tests/maintenance-test.sh` | `athenos-wartung.sh` (Schreiben, Status, Ablehnungen), `athenos-release.sh activate --maintenance` gegen Attrappen (an beim Neustart, aus wenn gesund, an wenn nichts gesund läuft) und `deploy.sh` mit einem falschen ssh |
 | `tests/bootstrap-admin-test.sh` | `bootstrap-admin.sh` gegen eine Attrappe der API: verweigert bei aktivem Konto, nie Token oder Passwort in Ausgabe oder argv, Normalfall mit falschem PIN und neuem Code |
 | `tests/config-check.sh` | `fenrir --check-config` im Produktionsmodus mit `beta.toml` und der Env-Vorlage; prüft auch, dass Dev-Einstellungen und das Dev-Profil abgelehnt werden |

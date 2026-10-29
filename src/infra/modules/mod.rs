@@ -1,3 +1,5 @@
+#[cfg(feature = "depot")]
+pub mod depot;
 pub mod registry;
 pub mod runtime;
 pub mod storage;

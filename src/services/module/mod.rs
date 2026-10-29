@@ -1,5 +1,6 @@
 mod clients;
 mod config;
+mod depot_support;
 mod dev;
 mod dev_agent;
 mod dev_env;

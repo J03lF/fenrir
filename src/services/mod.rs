@@ -2,6 +2,8 @@ pub mod backup;
 pub mod db_connector;
 pub mod db_schema;
 pub mod db_shell;
+#[cfg(feature = "depot")]
+pub mod depot;
 pub mod diagnostics;
 pub mod jobs;
 pub mod module;

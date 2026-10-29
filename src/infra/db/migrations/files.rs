@@ -76,7 +76,8 @@ pub fn list_sql_files_in(dir: &Path) -> Result<Vec<String>> {
 
 /// Minimal TOML parse: extract `[migrations] dir = "..."` without pulling
 /// in the full `RuntimeManifest` dependency (which is private to process.rs).
-fn parse_migrations_dir(toml_str: &str) -> Option<String> {
+/// Also used to read the migrations of a bundle before it is installed.
+pub fn parse_migrations_dir(toml_str: &str) -> Option<String> {
     #[derive(serde::Deserialize)]
     struct Stub {
         migrations: Option<MigSection>,

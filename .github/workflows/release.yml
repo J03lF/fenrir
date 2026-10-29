@@ -6,7 +6,7 @@
 #
 # Reproducible: pinned toolchain, --locked, no build cache, CARGO_INCREMENTAL=0,
 # SOURCE_DATE_EPOCH = commit time, --remap-path-prefix for every local path,
-# module-kit and the toolchain pinned by ci.yml (read from it, one place),
+# module-kit, fenrir-depot and the toolchain pinned by ci.yml (read from it, one place),
 # tarball with sorted entries, fixed mtime and owner (infra/beta/ci/package-host.sh).
 #
 # Replaces the former "Promote" placeholder, which shipped bin/.fenrir-profile
@@ -46,7 +46,8 @@ jobs:
       run:
         working-directory: fenrir
     steps:
-      # Same layout as ci.yml: fenrir/ and the path-patched ../module-kit.
+      # Same layout as ci.yml: fenrir/ and the path-patched ../module-kit
+      # and ../fenrir-depot.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: fenrir
@@ -55,10 +56,11 @@ jobs:
         id: pins
         run: |
           pin() { sed -n "s/^  $1: *\"\{0,1\}\([^\" #]*\)\"\{0,1\}.*/\1/p" .github/workflows/ci.yml | head -n 1; }
-          kit=$(pin MODULE_KIT_SHA); toolchain=$(pin RUST_TOOLCHAIN)
-          [[ $kit =~ ^[0-9a-f]{40}$ ]] && [[ $toolchain =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
-            { echo "::error::could not read MODULE_KIT_SHA, RUST_TOOLCHAIN from ci.yml"; exit 1; }
+          kit=$(pin MODULE_KIT_SHA); depot=$(pin DEPOT_SHA); toolchain=$(pin RUST_TOOLCHAIN)
+          [[ $kit =~ ^[0-9a-f]{40}$ ]] && [[ $depot =~ ^[0-9a-f]{40}$ ]] && [[ $toolchain =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+            { echo "::error::could not read MODULE_KIT_SHA, DEPOT_SHA, RUST_TOOLCHAIN from ci.yml"; exit 1; }
           echo "module_kit=$kit" >> "$GITHUB_OUTPUT"
+          echo "depot=$depot" >> "$GITHUB_OUTPUT"
           echo "toolchain=$toolchain" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -66,6 +68,13 @@ jobs:
           ref: ${{ steps.pins.outputs.module_kit }}
           path: module-kit
           token: ${{ secrets.SIBLING_REPOS_TOKEN || github.token }}
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: fenrir-modules/fenrir-depot
+          ref: ${{ steps.pins.outputs.depot }}
+          path: fenrir-depot
+          token: ${{ secrets.SIBLING_REPOS_TOKEN }}
           persist-credentials: false
       - name: Install Rust ${{ steps.pins.outputs.toolchain }}
         env:

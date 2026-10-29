@@ -170,6 +170,10 @@ jobs:
             # release.sh writes the version before it tags.
             [ "$version" = "$crate_version" ] ||
               { echo "::error::tag $GITHUB_REF_NAME, but Cargo.toml says $crate_version (release with infra/release/release.sh)"; exit 1; }
+            # The version the host reports and checks module requirements with.
+            app_version=$(sed -n 's/^app = {.*version = "\([^"]*\)".*/\1/p' config/default.toml | head -n 1)
+            [ "$version" = "$app_version" ] ||
+              { echo "::error::tag $GITHUB_REF_NAME, but config/default.toml app.version says $app_version (release with infra/release/release.sh)"; exit 1; }
           else
             version="${crate_version}+g$(git rev-parse --short=12 HEAD)"
           fi

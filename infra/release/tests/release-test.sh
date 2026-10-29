@@ -8,7 +8,8 @@
 #                                DIR (layout of worktrees/rel: athenos-contracts,
 #                                modules/<repo>, fenrir) into bare remotes and
 #                                run the first 0.13.0 release against them
-#                                (--version 0.13.0 --no-gates --yes), and lint
+#                                (--version 0.13.0 --no-gates --yes, then
+#                                webcomponents on its own line), and lint
 #                                their workflows
 #
 # Plain bash with assertions (no bats); works with the bash 3.2 of macOS.
@@ -144,7 +145,8 @@ contracts_sha=$(git -C "$root/athenos-contracts" rev-parse HEAD)
 cargo_fixture modules/notification-service notification-service 0.11.0
 fixture notification-service modules/notification-service 0.1.0
 # v0.11.0 (legacy, build 0) is newer than v0.1.0-7; the others are no X.Y.Z-N.
-tag_all notification-service modules/notification-service v0.1.0-6 v0.1.0-7 v0.11.0 v0.99.0-rc1 vnext
+# v0.20.0-0 and v0.20.0-03 are no builds (N >= 1, no leading zero): ignored.
+tag_all notification-service modules/notification-service v0.1.0-6 v0.1.0-7 v0.11.0 v0.99.0-rc1 vnext v0.20.0-0 v0.20.0-03
 
 cargo_fixture modules/athenos athenos 0.13.0-10
 fixture athenos modules/athenos 0.1.0
@@ -228,12 +230,44 @@ TS
 fixture athenos-web modules/athenos-web 0.1.0
 tag_all athenos-web modules/athenos-web v0.12.0 v0.12.1
 
-mkdir -p "$root/fenrir"
+wc="$root/modules/athenos-webcomponents"
+mkdir -p "$wc/projects/athenos-webcomponents"
+for f in package.json projects/athenos-webcomponents/package.json; do
+	cat >"$wc/$f" <<'JSON'
+{
+  "name": "@athenos/webcomponents",
+  "version": "0.7.6"
+}
+JSON
+done
+cat >"$wc/package-lock.json" <<'JSON'
+{
+  "name": "@athenos/webcomponents",
+  "version": "0.7.6",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {
+      "name": "@athenos/webcomponents",
+      "version": "0.7.6"
+    }
+  }
+}
+JSON
+fixture athenos-webcomponents modules/athenos-webcomponents 0.1.0
+tag_all athenos-webcomponents modules/athenos-webcomponents v0.1.0-13 v0.7.6
+
+mkdir -p "$root/fenrir/config"
 cat >"$root/fenrir/Cargo.toml" <<'TOML'
 [package]
 name = "fenrir"
 version = "0.1.4"
 edition = "2021"
+TOML
+cat >"$root/fenrir/config/default.toml" <<'TOML'
+app = { name = "fenrir", version = "0.1.4" }
+
+[server]
+version = "untouched"
 TOML
 cat >"$root/fenrir/Cargo.lock" <<'LOCK'
 version = 4
@@ -252,16 +286,19 @@ module notification-service  modules/notification-service  0.1.0  cargo,fenrir-d
 module athenos               modules/athenos               0.1.0  cargo,fenrir-dev                                      linux-x86_64  [ -z "\${FAIL_GATE:-}" ] && test -f Cargo.lock
 module athenos-api           modules/athenos-api           0.1.0  cargo,fenrir-dev,openapi=openapi/athenos-api.json     linux-x86_64  true
 module athenos-web           modules/athenos-web           0.1.0  npm,ts-const=src/app/data/constants/app.constants.ts  any           -
-module fenrir                fenrir                        master cargo                                                 linux-x86_64  true
+module athenos-webcomponents modules/athenos-webcomponents 0.1.0  npm,npm=projects/athenos-webcomponents/package.json   -             -
+module fenrir                fenrir                        master cargo,app-version=config/default.toml                 linux-x86_64  true
 pin CONTRACTS_SHA athenos-contracts
 pin ATHENOS_SHA   athenos
+own-version athenos-webcomponents
+product athenos athenos athenos-api athenos-web notification-service
 CONF
 
 # --- 1. --list and argument errors ------------------------------------------------
 release "" --list
 check_eq "--list exits 0" 0 "$rc"
 check "--list: athenos v0.13.0-10, next -11" grep -Eq '^athenos +v0\.13\.0-10 +v0\.13\.0-11 ' "$out"
-check "--list: notification-service legacy v0.11.0, next v0.11.0-1" grep -Eq '^notification-service +v0\.11\.0 +v0\.11\.0-1 ' "$out"
+check "--list: notification-service legacy v0.11.0, next v0.11.0-1 (-0 and -03 ignored)" grep -Eq '^notification-service +v0\.11\.0 +v0\.11\.0-1 ' "$out"
 check "--list: contracts without a tag needs --version" grep -Eq '^athenos-contracts +- +\(--version\)' "$out"
 check "--list: athenos-api files say 0.13.0" grep -Eq '^athenos-api +v0\.12\.0 +v0\.12\.0-1 +0\.13\.0 ' "$out"
 
@@ -275,6 +312,22 @@ check "no tag and no --version refused" test "$rc" != 0
 check_out "no tag: asks for --version" "pass --version X.Y.Z"
 release ""
 check_eq "no module: usage, exit 2" 2 "$rc"
+for bad_version in 0.13.0-0 01.2.0 0.13 0.13.0-1; do
+	release "" --dry-run --version "$bad_version" athenos
+	check "--version $bad_version refused" test "$rc" != 0
+done
+check_out "--version with a build: says why" "--version wants X.Y.Z without a build number: 0.13.0-1"
+release "" --dry-run --version athenos=0.13.0-0 athenos
+check "--version NAME=X.Y.Z-0 refused" test "$rc" != 0
+for bad_version in 0.13.0-0 0.13.0-03 0.13.0-rc1; do
+	release "" --dry-run --product-version "$bad_version" athenos
+	check "--product-version $bad_version refused" test "$rc" != 0
+done
+release "" --dry-run --product-version 0.13.0-0 athenos
+check_out "--product-version -0: build 0 has no suffix" "build 0 has no suffix, write 0.13.0"
+release "" --dry-run --version webcomponents=0.8.0 athenos
+check "--version NAME=… for a module not named refused" test "$rc" != 0
+check_out "--version NAME=…: name it too" "name athenos-webcomponents as a module too"
 
 # --- 2. --dry-run changes nothing ---------------------------------------------------
 ath="$root/modules/athenos"
@@ -336,7 +389,8 @@ check "next build: dependency requirement untouched" grep -qF 'helper = { versio
 check_eq "next build: Cargo.lock, only the module's entry" "0.13.0-11 0.13.0-10" "$(sed -n 's/^version = "\(.*\)"/\1/p' "$ath/Cargo.lock" | tr '\n' ' ' | sed 's/ $//')"
 check_eq "next build: .fenrir-dev.toml, [module] only" '"0.13.0-11" "untouched"' "$(sed -n 's/^version = \(.*\)/\1/p' "$ath/.fenrir-dev.toml" | tr '\n' ' ' | sed 's/ $//')"
 check_out "next build: release line (no GitHub origin)" "athenos                v0.13.0-11 (origin is not on GitHub"
-check_out "next build: depot line" "depot import github athenos@v0.13.0-11"
+check_out "next build: depot line, the real CLI" "depot import github --product athenos --version <product-version> --repo athenos@v0.13.0-11 --from athenos-<prev>"
+check_out "next build: depot line names what is not in the run" "(not in this run: athenos-api athenos-web notification-service; --from keeps their rules"
 check_out "next build: deploy line with per-repo tags" "TAG_ATHENOS=v0.13.0-11"
 check_out "next build: deploy line, fenrir's tag" "infra/beta/deploy.sh v0.12.0"
 
@@ -344,6 +398,8 @@ check_out "next build: deploy line, fenrir's tag" "infra/beta/deploy.sh v0.12.0"
 release "y" notification-service
 check_eq "legacy: exit 0" 0 "$rc"
 check_out "legacy: v0.11.0 -> v0.11.0-1" "v0.11.0        -> v0.11.0-1"
+check_out "legacy: -0 tag noted" "note: notification-service: tag v0.20.0-0 is ignored"
+check_out "legacy: leading-zero tag noted" "note: notification-service: tag v0.20.0-03 is ignored"
 check "legacy: remote tag" remote_has_tag notification-service v0.11.0-1
 check "legacy: Cargo.toml" grep -qx 'version = "0.11.0-1"' "$ns/Cargo.toml"
 
@@ -417,7 +473,7 @@ check_not_out "pin: pushed contracts commit is fine" "CONTRACTS_SHA="
 release "" --dry-run --version 0.15.0 athenos-api athenos
 check_not_out "pin: pushed earlier in the same run is fine" "pins ATHENOS_SHA"
 release "" --dry-run athenos-web
-check_out "package.json pin of an unknown commit" "athenos-web pins package.json=deadbeefdead (athenos-webcomponents): athenos-webcomponents is not in modules.conf, not checked"
+check_out "package.json pin of an unknown commit" "athenos-web pins package.json=deadbeefdead, which athenos-webcomponents ($wc) does not know"
 check_not_out "package.json pin of a pushed commit is fine" "pins package.json=${contracts_sha:0:12}"
 
 # --- 11. several modules: table order is push order --------------------------------------
@@ -449,12 +505,37 @@ check_eq "web: lockfile root and packages.\"\"" "0.12.1-1 0.12.1-1" "$(python3 -
 check_eq "web: dependency versions untouched" "0.12.1 0.12.1" "$(python3 -I -c 'import json,sys; l=json.load(open(sys.argv[1])); p=json.load(open(sys.argv[2])); print(l["packages"]["node_modules/left-pad"]["version"], p["dependencies"]["left-pad"])' "$web/package-lock.json" "$web/package.json")"
 check "web: app.constants.ts" grep -qF "VERSION: '0.12.1-1'," "$web/src/app/data/constants/app.constants.ts"
 check_out "web: no gates configured" "== athenos-web"
-check_out "web: depot line" "depot import github athenos-web@v0.12.1-1"
+check_out "web: depot line" "depot import github --product athenos --version <product-version> --repo athenos-web@v0.12.1-1 --from athenos-<prev>"
+
+# --- 13b. own version line: webcomponents ignores a shared --version ---------------------
+release "" --dry-run --version 0.16.0 --product-version 0.16.0 athenos webcomponents athenos-api athenos-web notification-service
+check_eq "own line: dry run exits 0" 0 "$rc"
+check "own line: shared --version applies to the others" grep -Eq '^  athenos +v0\.15\.0-1 +-> v0\.16\.0-1 ' "$out"
+check_out "own line: webcomponents gets its next build" "athenos-webcomponents  v0.7.6         -> v0.7.6-1"
+check_out "own line: noted" "note: athenos-webcomponents keeps its own version line: --version 0.16.0 does not apply"
+check_out "all product modules: depot line with optional --from" "depot import github --product athenos --version 0.16.0 --repo athenos@v0.16.0-1 --repo athenos-api@v0.16.0-1 --repo athenos-web@v0.16.0-1 --repo notification-service@v0.16.0-1 [--from athenos-<prev>]"
+check_not_out "depot line: no webcomponents" "--repo athenos-webcomponents@"
+release "" --dry-run --version 0.16.0 --version webcomponents=0.8.0 athenos webcomponents
+check_out "per module: webcomponents=0.8.0" "athenos-webcomponents  v0.7.6         -> v0.8.0-1"
+check "per module: the shared one for the rest" grep -Eq '^  athenos +v0\.15\.0-1 +-> v0\.16\.0-1 ' "$out"
+release "" --dry-run --version webcomponents=0.7.6 webcomponents
+check "per module: not greater refused" test "$rc" != 0
+wc_before=$(git -C "$wc" rev-parse HEAD)
+release "" --yes webcomponents
+check_eq "webcomponents: exit 0" 0 "$rc"
+check "webcomponents: tag v0.7.6-1" remote_has_tag athenos-webcomponents v0.7.6-1
+check_eq "webcomponents: versions" "0.7.6-1 0.7.6-1 0.7.6-1" "$(python3 -I -c 'import json,sys; print(" ".join(json.load(open(f))["version"] for f in sys.argv[1:]))' "$wc/package.json" "$wc/projects/athenos-webcomponents/package.json" "$wc/package-lock.json")"
+check_not_out "webcomponents: no depot line" "depot import github"
+check "webcomponents: one release commit" test "$(git --git-dir "$remotes/athenos-webcomponents.git" rev-parse 'refs/heads/0.1.0^')" = "$wc_before"
 
 # --- 14. fenrir with --yes; final --list -----------------------------------------------
 release "" --yes fenrir
 check_eq "fenrir --yes: exit 0" 0 "$rc"
 check "fenrir: tag v0.12.0-1" remote_has_tag fenrir v0.12.0-1
+check_out "fenrir: files changed include app.version" "Cargo.toml Cargo.lock config/default.toml"
+check "fenrir: app.version written" grep -qx 'app = { name = "fenrir", version = "0.12.0-1" }' "$root/fenrir/config/default.toml"
+check "fenrir: other versions in the config untouched" grep -qx 'version = "untouched"' "$root/fenrir/config/default.toml"
+check_not_out "fenrir: not in the athenos depot line" "--repo fenrir@"
 check_out "fenrir: deploy line uses the new host tag" "infra/beta/deploy.sh v0.12.0-1"
 release "" --list
 check "final --list: athenos v0.15.0-1" grep -Eq '^athenos +v0\.15\.0-1 +v0\.15\.0-2 ' "$out"
@@ -523,27 +604,38 @@ athenos-web modules/athenos-web 0.1.0
 athenos-webcomponents modules/athenos-webcomponents 0.1.0
 fenrir fenrir master
 LIST
-	grep '^pin ' "$here/../modules.conf" >>"$rconf"
+	grep -E '^(pin|own-version|product) ' "$here/../modules.conf" >>"$rconf"
 	conf=$rconf
+	main="athenos-contracts notification-service auth-service athenos athenos-api athenos-web fenrir"
 	release "" --list
 	cp "$out" "$real/list-before.txt"
-	release "" --dry-run --version 0.13.0 athenos-contracts notification-service auth-service athenos athenos-api athenos-web athenos-webcomponents fenrir
+	# shellcheck disable=SC2086 # the module list
+	release "" --dry-run --version 0.13.0 --product-version 0.13.0 $main
 	cp "$out" "$real/dry-run.txt"
-	release "" --yes --no-gates --version 0.13.0 athenos-contracts notification-service auth-service athenos athenos-api athenos-web athenos-webcomponents fenrir
+	# shellcheck disable=SC2086
+	release "" --yes --no-gates --version 0.13.0 --product-version 0.13.0 $main
 	cp "$out" "$real/release.txt"
 	check_eq "real: 0.13.0 release exits 0" 0 "$rc"
-	for name in athenos-contracts notification-service auth-service athenos athenos-api athenos-web athenos-webcomponents fenrir; do
+	for name in $main; do
 		git --git-dir "$real/remotes/$name.git" rev-parse -q --verify refs/tags/v0.13.0-1 >/dev/null && ok || bad "real: $name has no v0.13.0-1"
 	done
+	check_out "real: depot line" "depot import github --product athenos --version 0.13.0 --repo athenos@v0.13.0-1 --repo athenos-api@v0.13.0-1 --repo athenos-web@v0.13.0-1 --repo auth-service@v0.13.0-1 --repo notification-service@v0.13.0-1 [--from athenos-<prev>]"
+	check "real: fenrir app.version" grep -q '^app = { name = "fenrir", version = "0.13.0-1" }' "$real/root/fenrir/config/default.toml"
+	release "" --yes --no-gates webcomponents
+	cp "$out" "$real/release-webcomponents.txt"
+	check_eq "real: webcomponents release exits 0" 0 "$rc"
+	git --git-dir "$real/remotes/athenos-webcomponents.git" rev-parse -q --verify refs/tags/v0.7.6-1 >/dev/null && ok || bad "real: webcomponents has no v0.7.6-1"
 	release "" --list
 	cp "$out" "$real/list-after.txt"
-	for f in list-before dry-run release list-after; do
+	for f in list-before dry-run release release-webcomponents list-after; do
 		printf '\n----- real: %s -----\n' "$f"
 		cat "$real/$f.txt"
 	done
 	for name in notification-service auth-service athenos athenos-api athenos-web athenos-webcomponents fenrir; do
+		tag=v0.13.0-1
+		[ "$name" != athenos-webcomponents ] || tag=v0.7.6-1
 		printf -- '----- real: %s release commit -----\n' "$name"
-		git --git-dir "$real/remotes/$name.git" show --stat --format='%h %an <%ae> %s' refs/tags/v0.13.0-1 | sed -n '1,/^$/p;/|/p'
+		git --git-dir "$real/remotes/$name.git" show --stat --format='%h %an <%ae> %s' "refs/tags/$tag" | sed -n '1,/^$/p;/|/p'
 	done
 	if bash "$lint" "${lint_dirs[@]}" >"$out" 2>&1; then ok; else bad "real: workflow-lint: $(cat "$out")"; fi
 	cat "$out"

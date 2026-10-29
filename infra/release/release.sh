@@ -6,12 +6,22 @@
 #
 #   release.sh athenos athenos-web        each named module: next build number
 #   release.sh athenos --version 1.3.0    new version, the build restarts at 1
+#   release.sh webcomponents              its own version line: next build
 #   release.sh --list                     current version/build of every module
 #   release.sh --dry-run ...              show the plan, change nothing
 #
 # Options:
-#   --version X.Y.Z   new core version for every named module (→ X.Y.Z-1);
-#                     refused unless it is greater than the current core
+#   --version X.Y.Z   new core version (→ X.Y.Z-1) for every named module
+#                     except those with their own version line (`own-version`
+#                     in modules.conf: webcomponents), which get their next
+#                     build; refused unless greater than the module's core
+#   --version NAME=X.Y.Z
+#                     new core version for one named module only (repeatable;
+#                     the way to give webcomponents a new version)
+#   --product-version V
+#                     the product version (X.Y.Z or X.Y.Z-N) for the printed
+#                     `depot import github` line; without it the line says
+#                     <product-version>
 #   --no-gates        skip the quick local gates (fmt/clippy or lint)
 #   --dry-run, -n     preflight and summary only: no write, commit, tag or push
 #   --yes, -y         do not ask before pushing (for scripts; the summary is
@@ -19,9 +29,10 @@
 #   --list            version, next build and branch of every module
 #
 # Versions are X.Y.Z-N: N is a per-module build number that counts up with
-# every release. The current version is the repository's newest tag
+# every release, N >= 1. The current version is the repository's newest tag
 # vX.Y.Z-N, ordered by the core version and then N (numerically); a legacy
-# tag vX.Y.Z counts as build 0. Other tags are ignored.
+# tag vX.Y.Z counts as build 0. Other tags are ignored, with a note for
+# vX.Y.Z-0 and leading zeros (vX.Y.Z-03), which the depot refuses.
 #
 # Per module (in the order of modules.conf, which is the dependency order):
 #   1. the repository is clean (tracked files), on its branch and not
@@ -63,20 +74,34 @@ usage() {
 
 # --- arguments ----------------------------------------------------------------
 names=()
-version_arg=""
+version_arg=""       # shared --version X.Y.Z
+V_NAME=() V_VALUE=() # --version NAME=X.Y.Z
+product_version=""
 list=0
 dry_run=0
 run_gates=1
 assume_yes=0
 while [ $# -gt 0 ]; do
 	case $1 in
-	--version)
-		[ $# -ge 2 ] || die "--version needs X.Y.Z"
-		version_arg=$2
-		shift 2
+	--version | --product-version)
+		[ $# -ge 2 ] || die "$1 needs a version"
+		set -- "$1=$2" "${@:3}"
 		;;
 	--version=*)
-		version_arg=${1#--version=}
+		v=${1#--version=}
+		shift
+		case $v in
+		*=*)
+			V_NAME+=("${v%%=*}") V_VALUE+=("${v#*=}")
+			;;
+		*)
+			[ -z "$version_arg" ] || die "--version X.Y.Z given twice ($version_arg, $v); per module: --version NAME=X.Y.Z"
+			version_arg=$v
+			;;
+		esac
+		;;
+	--product-version=*)
+		product_version=${1#--product-version=}
 		shift
 		;;
 	--list) list=1 && shift ;;
@@ -94,8 +119,24 @@ while [ $# -gt 0 ]; do
 		;;
 	esac
 done
-if [ -n "$version_arg" ] && ! [[ $version_arg =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-	die "--version wants X.Y.Z (the build number is set by release.sh): $version_arg"
+core_re='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
+check_core_arg() { # VALUE WHAT: X.Y.Z, no build, no leading zeros
+	if [[ $1 =~ ^[0-9]+\.[0-9]+\.[0-9]+-.+$ ]]; then
+		die "$2 wants X.Y.Z without a build number: $1 (release.sh counts the build, starting at 1)"
+	fi
+	[[ $1 =~ ^$core_re$ ]] || die "$2 wants X.Y.Z (numbers without leading zeros): $1"
+}
+[ -z "$version_arg" ] || check_core_arg "$version_arg" "--version"
+for k in ${V_NAME[@]+"${!V_NAME[@]}"}; do
+	[ -n "${V_NAME[$k]}" ] || die "--version =${V_VALUE[$k]}: the module name is missing"
+	check_core_arg "${V_VALUE[$k]}" "--version ${V_NAME[$k]}="
+done
+if [ -n "$product_version" ]; then
+	if [[ $product_version =~ ^$core_re-0+$ ]]; then
+		die "--product-version $product_version: build 0 has no suffix, write ${product_version%-*} (builds are N >= 1)"
+	fi
+	[[ $product_version =~ ^$core_re(-[1-9][0-9]*)?$ ]] ||
+		die "--product-version wants X.Y.Z or X.Y.Z-N with N >= 1: $product_version"
 fi
 
 # --- module table -------------------------------------------------------------
@@ -103,6 +144,8 @@ fi
 M_NAME=() M_PATH=() M_BRANCH=() M_WRITERS=() M_PLATFORM=() M_GATE=()
 S_NAME=() S_PATH=()
 P_VAR=() P_REPO=()
+O_NAME=()                # own-version: modules with their own version line
+PR_NAME=() PR_MODULES=() # product: depot product and its modules
 root=""
 
 [ -f "$config" ] || die "module table not found: $config"
@@ -135,6 +178,16 @@ while IFS= read -r line || [ -n "$line" ]; do
 		[ $# -eq 2 ] || die "$config:$lineno: pin <VARIABLE> <repo name>"
 		P_VAR+=("$1") P_REPO+=("$2")
 		;;
+	own-version)
+		[ $# -eq 1 ] || die "$config:$lineno: own-version <module>"
+		O_NAME+=("$1")
+		;;
+	product)
+		[ $# -ge 2 ] || die "$config:$lineno: product <name> <module...>"
+		PR_NAME+=("$1")
+		shift
+		PR_MODULES+=("$*")
+		;;
 	*) die "$config:$lineno: unknown line '$kind'" ;;
 	esac
 done <"$config"
@@ -142,7 +195,7 @@ set --
 [ ${#M_NAME[@]} -gt 0 ] || die "$config lists no module"
 for w in $(printf '%s\n' "${M_WRITERS[@]}" | tr ',' '\n'); do
 	case $w in
-	- | cargo | fenrir-dev | npm | npm=?* | openapi=?* | ts-const=?*) ;;
+	- | cargo | fenrir-dev | npm | npm=?* | openapi=?* | ts-const=?* | app-version=?*) ;;
 	*) die "$config: unknown version writer '$w'" ;;
 	esac
 done
@@ -170,6 +223,50 @@ module_index() { # name → index, also "contracts" for athenos-contracts
 	return 1
 }
 
+is_module() { # exact table name
+	local i
+	for i in "${!M_NAME[@]}"; do [ "${M_NAME[$i]}" = "$1" ] && return 0; done
+	return 1
+}
+for o in ${O_NAME[@]+"${O_NAME[@]}"}; do
+	is_module "$o" || die "$config: own-version names '$o', which is no module line"
+done
+for p in ${PR_NAME[@]+"${!PR_NAME[@]}"}; do
+	for m in ${PR_MODULES[$p]}; do
+		is_module "$m" || die "$config: product ${PR_NAME[$p]} names '$m', which is no module line"
+	done
+done
+own_line() { # NAME → true when the module keeps its own version line
+	local o
+	for o in ${O_NAME[@]+"${O_NAME[@]}"}; do [ "$o" = "$1" ] && return 0; done
+	return 1
+}
+# --version NAME=X.Y.Z: canonical names; each must also be named as a module.
+for k in ${V_NAME[@]+"${!V_NAME[@]}"}; do
+	j=$(module_index "${V_NAME[$k]}") || die "--version ${V_NAME[$k]}=…: unknown module (known: ${M_NAME[*]})"
+	V_NAME[$k]=${M_NAME[$j]}
+	named=0
+	for n in ${names[@]+"${names[@]}"}; do
+		[ "$(module_index "$n" || true)" = "$j" ] && named=1
+	done
+	[ "$named" = 1 ] || die "--version ${V_NAME[$k]}=${V_VALUE[$k]}: name ${V_NAME[$k]} as a module too"
+	for l in "${!V_NAME[@]}"; do
+		if [ "$l" -lt "$k" ] && [ "${V_NAME[$l]}" = "${V_NAME[$k]}" ]; then
+			die "--version ${V_NAME[$k]}=… given twice"
+		fi
+	done
+done
+module_version_arg() { # NAME → its --version NAME=X.Y.Z, or nothing
+	local k
+	for k in ${V_NAME[@]+"${!V_NAME[@]}"}; do
+		if [ "${V_NAME[$k]}" = "$1" ]; then
+			echo "${V_VALUE[$k]}"
+			return 0
+		fi
+	done
+	return 0
+}
+
 repo_dir_of() { # repo name (module or sibling) → directory, or nothing
 	local i
 	for i in "${!M_NAME[@]}"; do
@@ -188,13 +285,19 @@ repo_dir_of() { # repo name (module or sibling) → directory, or nothing
 }
 
 # --- versions -----------------------------------------------------------------
-# newest_tag DIR → "MAJ MIN PAT BUILD TAG" of the newest vX.Y.Z[-N], or nothing.
+# newest_tag DIR → "MAJ MIN PAT BUILD TAG" of the newest vX.Y.Z[-N] (N >= 1,
+# no leading zeros), or nothing.
 newest_tag() {
 	git -C "$1" tag -l 'v*' | while IFS= read -r t; do
-		if [[ $t =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)(-([0-9]+))?$ ]]; then
+		if [[ $t =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-([1-9][0-9]*))?$ ]]; then
 			printf '%d %d %d %d %s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[5]:-0}" "$t"
 		fi
 	done | sort -k1,1n -k2,2n -k3,3n -k4,4n | tail -n 1
+}
+
+# odd_build_tags DIR → tags that look like builds but are none (-0, -03)
+odd_build_tags() {
+	git -C "$1" tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-0[0-9]*$' || true
 }
 
 # core_cmp A B (X.Y.Z each) → prints -1, 0 or 1
@@ -224,6 +327,8 @@ core_cmp() {
 #   npm             package.json "version" + package-lock.json (root and packages."")
 #   npm=PATH        another package.json
 #   ts-const=PATH   VERSION: '...' in a TypeScript constants file
+#   app-version=PATH  app.version of a Fenrir config file
+#                   (app = { …, version = "…" } or version in [app])
 #   -               nothing (the version lives in the tags only)
 
 toml_section_version() { # SECTION FILE: first version = "..." in [SECTION]
@@ -261,6 +366,14 @@ ts_const_version() { # FILE
 		print;
 		END { exit($done ? 0 : 3) }' "$1"
 }
+app_version() { # FILE
+	NEWV=$new_version perl -i -ne '
+		if (/^\s*\[/) { $in = (/^\s*\[app\]\s*$/) ? 1 : 0 }
+		if (!$done && /^\s*app\s*=\s*\{/ && s/(\bversion\s*=\s*")[^"]*(")/$1$ENV{NEWV}$2/) { $done = 1 }
+		if (!$done && $in && s/^(\s*version\s*=\s*")[^"]*(")/$1$ENV{NEWV}$2/) { $done = 1 }
+		print;
+		END { exit($done ? 0 : 3) }' "$1"
+}
 crate_name() { # Cargo.toml → [package] name
 	perl -ne 'if (/^\s*\[/) { $in = /^\s*\[package\]\s*$/ } if ($in && /^name\s*=\s*"([^"]+)"/) { print "$1\n"; exit }' "$1"
 }
@@ -277,6 +390,7 @@ writer_files() {
 		npm=*) printf '%s\tjson\n' "${w#npm=}" ;;
 		openapi=*) printf '%s\topenapi\n' "${w#openapi=}" ;;
 		ts-const=*) printf '%s\tts-const\n' "${w#ts-const=}" ;;
+		app-version=*) printf '%s\tapp-version\n' "${w#app-version=}" ;;
 		*) die "unknown version writer '$w' in $config" ;;
 		esac
 	done
@@ -299,6 +413,7 @@ apply_writer() {
 	npm-lock) npm_lock_version "$target" || rc=$? ;;
 	openapi) openapi_version "$target" || rc=$? ;;
 	ts-const) ts_const_version "$target" || rc=$? ;;
+	app-version) app_version "$target" || rc=$? ;;
 	esac
 	[ "$rc" = 0 ] || die "$dir/$rel: found no version to replace ($action)"
 }
@@ -400,6 +515,7 @@ done
 for n in "${names[@]}"; do module_index "$n" >/dev/null || die "unknown module '$n' (known: ${M_NAME[*]})"; done
 
 problems=()
+notes=()
 for k in "${!R_IDX[@]}"; do
 	i=${R_IDX[$k]}
 	name=${M_NAME[$i]} branch=${M_BRANCH[$i]}
@@ -433,15 +549,29 @@ $(printf '%s\n' "$dirty" | sed 's/^/      /')")
 	else
 		old_core="" old_build=0 old_tag="-"
 	fi
-	if [ -n "$version_arg" ]; then
-		if [ -n "$old_core" ] && [ "$(core_cmp "$version_arg" "$old_core")" != 1 ]; then
-			die "$name: --version $version_arg is not greater than the current $old_core ($old_tag)"
+	for t in $(odd_build_tags "$dir"); do
+		notes+=("$name: tag $t is ignored (builds are -N with N >= 1, no leading zero)")
+	done
+	# Which version applies: --version NAME=…, else the shared --version
+	# unless the module keeps its own line, else the next build.
+	want=$(module_version_arg "$name")
+	if [ -z "$want" ] && [ -n "$version_arg" ]; then
+		if own_line "$name"; then
+			notes+=("$name keeps its own version line: --version $version_arg does not apply, next build (a new version: --version $name=X.Y.Z)")
+		else
+			want=$version_arg
 		fi
-		new_version="$version_arg-1"
+	fi
+	if [ -n "$want" ]; then
+		if [ -n "$old_core" ] && [ "$(core_cmp "$want" "$old_core")" != 1 ]; then
+			die "$name: --version $want is not greater than the current $old_core ($old_tag)"
+		fi
+		new_version="$want-1"
 	else
 		[ -n "$old_core" ] || die "$name: no release tag vX.Y.Z[-N] yet; pass --version X.Y.Z"
 		new_version="$old_core-$((old_build + 1))"
 	fi
+	[[ $new_version =~ ^$core_re-[1-9][0-9]*$ ]] || die "$name: $new_version is not X.Y.Z-N with N >= 1"
 	# The files must not already be ahead of the tags (e.g. 0.13.0 written by
 	# hand, newest tag v0.11.0): a next build would go back to 0.11.0-1.
 	fv=$(file_version "$dir" "${M_WRITERS[$i]}")
@@ -533,7 +663,38 @@ print_summary() { # TITLE
 		info ""
 		printf 'warning: %s\n' "${pin_warnings[@]}"
 	fi
+	if [ ${#notes[@]} -gt 0 ]; then
+		info ""
+		printf 'note: %s\n' "${notes[@]}"
+	fi
 	info ""
+}
+
+# depot_lines: one `depot import github` line per product with a module in
+# this run (the CLI of fenrir-depot d4b/d4c, crates/depot-cli/src/import.rs).
+# Only the product's modules go in; contracts, webcomponents and the host
+# are no part of it.
+depot_lines() {
+	local p m k slug repos missing from
+	for p in ${PR_NAME[@]+"${!PR_NAME[@]}"}; do
+		repos="" missing=""
+		for m in ${PR_MODULES[$p]}; do
+			if k=$(in_run "$m"); then
+				slug=$(github_slug "${R_DIR[$k]}")
+				repos="$repos --repo ${slug:-$m}@v${R_NEW[$k]}"
+			else
+				missing="$missing $m"
+			fi
+		done
+		[ -n "$repos" ] || continue
+		if [ -z "$missing" ]; then
+			from="[--from ${PR_NAME[$p]}-<prev>]"
+		else
+			from="--from ${PR_NAME[$p]}-<prev>"
+		fi
+		info "  depot import github --product ${PR_NAME[$p]} --version ${product_version:-<product-version>}$repos $from"
+		[ -z "$missing" ] || info "  (not in this run:$missing; --from keeps their rules from the previous distribution)"
+	done
 }
 
 if [ "$dry_run" = 1 ]; then
@@ -544,6 +705,12 @@ if [ "$dry_run" = 1 ]; then
 		[ "$run_gates" = 1 ] && [ "$gate" != "-" ] || gate="(no gates)"
 		info "  ${M_NAME[$i]}: gates: $gate; push origin ${M_BRANCH[$i]} v${R_NEW[$k]}"
 	done
+	depot_plan=$(depot_lines)
+	if [ -n "$depot_plan" ]; then
+		info ""
+		info "After the push and green pipelines, into the depot:"
+		info "$depot_plan"
+	fi
 	rm -rf -- "$work"
 	exit 0
 fi
@@ -644,7 +811,6 @@ done
 
 info ""
 info "The tags start the release pipelines:"
-depot=()
 for k in "${!R_IDX[@]}"; do
 	i=${R_IDX[$k]}
 	slug=$(github_slug "${R_DIR[$k]}")
@@ -654,14 +820,13 @@ for k in "${!R_IDX[@]}"; do
 		printf '  %-22s https://github.com/%s/actions/workflows/release.yml\n' "" "$slug"
 	else
 		printf '  %-22s %s (origin is not on GitHub: %s)\n' "${M_NAME[$i]}" "$tag" "$(git -C "${R_DIR[$k]}" remote get-url origin)"
-		slug="${M_NAME[$i]}"
 	fi
-	[ "${M_PLATFORM[$i]}" = "-" ] || depot+=("$slug@$tag")
 done
-if [ ${#depot[@]} -gt 0 ]; then
+depot_plan=$(depot_lines)
+if [ -n "$depot_plan" ]; then
 	info ""
 	info "Once the pipelines are green, into the depot:"
-	info "  depot import github ${depot[*]}"
+	info "$depot_plan"
 fi
 # The beta server: deploy.sh takes one tag per component.
 deploy_env=()

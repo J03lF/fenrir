@@ -1,5 +1,5 @@
 # cargo-deny configuration for the Fenrir host (W9A-09).
-# Run: cargo deny --locked check   (CI: .github/workflows/ci.yml)
+# Run: cargo deny --locked check   (release gates: .github/workflows/release.yml)
 # Docs: https://embarkstudios.github.io/cargo-deny/
 
 [graph]

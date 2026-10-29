@@ -1,16 +1,23 @@
-# Linux release bundle of the Fenrir host for the Athenos beta server
-# (infra/beta/RUNBOOK.md). Packaging runs only after the quality gates of
-# ci.yml. A tag v* publishes fenrir-<version>-x86_64-unknown-linux-gnu.tar.gz
-# and SHA256SUMS to the GitHub release of that tag (infra/beta/deploy.sh
-# downloads them); a manual run only keeps them as workflow artifacts.
+# The only pipeline of the Fenrir host: it runs on a tag v* (pushed by
+# infra/release/release.sh) or by hand, never on an ordinary push, pull
+# request or schedule (GitHub Actions minutes are scarce).
 #
-# Reproducible: pinned toolchain, --locked, no build cache, CARGO_INCREMENTAL=0,
-# SOURCE_DATE_EPOCH = commit time, --remap-path-prefix for every local path,
-# module-kit, fenrir-depot and the toolchain pinned by ci.yml (read from it, one place),
-# tarball with sorted entries, fixed mtime and owner (infra/beta/ci/package-host.sh).
+#   gates    rustfmt, clippy and tests with all features (the Postgres pool
+#            tests against a throwaway server), the same without the depot
+#            feature, cargo-deny (advisories, bans, licenses, sources) and
+#            the script checks of infra/beta and infra/release
+#            (infra/beta/tests/check.sh).
+#   release  the host bundle for linux-x86_64,
+#            fenrir-<version>-linux-x86_64.tar.gz (infra/beta/ci/package-host.sh:
+#            one top directory fenrir/ with the three binaries, config,
+#            migrations, infra/beta, static/), and SHA256SUMS. A tag
+#            publishes both to its GitHub release (infra/beta/deploy.sh takes
+#            them from there); a manual run keeps them as workflow artifacts.
 #
-# Replaces the former "Promote" placeholder, which shipped bin/.fenrir-profile
-# (developer settings) inside the bundle.
+# Reproducible: pinned toolchain, module-kit and fenrir-depot (env below, the
+# one place to bump them), --locked, no build cache in the release job,
+# CARGO_INCREMENTAL=0, SOURCE_DATE_EPOCH = commit time, --remap-path-prefix
+# for every local path, tarball with sorted entries, fixed mtime and owner.
 name: Release
 
 on:
@@ -28,69 +35,145 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
+  # Pinned so a new stable release cannot turn a release red via `-D warnings`.
+  RUST_TOOLCHAIN: "1.89.0"
+  CARGO_DENY_VERSION: "0.20.2"
+  # module-kit revision the host builds against (Cargo.toml path-patches it
+  # to ../module-kit). Bump together with any change that needs a newer commit.
+  MODULE_KIT_SHA: 67010747576550b51037eb81ad5bc8b775206a28
+  # fenrir-depot revision (private repo; Cargo.toml path-patches
+  # depot-protocol to ../fenrir-depot). Cargo resolves that patch even with
+  # the `depot` feature off, so every build needs the checkout.
+  DEPOT_SHA: c80f98860eb8cda9f1f94b1f7d11cbc040f7d775
+  PLATFORM: linux-x86_64
   TARGET_TRIPLE: x86_64-unknown-linux-gnu
 
 jobs:
-  quality:
-    name: Quality Gate
-    uses: ./.github/workflows/ci.yml
-
-  bundle:
-    name: Linux bundle (x86_64)
-    needs: quality
+  gates:
+    name: fmt, clippy, test, cargo-deny, infra checks
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    permissions:
-      contents: write # gh release upload, tags only
     defaults:
       run:
         working-directory: fenrir
+    # Throwaway server for tests/unit/infra/db/postgres_pool_tests.rs
+    # (FENRIR_PG_TEST_URI_FILE). Pinned by digest: postgres 16.14. Trust auth
+    # on a service only this job can reach.
+    services:
+      postgres:
+        image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        env:
+          POSTGRES_USER: fenrir_test
+          POSTGRES_DB: fenrir_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fenrir_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     steps:
-      # Same layout as ci.yml: fenrir/ and the path-patched ../module-kit
-      # and ../fenrir-depot.
+      - name: SIBLING_REPOS_TOKEN is set
+        working-directory: .
+        env:
+          TOKEN: ${{ secrets.SIBLING_REPOS_TOKEN }}
+        run: '[ -n "$TOKEN" ] || { echo "::error::secret SIBLING_REPOS_TOKEN is missing (read access to module-kit and fenrir-depot)"; exit 1; }'
+      # The local layout: fenrir/ and the path-patched ../module-kit and
+      # ../fenrir-depot.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: fenrir
           persist-credentials: false
-      - name: Pins from ci.yml
-        id: pins
-        run: |
-          pin() { sed -n "s/^  $1: *\"\{0,1\}\([^\" #]*\)\"\{0,1\}.*/\1/p" .github/workflows/ci.yml | head -n 1; }
-          kit=$(pin MODULE_KIT_SHA); depot=$(pin DEPOT_SHA); toolchain=$(pin RUST_TOOLCHAIN)
-          [[ $kit =~ ^[0-9a-f]{40}$ ]] && [[ $depot =~ ^[0-9a-f]{40}$ ]] && [[ $toolchain =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
-            { echo "::error::could not read MODULE_KIT_SHA, DEPOT_SHA, RUST_TOOLCHAIN from ci.yml"; exit 1; }
-          echo "module_kit=$kit" >> "$GITHUB_OUTPUT"
-          echo "depot=$depot" >> "$GITHUB_OUTPUT"
-          echo "toolchain=$toolchain" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: J03lF/module-kit
-          ref: ${{ steps.pins.outputs.module_kit }}
+          ref: ${{ env.MODULE_KIT_SHA }}
           path: module-kit
-          token: ${{ secrets.SIBLING_REPOS_TOKEN || github.token }}
+          token: ${{ secrets.SIBLING_REPOS_TOKEN }}
           persist-credentials: false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: fenrir-modules/fenrir-depot
-          ref: ${{ steps.pins.outputs.depot }}
+          ref: ${{ env.DEPOT_SHA }}
           path: fenrir-depot
           token: ${{ secrets.SIBLING_REPOS_TOKEN }}
           persist-credentials: false
-      - name: Install Rust ${{ steps.pins.outputs.toolchain }}
-        env:
-          TOOLCHAIN: ${{ steps.pins.outputs.toolchain }}
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN }}
         run: |
-          rustup toolchain install "$TOOLCHAIN" --profile minimal --target "$TARGET_TRIPLE"
-          rustup default "$TOOLCHAIN"
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy
+          rustup default "$RUST_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: fenrir
+      - name: infra/beta/tests/check.sh (beta scripts, release.sh in a sandbox)
+        run: bash infra/beta/tests/check.sh
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: tests (Postgres pool tests included)
+        run: |
+          uri_file="$RUNNER_TEMP/fenrir-pg-uri"
+          printf 'postgresql://fenrir_test@127.0.0.1:5432/fenrir_test' > "$uri_file"
+          chmod 600 "$uri_file"
+          FENRIR_PG_TEST_URI_FILE="$uri_file" cargo test --workspace --all-features --locked
+      - name: without the depot feature (build, clippy, tests)
+        run: |
+          cargo clippy --workspace --all-targets --no-default-features --locked -- -D warnings
+          cargo test --workspace --no-default-features --locked
+      - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
+        with:
+          tool: cargo-deny@${{ env.CARGO_DENY_VERSION }}
+      - name: cargo-deny (advisories, bans, licenses, sources)
+        run: cargo deny --locked check
+
+  release:
+    name: Host bundle for linux-x86_64
+    needs: gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: write # gh release create/upload, only in the publish step
+    defaults:
+      run:
+        working-directory: fenrir
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: fenrir
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: J03lF/module-kit
+          ref: ${{ env.MODULE_KIT_SHA }}
+          path: module-kit
+          token: ${{ secrets.SIBLING_REPOS_TOKEN }}
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: fenrir-modules/fenrir-depot
+          ref: ${{ env.DEPOT_SHA }}
+          path: fenrir-depot
+          token: ${{ secrets.SIBLING_REPOS_TOKEN }}
+          persist-credentials: false
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN }}
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target "$TARGET_TRIPLE"
+          rustup default "$RUST_TOOLCHAIN"
       - name: Version
         id: version
         run: |
           crate_version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             version=${GITHUB_REF_NAME#v}
+            # release.sh writes the version before it tags.
+            [ "$version" = "$crate_version" ] ||
+              { echo "::error::tag $GITHUB_REF_NAME, but Cargo.toml says $crate_version (release with infra/release/release.sh)"; exit 1; }
           else
             version="${crate_version}+g$(git rev-parse --short=12 HEAD)"
           fi
+          [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9]+)?(\+g[0-9a-f]+)?$ ]] || { echo "::error::not X.Y.Z-N: $version"; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "sde=$(git log -1 --format=%ct)" >> "$GITHUB_OUTPUT"
           echo "fenrir $version (crate $crate_version)"
@@ -103,13 +186,14 @@ jobs:
       - name: Package
         env:
           SOURCE_DATE_EPOCH: ${{ steps.version.outputs.sde }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          bash infra/beta/ci/package-host.sh "target/$TARGET_TRIPLE/release" "${{ steps.version.outputs.version }}" dist
+          bash infra/beta/ci/package-host.sh "target/$TARGET_TRIPLE/release" "$VERSION" dist
           echo "Shared libraries the host needs on the server:"
           readelf -d "target/$TARGET_TRIPLE/release/fenrir" | grep NEEDED || true
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: fenrir-${{ steps.version.outputs.version }}-${{ env.TARGET_TRIPLE }}
+          name: fenrir-${{ steps.version.outputs.version }}-${{ env.PLATFORM }}
           path: |
             fenrir/dist/*.tar.gz
             fenrir/dist/SHA256SUMS
@@ -122,12 +206,15 @@ jobs:
         run: |
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "fenrir $TAG" \
-              --notes "Linux bundle of the Fenrir host for the Athenos beta server. Verify with: sha256sum -c SHA256SUMS"
+              --notes "Host bundle of Fenrir for linux-x86_64. Verify with: sha256sum -c SHA256SUMS" ||
+            gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
           gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber dist/*.tar.gz dist/SHA256SUMS
       - name: Summary
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           {
-            echo "## fenrir ${{ steps.version.outputs.version }}"
+            echo "## fenrir $VERSION"
             echo '```'
             cat dist/SHA256SUMS
             echo '```'

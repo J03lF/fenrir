@@ -872,14 +872,15 @@ tests/
 └── e2e/                CLI + DB runtime end-to-end flows
 ```
 
-### CI Pipeline
+### Release pipeline
+
+There is no CI on pushes. The only workflow, `.github/workflows/release.yml`,
+runs on a tag `v*` (set by `infra/release/release.sh`) or by hand:
 
 ```yaml
-# .github/workflows/ci.yml
 jobs:
-  lint:    cargo fmt --check && cargo clippy -- -D warnings
-  test:    cargo test --workspace --all-features
-  package: cargo build --release → tarball (fenrir + config/)
+  gates:   fmt, clippy, tests (all features and without depot), cargo-deny, infra/beta/tests/check.sh
+  release: cargo build --release → fenrir-<version>-linux-x86_64.tar.gz + SHA256SUMS on the GitHub release
 ```
 
 ---

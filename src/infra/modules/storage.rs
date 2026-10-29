@@ -523,7 +523,17 @@ fn flatten_module_root(destination: &std::path::Path) -> Result<(), ModuleStorag
         })?;
 
         if file_type.is_dir() {
-            let inner = entry.path();
+            // Move the top directory aside first: a bundle `athenos/` that
+            // holds the binary `athenos/athenos` would otherwise collide
+            // with itself when the binary moves up.
+            let inner = destination.join(".fenrir-flatten");
+            std::fs::rename(entry.path(), &inner).map_err(|err| {
+                ModuleStorageError::Io(messages::infra::modules::storage::relocate_entry_failed(
+                    entry.path().display(),
+                    inner.display(),
+                    err,
+                ))
+            })?;
             for child in std::fs::read_dir(&inner).map_err(|err| {
                 ModuleStorageError::Io(messages::infra::modules::storage::read_nested_dir_failed(
                     inner.display(),
@@ -565,4 +575,35 @@ fn flatten_module_root(destination: &std::path::Path) -> Result<(), ModuleStorag
 #[derive(Debug, Serialize, Deserialize)]
 struct ModuleInstallMetadata {
     source: ModuleInstallSource,
+}
+
+#[cfg(test)]
+mod flatten_tests {
+    use super::extract_module_archive;
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+
+    #[tokio::test]
+    async fn a_top_directory_named_like_its_binary_is_flattened() {
+        let mut tar = tar::Builder::new(GzEncoder::new(Vec::new(), Compression::fast()));
+        for (path, data) in [
+            ("athenos/athenos", b"binary".as_slice()),
+            ("athenos/.fenrir/runtime.toml", b"[migrations]\n".as_slice()),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            tar.append_data(&mut header, path, data).unwrap();
+        }
+        let bytes = tar.into_inner().unwrap().finish().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        extract_module_archive(dir.path(), &bytes).await.unwrap();
+        assert_eq!(
+            std::fs::read(dir.path().join("athenos")).unwrap(),
+            b"binary"
+        );
+        assert!(dir.path().join(".fenrir/runtime.toml").is_file());
+        assert!(!dir.path().join(".fenrir-flatten").exists());
+    }
 }

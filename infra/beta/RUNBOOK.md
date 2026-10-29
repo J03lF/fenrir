@@ -315,18 +315,20 @@ Der Token liegt dann unter `~/Documents/personal/modules/runtime/secrets/athenos
 ## 5. Deploy
 
 ### 5.1 Neue Version ausrollen
-1. In jedem Repo ist der Stand gepusht. Den gleichen Tag setzt du in allen sechs Repos (fenrir, athenos, athenos-api, auth-service, notification-service, athenos-web):
+1. Die Tags setzt `infra/release/release.sh` (siehe `infra/release/README.md`), je Modul `vX.Y.Z-N`:
    ```bash
-   git tag -a v0.11.0 -m v0.11.0 && git push origin v0.11.0
+   infra/release/release.sh athenos athenos-api athenos-web        # nächste Build-Nummer
+   infra/release/release.sh athenos --version 0.14.0               # neue Version → v0.14.0-1
    ```
-   - Die CI baut das Linux-Bündel erst nach den Qualitäts-Toren.
-   - Sie legt `<modul>-<version>-x86_64-unknown-linux-gnu.tar.gz` (Web: `athenos-web-<version>-static.tar.gz`) und `SHA256SUMS` an den GitHub-Release.
-   - Hat ein Repo keinen neuen Tag, setzt du in `deploy.env` `TAG_<KOMPONENTE>=v…` (z. B. `TAG_AUTH_SERVICE=v0.1.0`).
-2. Wenn alle CI-Läufe grün sind:
+   - Der Tag startet `.github/workflows/release.yml` des Repos; sonst läuft auf GitHub nichts.
+   - Die Pipeline baut das Bündel erst nach den Toren (fmt, clippy, Tests, cargo-deny bzw. Lint, Tests, npm audit).
+   - Sie legt `<modul>-<version>-linux-x86_64.tar.gz` (Web: `athenos-web-<version>-any.tar.gz`, Host: `fenrir-<version>-linux-x86_64.tar.gz`) und `SHA256SUMS` an den GitHub-Release.
+   - Die Build-Nummern laufen je Modul, die Tags unterscheiden sich also. `release.sh` gibt am Ende die passende `deploy.sh`-Zeile mit `TAG_<KOMPONENTE>=…` aus; dauerhafte Abweichungen gehören in `deploy.env` (z. B. `TAG_AUTH_SERVICE=v0.13.0-2`).
+2. Wenn alle Release-Läufe grün sind:
    ```bash
-   infra/beta/deploy.sh v0.11.0
+   TAG_ATHENOS=v0.13.0-2 infra/beta/deploy.sh v0.13.0-1
    ```
-3. Ohne Tag geht es auch: einen manuellen CI-Lauf starten („Run workflow“), die Artefakte herunterladen und `infra/beta/deploy.sh ~/Downloads/athenos-artefakte/` aufrufen. Der Ordner hält die sechs Tarballs mit ihren `SHA256SUMS`, flach oder je Komponente ein Unterordner. `--dry-run` prüft nur.
+3. Ohne Tag geht es auch: einen manuellen Lauf von „Release“ starten („Run workflow“), die Artefakte herunterladen und `infra/beta/deploy.sh ~/Downloads/athenos-artefakte/` aufrufen. Der Ordner hält die sechs Tarballs mit ihren `SHA256SUMS`, flach oder je Komponente ein Unterordner. `--dry-run` prüft nur.
 
 **Was `deploy.sh` macht:**
 1. alle `SHA256SUMS` lokal prüfen;

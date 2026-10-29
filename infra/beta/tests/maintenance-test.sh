@@ -213,7 +213,7 @@ check "and changes nothing" test "$(readlink "$root/current")" = releases/r1
 art="$tmp/artifacts"
 mkdir -p "$art"
 for comp in fenrir athenos athenos-api auth-service notification-service athenos-web; do
-	(cd "$tmp" && mkdir -p "pkg/$comp" && echo "$comp" >"pkg/$comp/x" && tar -czf "$art/$comp-0.0.1-x86_64-unknown-linux-gnu.tar.gz" -C pkg "$comp")
+	(cd "$tmp" && mkdir -p "pkg/$comp" && echo "$comp" >"pkg/$comp/x" && tar -czf "$art/$comp-0.0.1-1-linux-x86_64.tar.gz" -C pkg "$comp")
 done
 (cd "$art" && for f in *.tar.gz; do printf '%s  %s\n' "$(shasum -a 256 "$f" 2>/dev/null | cut -d' ' -f1 || sha256sum "$f" | cut -d' ' -f1)" "$f"; done >SHA256SUMS)
 fake="$tmp/fake"

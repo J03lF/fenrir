@@ -107,6 +107,7 @@ else
 		log "downloading $comp $comp_tag from $repo"
 		mkdir -p "$fetched/$comp"
 		gh release download "$comp_tag" --repo "$repo" --dir "$fetched/$comp" \
+			--pattern '*-linux-x86_64.tar.gz' --pattern '*-any.tar.gz' \
 			--pattern '*-x86_64-unknown-linux-gnu.tar.gz' --pattern '*-static.tar.gz' --pattern 'SHA256SUMS' ||
 			die "download of $comp $comp_tag from $repo failed"
 	done

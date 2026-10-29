@@ -5,8 +5,10 @@
 #   infra/beta/ci/package-host.sh <release-bin-dir> <version> <out-dir>
 #
 # Output in <out-dir>:
-#   fenrir-<version>-x86_64-unknown-linux-gnu.tar.gz   one top directory fenrir/
-#   SHA256SUMS                                          of the tarball
+#   fenrir-<version>-<platform>.tar.gz   one top directory fenrir/
+#   SHA256SUMS                            of the tarball
+# <platform> is $PLATFORM, default linux-x86_64 (the depot's platform name;
+# the binaries are built for $TARGET_TRIPLE, default x86_64-unknown-linux-gnu).
 # The tarball holds the three binaries (fenrir, fenrir-module-kit,
 # fenrirctl), config/default.toml + prod.toml + beta.toml (from
 # infra/beta/config), config/modules/keyring.json (the empty keyring of
@@ -22,6 +24,7 @@ version=${2:?version}
 out=${3:?out dir}
 : "${SOURCE_DATE_EPOCH:?SOURCE_DATE_EPOCH must be set}"
 : "${TARGET_TRIPLE:=x86_64-unknown-linux-gnu}"
+: "${PLATFORM:=linux-x86_64}"
 [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$ ]] || {
 	echo "version must be semver: $version" >&2
 	exit 1
@@ -63,15 +66,15 @@ done
 
 commit=$(git rev-parse HEAD)
 jq -n --arg component fenrir --arg version "$version" --arg commit "$commit" \
-	--arg target "$TARGET_TRIPLE" --arg rustc "$(rustc -V)" --arg cargo "$(cargo -V)" \
+	--arg target "$TARGET_TRIPLE" --arg platform "$PLATFORM" --arg rustc "$(rustc -V)" --arg cargo "$(cargo -V)" \
 	--argjson sde "$SOURCE_DATE_EPOCH" --arg lock "$(sha256sum Cargo.lock | cut -d' ' -f1)" \
-	'{component: $component, version: $version, commit: $commit, target: $target,
+	'{component: $component, version: $version, commit: $commit, target: $target, platform: $platform,
 	  rustc: $rustc, cargo: $cargo, source_date_epoch: $sde, cargo_lock_sha256: $lock}' >"$pkg/BUILDINFO.json"
 
 (cd -- "$pkg" && find . -type f ! -name FILES.SHA256SUMS -printf '%P\0' | LC_ALL=C sort -z |
 	xargs -0 sha256sum >FILES.SHA256SUMS)
 
-archive="fenrir-$version-$TARGET_TRIPLE.tar.gz"
+archive="fenrir-$version-$PLATFORM.tar.gz"
 tar --sort=name --format=gnu --mtime="@$SOURCE_DATE_EPOCH" --owner=0 --group=0 --numeric-owner \
 	--mode='u+rw,go-w' -C "$stage" -cf - fenrir | gzip -n -9 >"$out/$archive"
 (cd -- "$out" && sha256sum -- "$archive" >SHA256SUMS)

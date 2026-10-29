@@ -97,22 +97,6 @@ pub fn version_invalid(err: impl fmt::Display) -> String {
     format!("Invalid version string: {err}")
 }
 
-pub fn compatibility_query_failed(err: impl fmt::Display) -> String {
-    format!("Failed to query compatibility tree: {err}")
-}
-
-pub fn compatibility_status_failed(status: impl fmt::Display) -> String {
-    format!("Compatibility API returned status: {status}")
-}
-
-pub fn compatibility_response_invalid(err: impl fmt::Display) -> String {
-    format!("Invalid compatibility response: {err}")
-}
-
-pub fn compatibility_tree_invalid(err: impl fmt::Display) -> String {
-    format!("Invalid compatibility tree format: {err}")
-}
-
 pub fn module_id_invalid(err: impl fmt::Display) -> String {
     format!("invalid module id: {err}")
 }

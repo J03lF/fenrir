@@ -5,7 +5,6 @@ use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use reqwest::{Certificate, Identity, Url};
 use semver::{Version, VersionReq};
 use serde::Deserialize;
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -26,18 +25,6 @@ use crate::utils::messages;
 
 const DEFAULT_CONTENT_TYPE: &str = "application/gzip";
 const USER_AGENT_VALUE: &str = "fenrir-runtime/registry-client";
-
-#[derive(Debug, Deserialize)]
-struct CompatibilityTreeResponse {
-    tree: Value,
-}
-
-#[derive(Debug, Deserialize)]
-struct CompatibilityNodeDto {
-    id: String,
-    #[serde(default)]
-    children: Vec<CompatibilityNodeDto>,
-}
 
 #[derive(Debug, Clone)]
 pub struct HttpModuleRegistry {
@@ -505,77 +492,9 @@ impl ModuleRegistryPort for HttpModuleRegistry {
         self.download_with_refresh(manifest, true, progress).await
     }
 
-    async fn distribution_targets(
-        &self,
-        fenrir_version: &str,
-    ) -> Result<Vec<DistributionTarget>, ModuleRegistryError> {
-        let base = self.base_url.trim_end_matches('/');
-        let url = format!(
-            "{}/v1/compatibility/{}",
-            base,
-            urlencoding::encode(fenrir_version)
-        );
-
-        let response = self.client.get(&url).send().await.map_err(|err| {
-            ModuleRegistryError::Unavailable(
-                messages::infra::modules::registry::compatibility_query_failed(err),
-            )
-        })?;
-
-        if response.status().as_u16() == 404 {
-            return Ok(Vec::new());
-        }
-
-        if !response.status().is_success() {
-            return Err(ModuleRegistryError::Unavailable(
-                messages::infra::modules::registry::compatibility_status_failed(response.status()),
-            ));
-        }
-
-        let payload: CompatibilityTreeResponse = response.json().await.map_err(|err| {
-            ModuleRegistryError::Protocol(
-                messages::infra::modules::registry::compatibility_response_invalid(err),
-            )
-        })?;
-
-        if payload.tree.is_null() {
-            return Ok(Vec::new());
-        }
-
-        let root: CompatibilityNodeDto = serde_json::from_value(payload.tree).map_err(|err| {
-            ModuleRegistryError::Protocol(
-                messages::infra::modules::registry::compatibility_tree_invalid(err),
-            )
-        })?;
-
-        let mut targets = HashMap::new();
-        collect_distribution_targets(&root, &mut targets);
-
-        Ok(targets
-            .into_iter()
-            .map(|(module_id, version)| DistributionTarget { module_id, version })
-            .collect())
-    }
-}
-
-fn collect_distribution_targets(
-    node: &CompatibilityNodeDto,
-    acc: &mut HashMap<ModuleId, ModuleVersion>,
-) {
-    if let Some((module_id, version)) = parse_module_from_node(node) {
-        acc.entry(module_id).or_insert(version);
-    }
-    for child in &node.children {
-        collect_distribution_targets(child, acc);
-    }
-}
-
-fn parse_module_from_node(node: &CompatibilityNodeDto) -> Option<(ModuleId, ModuleVersion)> {
-    let base_id = node.id.split(':').next().unwrap_or(&node.id);
-    let (module_raw, version_raw) = base_id.split_once('@')?;
-    let module = ModuleId::new(module_raw).ok()?;
-    let version = ModuleVersion::parse(version_raw).ok()?;
-    Some((module, version))
+    // No `distribution_targets`: module registries never served one (the
+    // `/v1/compatibility` endpoint did not exist). Signed distributions come
+    // from the Fenrir Depot (`install distribution <product>-<version>`).
 }
 
 #[derive(Debug, thiserror::Error)]

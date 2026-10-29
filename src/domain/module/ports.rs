@@ -32,10 +32,17 @@ pub trait ModuleRegistryPort: Send + Sync {
         manifest: &ModuleManifest,
         progress: Option<ProgressCallback>,
     ) -> Result<ModuleBundle, ModuleRegistryError>;
+    /// The newest compatible version of every module this source holds
+    /// for `fenrir_version`. Only offline sources know such a set (the
+    /// dev flow of `install distribution` without arguments); the default
+    /// is empty. Signed distributions come from the Fenrir Depot.
     async fn distribution_targets(
         &self,
         fenrir_version: &str,
-    ) -> Result<Vec<DistributionTarget>, ModuleRegistryError>;
+    ) -> Result<Vec<DistributionTarget>, ModuleRegistryError> {
+        let _ = fenrir_version;
+        Ok(Vec::new())
+    }
 }
 
 #[async_trait]

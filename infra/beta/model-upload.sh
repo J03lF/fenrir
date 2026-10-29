@@ -45,7 +45,7 @@ log "verifying $family/$version locally"
 
 remote="$DEPLOY_UPLOAD_ROOT/model-$family-$version"
 ssh -o BatchMode=yes -- "$DEPLOY_HOST" "mkdir -p -m 0700 -- '$remote'"
-rsync -a --partial --info=progress2 -e "ssh -o BatchMode=yes" -- "$pkg"/ "$DEPLOY_HOST:$remote/"
+rsync -a --partial --progress -e "ssh -o BatchMode=yes" -- "$pkg"/ "$DEPLOY_HOST:$remote/"
 # shellcheck disable=SC2029 # the arguments are meant to expand here
 ssh -t -- "$DEPLOY_HOST" "set -e
 cd '$remote' && sha256sum --check --strict --quiet SHA256SUMS

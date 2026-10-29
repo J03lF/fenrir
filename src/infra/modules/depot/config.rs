@@ -14,9 +14,9 @@
 
 use std::str::FromStr;
 
+use depot_protocol::ModuleVersion as DepotVersion;
 use depot_protocol::{Channel, Platform, PublicKey, TrustedKeys};
 use reqwest::Url;
-use semver::Version;
 
 use crate::services::depot::{DepotError, HostPolicy};
 
@@ -194,7 +194,7 @@ impl DepotSettings {
     }
 
     /// The checks of this host, with `fenrir` = its own version.
-    pub fn policy(&self, fenrir: Version) -> HostPolicy {
+    pub fn policy(&self, fenrir: DepotVersion) -> HostPolicy {
         HostPolicy {
             trusted: TrustedKeys::new(self.trusted_keys.clone()),
             channel: self.channel,

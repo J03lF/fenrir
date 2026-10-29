@@ -44,7 +44,7 @@ env:
   # fenrir-depot revision (private repo; Cargo.toml path-patches
   # depot-protocol to ../fenrir-depot). Cargo resolves that patch even with
   # the `depot` feature off, so every build needs the checkout.
-  DEPOT_SHA: c80f98860eb8cda9f1f94b1f7d11cbc040f7d775
+  DEPOT_SHA: 99b5e3267246513b68fdb12596481c301e703e7c
   PLATFORM: linux-x86_64
   TARGET_TRIPLE: x86_64-unknown-linux-gnu
 

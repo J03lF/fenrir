@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use semver::Version;
+use depot_protocol::ModuleVersion as DepotVersion;
 
 use super::ports::HostModule;
 use super::state::{BackupRecord, HostState};
@@ -94,9 +94,9 @@ impl Restart {
 pub struct PlanEntry {
     pub module: String,
     pub rule: Option<String>,
-    pub installed: Option<Version>,
+    pub installed: Option<DepotVersion>,
     /// What runs afterwards (`None` for a removal).
-    pub target: Option<Version>,
+    pub target: Option<DepotVersion>,
     /// Bundle size of a change from the depot.
     pub size: Option<u64>,
     pub action: Action,
@@ -248,7 +248,7 @@ pub fn plan_distribution(
 /// The signed set was checked as a whole already; this only catches what
 /// the host changes about it (pins, local sync, optional modules left out).
 fn effective_requirements(entries: &[PlanEntry]) -> Vec<String> {
-    let runs: BTreeMap<&str, (&Version, &Action)> = entries
+    let runs: BTreeMap<&str, (&DepotVersion, &Action)> = entries
         .iter()
         .filter_map(|entry| {
             entry

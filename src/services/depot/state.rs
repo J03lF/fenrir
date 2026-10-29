@@ -12,7 +12,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use semver::Version;
+use depot_protocol::ModuleVersion as DepotVersion;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::module::ModuleManifest;
@@ -28,7 +28,7 @@ pub const BACKUP_FILE: &str = "backup.json";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModuleRecord {
-    pub version: Version,
+    pub version: DepotVersion,
     pub sha256: String,
     pub size: u64,
     /// The included distribution it came from, if not the product itself.
@@ -59,7 +59,7 @@ pub struct InstalledDistribution {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModuleOverride {
-    pub version: Version,
+    pub version: DepotVersion,
     pub sha256: String,
     pub size: u64,
     /// The verified distribution whose signed manifest vouches for it.
@@ -79,7 +79,7 @@ pub struct HostState {
     pub backup: Option<String>,
     /// Modules `install distribution` keeps exactly as installed.
     #[serde(default)]
-    pub pins: BTreeMap<String, Version>,
+    pub pins: BTreeMap<String, DepotVersion>,
     #[serde(default)]
     pub overrides: BTreeMap<String, ModuleOverride>,
 }
@@ -109,7 +109,7 @@ pub struct BackupModule {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BackedUpModule {
-    pub version: Version,
+    pub version: DepotVersion,
     /// File name inside the backup directory.
     pub archive: String,
     /// SHA-256 of that archive (checked before a restore).

@@ -14,6 +14,7 @@ use crate::infra::db::migrations::{
 use crate::services::{DbShellService, ModuleService};
 
 use super::ports::{HostModule, ModuleHost};
+use super::versions;
 
 pub struct ModuleServiceHost {
     service: Arc<ModuleService>,
@@ -86,11 +87,12 @@ impl ModuleHost for ModuleServiceHost {
                     .map(|info| info.status),
                 Ok(ModuleRuntimeStatus::Running)
             );
+            let local_sync = module.source.is_synchronized() || dev.contains(id.as_str());
             modules.push(HostModule {
                 name: id.to_string(),
-                version: module.manifest.version.clone(),
+                version: versions::installed(id.as_str(), &module.manifest.version, local_sync)?,
                 sha256: module.manifest.artifact.checksum.hash.clone(),
-                local_sync: module.source.is_synchronized() || dev.contains(id.as_str()),
+                local_sync,
                 running,
                 instances,
                 migrations: installed_migrations(Path::new(&module.path)),

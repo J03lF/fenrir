@@ -28,6 +28,7 @@ use super::verify::{
     select_distribution, select_module, DistributionRequest, HostPolicy, ModuleCandidate,
     VerifiedDistribution,
 };
+use super::versions;
 
 /// Progress lines for the operator.
 pub type Progress<'a> = &'a (dyn Fn(String) + Send + Sync);
@@ -320,7 +321,9 @@ fn module_manifest(
 ) -> Result<ModuleManifest, DepotError> {
     let mut manifest = match own {
         Some(manifest) => {
-            if manifest.id != target.name || manifest.version != target.version {
+            let same_version = versions::from_manifest(&manifest.version)
+                .is_ok_and(|version| version == target.version);
+            if manifest.id != target.name || !same_version {
                 return Err(DepotError::Bundle(format!(
                     "the bundle's own manifest says {} {}, the signed distribution {} {}",
                     manifest.id, manifest.version, target.name, target.version
@@ -330,7 +333,7 @@ fn module_manifest(
         }
         None => ModuleManifest {
             id: target.name.clone(),
-            version: target.version.clone(),
+            version: versions::to_manifest(&target.version)?,
             title: None,
             description: None,
             fenrir_version: None,
@@ -541,7 +544,8 @@ pub async fn execute(
                     let bytes =
                         fs::read(&path).map_err(|err| DepotError::io(path.display(), err))?;
                     Some(BackedUpModule {
-                        version: manifest.version.clone(),
+                        version: versions::installed(&entry.module, &manifest.version, false)
+                            .map_err(DepotError::Refused)?,
                         archive,
                         archive_sha256: Sha256Digest::of(&bytes).to_hex(),
                         manifest,

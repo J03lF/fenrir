@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use depot_protocol::rule::VersionPattern;
+use depot_protocol::ModuleVersion as DepotVersion;
 use depot_protocol::{Channel, Name};
-use semver::Version;
 use tokio::runtime::{Handle, Runtime};
 
 use crate::audit::{AuditEvent, AuditMetadata, AuditOutcome};
@@ -71,7 +71,7 @@ fn build_env(deps: &CliDependencies) -> Result<Option<Arc<Env>>, DepotError> {
         .services
         .module_service()
         .ok_or_else(|| DepotError::Config("the module service is not available".to_string()))?;
-    let fenrir = Version::parse(&deps.config.app.version).map_err(|err| {
+    let fenrir = DepotVersion::parse(&deps.config.app.version).map_err(|err| {
         DepotError::Config(format!(
             "app.version `{}` is not a version: {err}",
             deps.config.app.version
@@ -625,7 +625,7 @@ pub(crate) fn pin(
         writeln!(out, "{}", msg::usage::PIN)?;
         return Ok(CommandOutcome::Continue);
     };
-    let Ok(version) = Version::parse(version) else {
+    let Ok(version) = DepotVersion::parse(version) else {
         writeln!(out, "`{version}` is not a version")?;
         writeln!(out, "{}", msg::usage::PIN)?;
         return Ok(CommandOutcome::Continue);

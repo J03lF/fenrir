@@ -12,10 +12,10 @@ use depot_protocol::manifest::FENRIR_PRODUCT;
 use depot_protocol::resolve::check_requirements_for_host;
 use depot_protocol::rule::VersionPattern;
 use depot_protocol::verify::{check_distribution, check_include, CheckedDistribution};
+use depot_protocol::ModuleVersion as DepotVersion;
 use depot_protocol::{
     Channel, DistributionId, Name, Platform, Requires, Rule, Sha256Digest, TrustedKeys,
 };
-use semver::Version;
 
 use super::error::DepotError;
 use super::ports::DepotSource;
@@ -29,7 +29,7 @@ pub struct HostPolicy {
     pub channel: Channel,
     pub platform: Platform,
     /// The Fenrir version that runs here (`app.version`).
-    pub fenrir: Version,
+    pub fenrir: DepotVersion,
 }
 
 /// A distribution and everything it includes, all verified.
@@ -46,7 +46,7 @@ pub struct VerifiedDistribution {
 pub struct TargetModule {
     pub name: String,
     pub rule: String,
-    pub version: Version,
+    pub version: DepotVersion,
     pub platform: String,
     pub sha256: Sha256Digest,
     pub size: u64,
@@ -319,59 +319,76 @@ pub async fn select_distribution(
             }
         }
         DistributionRequest::Range { product, rule } => {
-            let mut candidates: Vec<Version> = source
-                .distributions(product)
+            newest_installable(source, policy, product, |version| rule.matches(version))
                 .await?
-                .into_iter()
-                .filter(|summary| &summary.product == product && rule.matches(&summary.version))
-                .map(|summary| summary.version)
-                .collect();
-            candidates.sort();
-            candidates.dedup();
-            let mut skipped = Vec::new();
-            for version in candidates.into_iter().rev() {
-                let id = DistributionId::new(product.clone(), version);
-                let distribution = fetch_verified(source, &policy.trusted, &id).await?;
-                let problems = host_problems(&distribution, policy);
-                if problems.is_empty() {
-                    return Ok(Selection {
-                        distribution,
-                        skipped,
-                    });
-                }
-                skipped.push(format!("{id}: {}", problems.join("; ")));
-            }
-            if skipped.is_empty() {
-                Err(DepotError::NotFound(format!(
-                    "no distribution of {product} matches `{rule}`"
-                )))
-            } else {
-                Err(DepotError::Refused(format!(
+                .map_err(|skipped| {
+                    if skipped.is_empty() {
+                        DepotError::NotFound(format!(
+                            "no distribution of {product} matches `{rule}`"
+                        ))
+                    } else {
+                        DepotError::Refused(format!(
                     "no distribution of {product} matching `{rule}` can be installed here:\n  {}",
                     skipped.join("\n  ")
-                )))
-            }
+                ))
+                    }
+                })
         }
     }
 }
 
+/// The newest distribution of `product` whose version passes `wanted` and
+/// that this host may install, newest first by build-number order. `Err`
+/// carries why each candidate was skipped (empty: no candidate at all).
+async fn newest_installable(
+    source: &dyn DepotSource,
+    policy: &HostPolicy,
+    product: &Name,
+    wanted: impl Fn(&DepotVersion) -> bool,
+) -> Result<Result<Selection, Vec<String>>, DepotError> {
+    let mut candidates: Vec<DepotVersion> = source
+        .distributions(product)
+        .await?
+        .into_iter()
+        .filter(|summary| &summary.product == product && wanted(&summary.version))
+        .map(|summary| summary.version)
+        .collect();
+    candidates.sort();
+    candidates.dedup();
+    let mut skipped = Vec::new();
+    for version in candidates.into_iter().rev() {
+        let id = DistributionId::new(product.clone(), version);
+        let distribution = fetch_verified(source, &policy.trusted, &id).await?;
+        let problems = host_problems(&distribution, policy);
+        if problems.is_empty() {
+            return Ok(Ok(Selection {
+                distribution,
+                skipped,
+            }));
+        }
+        skipped.push(format!("{id}: {}", problems.join("; ")));
+    }
+    Ok(Err(skipped))
+}
+
 /// The newest distribution of the same product above `current` that this
-/// host may install (for `status distribution`).
+/// host may install (for `status distribution`). "Above" is the
+/// build-number order of [`DepotVersion`]: `athenos-0.13.0-2` is newer than
+/// `athenos-0.13.0-1`. (A rule `>0.13.0-1` would say the same, but `>0.13.0`
+/// matches on the core and would miss every `0.13.0-N`, so this compares
+/// the versions directly.)
 pub async fn newer_distribution(
     source: &dyn DepotSource,
     policy: &HostPolicy,
     current: &DistributionId,
 ) -> Result<Option<VerifiedDistribution>, DepotError> {
-    let rule: Rule = format!(">{}", current.version)
-        .parse()
-        .map_err(|err| DepotError::Protocol(format!("{err}")))?;
-    let request = DistributionRequest::Range {
-        product: current.product.clone(),
-        rule,
-    };
-    match select_distribution(source, policy, &request).await {
-        Ok(selection) => Ok(Some(selection.distribution)),
-        Err(DepotError::NotFound(_) | DepotError::Refused(_)) => Ok(None),
+    let found = newest_installable(source, policy, &current.product, |version| {
+        version > &current.version
+    })
+    .await;
+    match found {
+        Ok(Ok(selection)) => Ok(Some(selection.distribution)),
+        Ok(Err(_)) | Err(DepotError::NotFound(_) | DepotError::Refused(_)) => Ok(None),
         Err(err) => Err(err),
     }
 }

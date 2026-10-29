@@ -7,8 +7,8 @@ use std::path::Path;
 
 use async_trait::async_trait;
 use depot_protocol::api::{DistributionDetail, DistributionSummary, ModuleInfo, SearchResponse};
+use depot_protocol::ModuleVersion as DepotVersion;
 use depot_protocol::{DistributionId, Name, Sha256Digest};
-use semver::Version;
 
 use crate::domain::module::{ModuleBundle, ModuleManifest};
 
@@ -44,7 +44,7 @@ pub trait DepotSource: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostModule {
     pub name: String,
-    pub version: Version,
+    pub version: DepotVersion,
     /// SHA-256 recorded at install (the bundle's digest for depot installs).
     pub sha256: String,
     /// Synchronized from local sources (`synchronize module`) or a dev

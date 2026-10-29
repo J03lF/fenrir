@@ -29,6 +29,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use depot_protocol::ModuleVersion as DepotVersion;
 use fenrir::config::ModuleStorageSection;
 use fenrir::domain::module::{
     ModuleBundle, ModuleId, ModuleInstallSource, ModuleManifest, ModuleStoragePort,
@@ -44,7 +45,6 @@ use fenrir::services::depot::{
 };
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use semver::Version;
 
 fn quiet(_: String) {}
 
@@ -144,7 +144,7 @@ impl DepotWorld {
             .unwrap();
             rules.push_str(&format!(
                 "{module} = \"{}.*\"\n",
-                Version::parse(module_version).unwrap().major
+                DepotVersion::parse(module_version).unwrap().major
             ));
         }
         let rules_path = dir.join("rules.depot.toml");
@@ -376,7 +376,7 @@ impl ModuleHost for StorageHost {
                 let is_running = running.contains(&module.manifest.id);
                 HostModule {
                     name: module.manifest.id.clone(),
-                    version: module.manifest.version.clone(),
+                    version: DepotVersion::parse(&module.manifest.version.to_string()).unwrap(),
                     sha256: module.manifest.artifact.checksum.hash.clone(),
                     local_sync: module.source.is_synchronized(),
                     running: is_running,
@@ -546,7 +546,7 @@ async fn the_host_installs_upgrades_pins_hotfixes_and_rolls_back_from_a_real_dep
     let modules_dir = work.path().join("modules");
     let host = StorageHost::new(&modules_dir);
     let store = StateStore::new(modules_dir.join("runtime/depot"));
-    let policy = settings.policy(Version::new(0, 13, 0));
+    let policy = settings.policy(DepotVersion::new(0, 13, 0, 0));
     let depot = Depot {
         source: &client,
         host: &host,
@@ -614,7 +614,7 @@ async fn the_host_installs_upgrades_pins_hotfixes_and_rolls_back_from_a_real_dep
     update_state(&store, |state| {
         state
             .pins
-            .insert("athenos-web".to_string(), Version::new(1, 1, 0));
+            .insert("athenos-web".to_string(), DepotVersion::new(1, 1, 0, 0));
         Ok(())
     })
     .unwrap();

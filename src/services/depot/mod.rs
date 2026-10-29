@@ -18,6 +18,7 @@ pub mod plan;
 pub mod ports;
 pub mod state;
 pub mod verify;
+pub mod versions;
 
 pub use error::DepotError;
 pub use host::ModuleServiceHost;

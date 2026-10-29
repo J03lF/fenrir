@@ -17,13 +17,13 @@ use depot_protocol::api::{
 use depot_protocol::manifest::{ModuleRequirement, MANIFEST_FORMAT};
 use depot_protocol::rule::VersionPattern;
 use depot_protocol::statement::DistributionRef;
+use depot_protocol::ModuleVersion as DepotVersion;
 use depot_protocol::{
     Channel, DistributionId, Manifest, ManifestInclude, ManifestModule, Name, Requires, Rule,
     SecretKey, Sha256Digest, Statement, StatementAction, Timestamp, TrustedKeys,
 };
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use semver::Version;
 
 use super::blob::{BlobCache, BlobWriter};
 use super::bundle;
@@ -42,8 +42,8 @@ use crate::domain::module::{
 
 // ─── fixtures ────────────────────────────────────────────────────────────
 
-fn v(text: &str) -> Version {
-    Version::parse(text).unwrap()
+fn v(text: &str) -> DepotVersion {
+    DepotVersion::parse(text).unwrap()
 }
 
 fn name(text: &str) -> Name {
@@ -57,7 +57,7 @@ fn at() -> Timestamp {
 fn module_manifest(module: &str, version: &str) -> ModuleManifest {
     ModuleManifest {
         id: module.to_string(),
-        version: v(version),
+        version: semver::Version::parse(version).unwrap(),
         title: Some(format!("{module} title")),
         description: None,
         fenrir_version: None,
@@ -381,7 +381,7 @@ impl DepotSource for FakeDepot {
 
 #[derive(Debug, Clone)]
 struct FakeModule {
-    version: Version,
+    version: DepotVersion,
     sha256: String,
     running: bool,
     instances: usize,
@@ -484,7 +484,7 @@ impl ModuleHost for FakeHost {
         modules.insert(
             module,
             FakeModule {
-                version: bundle.manifest.version.clone(),
+                version: DepotVersion::parse(&bundle.manifest.version.to_string()).unwrap(),
                 sha256: bundle.manifest.artifact.checksum.hash.clone(),
                 running,
                 instances,
@@ -1383,6 +1383,171 @@ fn the_state_file_round_trips_and_refuses_another_format() {
     )
     .unwrap();
     assert!(store.load().is_err());
+}
+
+/// A state file written before build numbers (D4: versions were
+/// `semver::Version`, stored as strings) still loads, and so do builds.
+#[test]
+fn a_state_file_from_before_build_numbers_still_loads() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = StateStore::new(dir.path());
+    std::fs::create_dir_all(dir.path()).unwrap();
+    std::fs::write(
+        store.state_path(),
+        br#"{
+  "format": "fenrir/depot-state/v1",
+  "current": {
+    "id": "athenos-0.12.5",
+    "manifest_sha256": "aa",
+    "channel": "stable",
+    "key_id": "ed25519:bb",
+    "installed_at": "2026-10-20T10:00:00Z",
+    "modules": {
+      "athenos": {"version": "0.12.5", "sha256": "cc", "size": 10},
+      "athenos-web": {"version": "0.12.2", "sha256": "dd", "size": 20, "via": "athenos-web-0.12.2"},
+      "athenos-api": {"version": "0.1.0-18", "sha256": "ee", "size": 30}
+    }
+  },
+  "previous": null,
+  "backup": "20261020-100000",
+  "pins": {"athenos-web": "0.12.2"},
+  "overrides": {
+    "notification-service": {
+      "version": "7.0.2", "sha256": "ff", "size": 1,
+      "from": "athenos-0.12.6", "installed_at": "2026-10-21T10:00:00Z"
+    }
+  }
+}"#,
+    )
+    .unwrap();
+    let state = store.load().unwrap();
+    let current = state.current.as_ref().unwrap();
+    assert_eq!(current.modules["athenos"].version, v("0.12.5"));
+    assert_eq!(current.modules["athenos-api"].version, v("0.1.0-18"));
+    assert_eq!(state.pins["athenos-web"], v("0.12.2"));
+    assert_eq!(state.overrides["notification-service"].version, v("7.0.2"));
+    // Written back unchanged, builds as `X.Y.Z-N`.
+    let mut next = state.clone();
+    next.pins.insert("athenos".to_string(), v("0.13.0-2"));
+    store.save(&next).unwrap();
+    let text = std::fs::read_to_string(store.state_path()).unwrap();
+    assert!(text.contains(r#""athenos": "0.13.0-2""#), "{text}");
+    assert!(text.contains(r#""version": "0.12.5""#), "{text}");
+    assert_eq!(store.load().unwrap(), next);
+}
+
+// ─── build numbers (X.Y.Z-N from release.sh) ────────────────────────────
+
+#[test]
+fn builds_of_the_same_core_are_updates_and_downgrades() {
+    let targets = vec![
+        target("athenos", "0.13.0-2", "a2"),
+        target("athenos-api", "0.13.0-1", "api1"),
+        target("athenos-web", "0.13.0", "web0"),
+        target("auth-service", "0.13.0-10", "auth10"),
+    ];
+    let host = vec![
+        installed("athenos", "0.13.0-1", "a1", true, 1),
+        installed("athenos-api", "0.13.0", "api0", true, 1),
+        installed("athenos-web", "0.13.0-1", "web1", true, 1),
+        installed("auth-service", "0.13.0-9", "auth9", true, 1),
+    ];
+    let plan = plan_distribution("athenos-0.13.0-2", &targets, &host, &HostState::default());
+    let row = |m: &str| plan.entries.iter().find(|e| e.module == m).unwrap().clone();
+    assert_eq!(row("athenos").action, Action::Update);
+    assert_eq!(row("athenos-api").action, Action::Update, "build 0 → 1");
+    assert_eq!(row("athenos-web").action, Action::Downgrade, "build 1 → 0");
+    assert_eq!(
+        row("auth-service").action,
+        Action::Update,
+        "9 → 10 numerically"
+    );
+
+    // A pin names one build; another build of the same core is not it.
+    let mut state = HostState::default();
+    state.pins.insert("athenos".to_string(), v("0.13.0-1"));
+    let plan = plan_distribution("athenos-0.13.0-2", &targets, &host, &state);
+    let athenos = plan.entries.iter().find(|e| e.module == "athenos").unwrap();
+    assert_eq!(athenos.action, Action::Pinned);
+    assert_eq!(athenos.target, Some(v("0.13.0-1")));
+    assert_eq!(athenos.note.as_deref(), Some("distribution has 0.13.0-2"));
+    let plan = plan_module(&targets[0], &host, &state);
+    assert_eq!(
+        plan.problems,
+        vec!["athenos is pinned at 0.13.0-1; `unpin module athenos` first"]
+    );
+}
+
+#[tokio::test]
+async fn ranges_status_and_install_module_see_every_build() {
+    let mut world = World::new(FakeHost::default());
+    // The host itself runs a build-numbered Fenrir; the modules' usual
+    // fenrir range must accept it.
+    world.policy.fenrir = v("0.13.0-1");
+    let any_host = |module: &str, version: &str| {
+        built(
+            module,
+            version,
+            &[],
+            Requires {
+                fenrir: Some(">=0.1.0, <99.99.99".parse().unwrap()),
+                modules: Vec::new(),
+            },
+        )
+    };
+    let a1 = any_host("athenos", "0.13.0-1");
+    let a2 = any_host("athenos", "0.13.0-2");
+    let a10 = any_host("athenos", "0.13.0-10");
+    world.release("athenos", "0.13.0-1", Channel::Stable, &[&a1]);
+    world.release("athenos", "0.13.0-2", Channel::Stable, &[&a2]);
+    world.release("athenos", "0.13.0-10", Channel::Stable, &[&a10]);
+    let depot = world.depot();
+
+    // `install distribution athenos 0.13.*`: the newest build, numerically.
+    let prepared = prepare_distribution(&depot, &range("athenos", "0.13.*"), &quiet)
+        .await
+        .unwrap();
+    assert_eq!(prepared.plan.title, "athenos-0.13.0-10");
+    let prepared = prepare_distribution(&depot, &range("athenos", "=0.13.0-2"), &quiet)
+        .await
+        .unwrap();
+    assert_eq!(prepared.plan.title, "athenos-0.13.0-2");
+
+    // `status distribution`: a newer build of the same core is newer.
+    let newer = |current: &str| {
+        let current: DistributionId = current.parse().unwrap();
+        let world = &world;
+        async move {
+            newer_distribution(&world.depot, &world.policy, &current)
+                .await
+                .unwrap()
+                .map(|newer| newer.id().to_string())
+        }
+    };
+    assert_eq!(
+        newer("athenos-0.13.0").await.as_deref(),
+        Some("athenos-0.13.0-10")
+    );
+    assert_eq!(
+        newer("athenos-0.13.0-2").await.as_deref(),
+        Some("athenos-0.13.0-10")
+    );
+    assert_eq!(newer("athenos-0.13.0-10").await, None);
+
+    // `install module athenos 0.13`: every build of the prefix counts.
+    let prepared = prepare_module(
+        &depot,
+        &name("athenos"),
+        &"0.13".parse::<VersionPattern>().unwrap(),
+        &quiet,
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(&prepared.intent, Intent::Module { candidate } if candidate.module.version == v("0.13.0-10")),
+        "{}",
+        prepared.plan.title
+    );
 }
 
 #[test]

@@ -5,16 +5,16 @@ use std::collections::BTreeMap;
 
 use depot_protocol::manifest::MANIFEST_FORMAT;
 use depot_protocol::verify::CheckedDistribution;
+use depot_protocol::ModuleVersion as DepotVersion;
 use depot_protocol::{Channel, Manifest, Sha256Digest, Timestamp, TrustedKeys};
-use semver::Version;
 
 use super::*;
 use crate::services::depot::plan::{Action, Plan, PlanEntry};
 use crate::services::depot::state::{InstalledDistribution, ModuleOverride, ModuleRecord};
 use crate::services::depot::verify::VerifiedDistribution;
 
-fn v(text: &str) -> Version {
-    Version::parse(text).unwrap()
+fn v(text: &str) -> DepotVersion {
+    DepotVersion::parse(text).unwrap()
 }
 
 fn policy() -> HostPolicy {

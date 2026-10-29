@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Static checks of infra/beta (no server needed):
+# Static checks of infra/beta and infra/release (no server needed):
 #   bash -n for every script, TOML parse of config/beta.toml, the env
 #   templates hold no secret values, `caddy validate` when caddy is on PATH
 #   (or CADDY=/path/to/caddy), with the server files (log dir, Cloudflare
-#   snippet, origin certificate) replaced by temporary stand-ins.
+#   snippet, origin certificate) replaced by temporary stand-ins; the
+#   release.sh sandbox test and the workflow lint (infra/release/tests).
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
@@ -83,6 +84,18 @@ bash "$here/tests/maintenance-test.sh" >"${TMPDIR:-/tmp}/maintenance-test.$$.log
 	err "maintenance: $(grep FAIL "${TMPDIR:-/tmp}/maintenance-test.$$.log" | head -n 5)"
 tail -n 1 "${TMPDIR:-/tmp}/maintenance-test.$$.log"
 rm -f "${TMPDIR:-/tmp}/maintenance-test.$$.log"
+
+# release.sh against fixture repositories with local bare remotes (no
+# network), and the workflow lint of this repository (only release.yml,
+# tag-triggered, minimal permissions, actions pinned by SHA).
+release_dir="$here/../release"
+while IFS= read -r f; do
+	bash -n "$f" || err "bash -n $f"
+done < <(find "$release_dir" -type f -name '*.sh' | LC_ALL=C sort)
+bash "$release_dir/tests/release-test.sh" >"${TMPDIR:-/tmp}/release-test.$$.log" 2>&1 ||
+	err "release: $(grep FAIL "${TMPDIR:-/tmp}/release-test.$$.log" | head -n 5)"
+tail -n 1 "${TMPDIR:-/tmp}/release-test.$$.log"
+rm -f "${TMPDIR:-/tmp}/release-test.$$.log"
 
 # The maintenance page: no request to another origin, nothing inline that
 # the page's CSP (script-src/style-src 'self') would block.

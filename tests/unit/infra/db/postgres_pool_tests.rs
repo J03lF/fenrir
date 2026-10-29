@@ -422,11 +422,12 @@ async fn modules_and_roles_never_share_connections() {
         .unwrap();
     let base: tokio_postgres::Config = uri.parse().unwrap();
     let user = base.get_user().unwrap().to_string();
-    let other_uri = uri.replacen(&user, &role, 1).replacen(
-        &String::from_utf8_lossy(base.get_password().unwrap()).to_string(),
-        &password,
-        1,
-    );
+    // The same server as the new role. tokio-postgres applies `user` and
+    // `password` query parameters after the URI's authority, so this works
+    // with and without a password in the test URI (CI's service runs with
+    // trust auth and has none).
+    let separator = if uri.contains('?') { '&' } else { '?' };
+    let other_uri = format!("{uri}{separator}user={role}&password={password}");
     let other = adapter_with(&other_uri, PoolSettings::default());
     let ctx = reader("module:a::core");
     assert_eq!(value(&other, &ctx, "SELECT current_user::text").await, role);
